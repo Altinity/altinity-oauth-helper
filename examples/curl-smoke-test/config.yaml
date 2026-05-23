@@ -1,0 +1,31 @@
+# Minimal ch-jwt-verify config for the local smoke test in verify.sh.
+#
+# Fill in `oauth.issuer` + `oauth.audience` with your IdP's values. JWKSURL
+# is optional — if unset, the sidecar discovers it from issuer's
+# /.well-known/openid-configuration on first /verify.
+listen:
+  tcp: "127.0.0.1:9999"
+
+oauth:
+  issuer: "https://YOUR-TENANT.auth0.com/"
+  audience: "https://your-resource.example.com/"
+  # Optional pin to avoid the OIDC discovery hop on cold start:
+  # jwks_url: "https://YOUR-TENANT.auth0.com/.well-known/jwks.json"
+  required_scopes: []
+  jwks_cache_ttl: 5m
+
+identity:
+  username_claim: email
+  match_mode: lowercase_equal
+  require_email_verified: true
+  # allowed_email_domains: ["example.com"]
+
+# Optional: map OAuth scopes onto ClickHouse session settings the sidecar
+# returns in the /verify response (CH applies them for the query only).
+# settings_from_scope:
+#   "mcp:read":
+#     readonly: "1"
+
+cache:
+  positive_ttl: 30s
+  negative_ttl: 5m

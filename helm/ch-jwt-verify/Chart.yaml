@@ -1,0 +1,19 @@
+apiVersion: v2
+name: ch-jwt-verify
+description: |
+  ClickHouse-side JWT verifier sidecar.
+
+  Deploy as a colocated container in each ClickHouse pod (StatefulSet or
+  Deployment), reachable over loopback (127.0.0.1) or a shared Unix socket.
+  Callers route per-query OAuth bearers via `Authorization: Basic
+  base64(email:JWT)` and ClickHouse's <http_authentication> handler invokes
+  the sidecar to validate them. The sidecar is the only cryptographic gate.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/altinity/altinity-oauth-helper
+sources:
+  - https://github.com/altinity/altinity-oauth-helper
+maintainers:
+  - name: Altinity
+    url: https://altinity.com

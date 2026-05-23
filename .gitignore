@@ -1,0 +1,16 @@
+# Built binaries
+/ch-jwt-verify
+/cmd/ch-jwt-verify/ch-jwt-verify
+
+# Test/coverage outputs
+*.test
+*.out
+coverage.txt
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local secrets (mirrors examples/superset-otel/superset-secrets.yaml.example)
+examples/*/superset-secrets.yaml

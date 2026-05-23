@@ -1,0 +1,446 @@
+# superset-otel — Superset → ClickHouse via the same ch-jwt-verify sidecar
+# that gates otel-mcp (see altinity-mcp PR #128 and ../otel/README.md).
+#
+# Chart: apache/superset 0.15.5 (appVersion 5.0.0). Pulled from the
+# apache/superset Git repo's helm/superset/ subtree — chart isn't
+# re-published anywhere we can reach from the sandbox, so we point helm
+# at the local checkout.
+#
+# Wire format:
+#   browser → Superset  (FAB OAuth via Auth0, audience=https://otel-mcp.demo.altinity.cloud/)
+#   Superset → ClickHouse  Authorization: Basic base64(email:<JWT>)
+#   ClickHouse → ch-jwt-verify sidecar /verify  (loopback, JWKS validation)
+#
+# Source overlay: /Users/Workspaces/altinity/superset-jwt-overlay/
+#   - Dockerfile: apache/superset:5.0.0 + clickhouse-connect.
+#   - jwt_security_manager.py: NOT shipped in image (chart's Secret mount
+#     at /app/pythonpath/ overlays the dir). The SecurityManager subclass
+#     is defined inline in configOverrides.20_security_manager below.
+#
+# Required secrets (kept out of git — `-f superset-secrets.yaml` at deploy
+# time, see README.md):
+#   extraSecretEnv.SUPERSET_SECRET_KEY    Flask session cookie signing.
+#   extraSecretEnv.AUTH0_CLIENT_ID        Auth0 "Regular Web App" client id.
+#   extraSecretEnv.AUTH0_CLIENT_SECRET    same app's secret.
+
+image:
+  repository: ghcr.io/altinity/superset-jwt-overlay
+  tag: otel-d62f314-arm64    # bump after each `scripts/build-superset-image.sh` run
+  pullPolicy: IfNotPresent
+
+# ghcr.io is currently private for this image; reuse the same pull secret
+# pattern as the otel-mcp deploy (ghcr-pull-secret in `demo` ns).
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+# Behind the demo edge-proxy: ClusterIP + annotation-driven TLS terminator.
+# Mirrors otel-mcp/grafana-mcp service shape (see $MCP_DEPLOY_DIR/otel/mcp-values.yaml).
+service:
+  type: ClusterIP
+  port: 8088
+  annotations:
+    edge-proxy.altinity.com/port-mapping: "443:tls-to-tcp:8088"
+    edge-proxy.altinity.com/tls-server-name: superset.demo.altinity.cloud
+
+ingress:
+  enabled: false             # edge-proxy handles ingress, not k8s Ingress
+
+# Disable the dependency chart's redis (we don't need Celery / async queries
+# for the demo). Postgres stays for Superset's own metadata.
+redis:
+  enabled: false
+
+postgresql:
+  enabled: true
+  auth:
+    username: superset
+    password: superset      # override via existingSecret in production
+    database: superset
+
+supersetCeleryBeat:
+  enabled: false
+supersetCeleryFlower:
+  enabled: false
+supersetWebsockets:
+  enabled: false
+# Worker is celery-based; without redis it can't run. The chart doesn't
+# gate the worker Deployment on a top-level `enabled` flag — it always
+# renders. Scale to zero (replicas.enabled=true + replicaCount=0) and drop
+# the wait-for-redis init container so the empty Deployment stays clean.
+supersetWorker:
+  replicas:
+    enabled: true
+    replicaCount: 0
+  initContainers: []
+
+supersetNode:
+  replicas:
+    enabled: true
+    replicaCount: 1
+  # The chart's redis_host default templates `{{ .Release.Name }}-redis-headless`;
+  # with redis disabled, force the env vars to empty so the bootstrap doesn't
+  # spend time DNS-resolving a nonexistent service.
+  connections:
+    redis_host: ""
+    redis_port: ""
+
+# Roles & secrets must come from k8s Secret references — superset_config.py
+# reads them by os.environ[...]. SUPERSET_SECRET_KEY / AUTH0_* are required.
+extraSecretEnv:
+  SUPERSET_SECRET_KEY: "REPLACE_ME_openssl_rand_base64_42"
+  AUTH0_CLIENT_ID: "REPLACE_ME"
+  AUTH0_CLIENT_SECRET: "REPLACE_ME"
+
+extraEnv:
+  AUTH0_DOMAIN: "altinity.auth0.com"
+  AUTH0_AUDIENCE: "https://otel-mcp.demo.altinity.cloud/"
+  SUPERSET_LOG_LEVEL: "INFO"
+  # Gunicorn default is FORWARDED_ALLOW_IPS=127.0.0.1, which drops the
+  # edge-proxy's X-Forwarded-Proto: https before Flask's ProxyFix sees it.
+  # The pod is only reachable in-cluster via the ClusterIP, so trusting *
+  # is safe (no external spoofing surface).
+  FORWARDED_ALLOW_IPS: "*"
+
+# The chart renders configOverrides into /app/pythonpath/superset_config.py
+# (Secret-backed, mounted over the Dockerfile's PYTHONPATH dir). Snippets
+# are joined in lexical key order.
+configOverrides:
+  # 00_imports & secret key: must precede everything else (env-derived).
+  00_base: |
+    import logging
+    import os
+    import time
+    from flask import g, session
+    from flask_appbuilder.security.manager import AUTH_OAUTH
+    from sqlalchemy.engine.url import URL
+    from superset.security import SupersetSecurityManager
+
+    SECRET_KEY = os.environ["SUPERSET_SECRET_KEY"]
+    _jwt_log = logging.getLogger("superset.jwt_overlay")
+
+  # 10_oauth_auth0: AUTH_TYPE + OAUTH_PROVIDERS for Auth0 with audience.
+  10_oauth_auth0: |
+    AUTH_TYPE = AUTH_OAUTH
+    AUTH_USER_REGISTRATION = True
+    # Demo: every OAuth user gets Admin so they can register databases /
+    # run SQL Lab without a manual promotion step. For prod, set this to
+    # `Gamma` and use AUTH_ROLES_MAPPING with an Auth0-side group claim.
+    AUTH_USER_REGISTRATION_ROLE = os.environ.get(
+        "AUTH_USER_REGISTRATION_ROLE", "Admin"
+    )
+    # AUTH_ROLES_SYNC_AT_LOGIN=True would re-overwrite the user's roles
+    # to AUTH_USER_REGISTRATION_ROLE on every login (because we don't have
+    # AUTH_ROLES_MAPPING populated). Disable so manual promotions stick
+    # across re-logins.
+    AUTH_ROLES_SYNC_AT_LOGIN = False
+
+    _AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "altinity.auth0.com")
+    _AUTH0_AUDIENCE = os.environ.get(
+        "AUTH0_AUDIENCE", "https://otel-mcp.demo.altinity.cloud/"
+    )
+
+    OAUTH_PROVIDERS = [
+        {
+            "name": "auth0",
+            "icon": "fa-key",
+            "token_key": "access_token",
+            "remote_app": {
+                "client_id": os.environ["AUTH0_CLIENT_ID"],
+                "client_secret": os.environ["AUTH0_CLIENT_SECRET"],
+                "api_base_url": f"https://{_AUTH0_DOMAIN}/",
+                "access_token_url": f"https://{_AUTH0_DOMAIN}/oauth/token",
+                "authorize_url": f"https://{_AUTH0_DOMAIN}/authorize",
+                "server_metadata_url": (
+                    f"https://{_AUTH0_DOMAIN}/.well-known/openid-configuration"
+                ),
+                "client_kwargs": {"scope": "openid profile email"},
+                # Tells Auth0 to mint an access_token bound to this resource
+                # server. Without it Auth0 returns an opaque token and the
+                # ch-jwt-verify sidecar rejects with "no JWKS match".
+                "authorize_params": {"audience": _AUTH0_AUDIENCE},
+            },
+        }
+    ]
+
+  # 20_security_manager: a SupersetSecurityManager subclass that
+  #   (1) fetches user info from Auth0's /userinfo endpoint (FAB has no
+  #       built-in mapping for the "auth0" provider; the base
+  #       BaseSecurityManager.oauth_user_info returns None, which FAB then
+  #       tries to call → 'NoneType' is not callable → "Invalid login"),
+  #   (2) captures the OAuth access_token in flask.session so the
+  #       DB_CONNECTION_MUTATOR can inject it into ClickHouse queries.
+  # Defined inline (instead of shipped as a module) because the chart's
+  # Secret mount at /app/pythonpath/ overlays the directory and would
+  # hide any extra .py file baked into the image.
+  20_security_manager: |
+    SESSION_TOKEN_KEY = "clickhouse_jwt"
+    SESSION_TOKEN_EXP_KEY = "clickhouse_jwt_exp"
+
+    # Per-user JWT cache (process-wide, in-memory). Superset's SQL Lab
+    # execution path crosses thread / task boundaries where flask.session
+    # isn't accessible. The mutator falls back to this dict when session
+    # is unavailable, keyed by user_id. Populated by oauth_user_info on
+    # every fresh login (overwrites any stale entry).
+    # Demo-grade only — single-replica, no eviction, no encryption. For
+    # multi-replica or stricter envs, persist on the user row via a
+    # SQLAlchemy model + the metadata DB.
+    import threading
+    _jwt_store_lock = threading.Lock()
+    _jwt_store = {}  # user_id (int) -> (jwt, exp_int)
+
+    def _store_user_jwt(user_id, token, exp):
+        with _jwt_store_lock:
+            _jwt_store[user_id] = (token, exp)
+
+    def _load_user_jwt(user_id):
+        with _jwt_store_lock:
+            return _jwt_store.get(user_id)
+
+    # Email-domain allow-list. Restricts which Auth0 identities can sign
+    # into Superset; non-matching emails get an empty dict back from
+    # oauth_user_info, which FAB renders as "Invalid login". Mirrors the
+    # ch-jwt-verify sidecar's `identity.allowed_email_domains` but is
+    # enforced at Superset's front door so the user never even gets a
+    # session created.
+    ALLOWED_EMAIL_DOMAINS = {
+        d.strip().lower()
+        for d in os.environ.get("ALLOWED_EMAIL_DOMAINS", "altinity.com").split(",")
+        if d.strip()
+    }
+
+    class JWTSecurityManager(SupersetSecurityManager):
+        def oauth_user_info(self, provider, response=None):
+            if provider == "auth0":
+                info = self._auth0_user_info(response)
+            else:
+                info = super().oauth_user_info(provider, response) or {}
+
+            # Domain allow-list enforcement.
+            email = (info.get("email") or "").lower()
+            if ALLOWED_EMAIL_DOMAINS and email:
+                domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+                if domain not in ALLOWED_EMAIL_DOMAINS:
+                    _jwt_log.warning(
+                        "rejecting login: email=%s domain=%s not in allowed=%s",
+                        email, domain, sorted(ALLOWED_EMAIL_DOMAINS),
+                    )
+                    return {}  # empty dict → FAB treats as login failure
+
+            if response and isinstance(response, dict):
+                access_token = response.get("access_token")
+                if access_token:
+                    session[SESSION_TOKEN_KEY] = access_token
+                    expires_at = response.get("expires_at")
+                    if not expires_at and (expires_in := response.get("expires_in")):
+                        expires_at = int(time.time()) + int(expires_in)
+                    if expires_at:
+                        session[SESSION_TOKEN_EXP_KEY] = int(expires_at)
+                    # Also store in process-wide cache keyed by FAB user_id
+                    # so DB_CONNECTION_MUTATOR can find it from worker
+                    # threads outside the request context.
+                    fab_user = self.find_user(email=info.get("email", ""))
+                    if fab_user and getattr(fab_user, "id", None):
+                        _store_user_jwt(fab_user.id, access_token, expires_at)
+                    _jwt_log.info(
+                        "captured OAuth access_token for provider=%s user=%s exp=%s len=%d user_id=%s",
+                        provider,
+                        info.get("email") or info.get("username"),
+                        expires_at,
+                        len(access_token),
+                        getattr(fab_user, "id", None) if fab_user else None,
+                    )
+                else:
+                    _jwt_log.warning(
+                        "OAuth response for provider=%s carried no access_token; "
+                        "downstream ClickHouse queries will fail until re-login",
+                        provider,
+                    )
+            return info
+
+        def _auth0_user_info(self, response):
+            # Auth0's OIDC /userinfo: GET, requires Bearer <access_token>.
+            # authlib's OAuth remote attaches the token from the current
+            # OAuth session automatically (`.get(url)` → adds Authorization).
+            remote = self.appbuilder.sm.oauth_remotes["auth0"]
+            try:
+                me = remote.get("userinfo").json()
+            except Exception as exc:
+                _jwt_log.exception("auth0 /userinfo fetch failed: %s", exc)
+                return {}
+            _jwt_log.info("auth0 /userinfo returned keys=%s", sorted(me.keys()))
+            # FAB user-info keys: username, email, first_name, last_name,
+            # name, role_keys. Auth0 returns OIDC-standard claims.
+            return {
+                "username": me.get("email") or me.get("sub"),
+                "email": me.get("email", ""),
+                "first_name": me.get("given_name", ""),
+                "last_name": me.get("family_name", ""),
+                "name": me.get("name", ""),
+            }
+
+    CUSTOM_SECURITY_MANAGER = JWTSecurityManager
+
+  # 30_db_connection_mutator: rewrite ClickHouse URLs at engine-creation
+  # time with the OAuth user's email + captured JWT. Logs at INFO so we
+  # can trace each branch ("no session" / "no user" / "rewrote") without
+  # leaking the JWT — only lengths are logged.
+  30_db_connection_mutator: |
+    _CLICKHOUSE_ENGINES = {"clickhousedb", "clickhouse"}
+
+    def DB_CONNECTION_MUTATOR(uri, params, username, security_manager, source):
+        backend = (uri.get_backend_name() or "").lower()
+        if backend not in _CLICKHOUSE_ENGINES:
+            return uri, params
+        user = getattr(g, "user", None)
+        user_email = (getattr(user, "email", None) or username or "").strip().lower()
+        user_id = getattr(user, "id", None) if user is not None else None
+
+        # Try Flask session first (request thread); fall back to the
+        # process-wide store (worker / async thread).
+        jwt = None
+        try:
+            jwt = session.get(SESSION_TOKEN_KEY)
+        except RuntimeError:
+            pass
+        if not jwt and user_id is not None:
+            entry = _load_user_jwt(user_id)
+            if entry:
+                jwt, _exp = entry
+        if not jwt and user_email:
+            # Last-ditch fallback: lookup by email if no g.user/user_id.
+            try:
+                fab_user = security_manager.find_user(email=user_email)
+                if fab_user and getattr(fab_user, "id", None):
+                    entry = _load_user_jwt(fab_user.id)
+                    if entry:
+                        jwt, _exp = entry
+                        user_id = fab_user.id
+            except Exception:
+                pass
+        if not jwt:
+            _jwt_log.info("MUTATOR skip backend=%s reason=no_jwt user_email=%s user_id=%s source=%s",
+                          backend, user_email, user_id, source)
+            return uri, params
+        email = user_email
+        if not email:
+            _jwt_log.info("MUTATOR skip backend=%s reason=no_email", backend)
+            return uri, params
+        new_uri = uri.set(username=email, password=jwt)
+        # Decode JWT payload (unverified) so we can see what claims the
+        # sidecar will see — particularly `aud`, `exp`, `email`,
+        # `email_verified`. Don't log the JWT itself.
+        try:
+            import base64, json
+            parts = jwt.split(".")
+            if len(parts) == 3:
+                pad = "=" * (-len(parts[1]) % 4)
+                claims = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+                _jwt_log.info(
+                    "JWT CLAIMS aud=%r iss=%r sub=%r exp=%s email=%r ev=%r scope=%r other_keys=%s",
+                    claims.get("aud"), claims.get("iss"), claims.get("sub"),
+                    claims.get("exp"), claims.get("email"),
+                    claims.get("email_verified"), claims.get("scope"),
+                    sorted(k for k in claims if k not in
+                           {"aud","iss","sub","exp","email","email_verified","scope","iat","nbf"}),
+                )
+        except Exception as exc:
+            _jwt_log.warning("jwt-decode failed: %s", exc)
+        _jwt_log.info("MUTATOR rewrote backend=%s email=%s jwt_len=%d uri_pw_len=%d params_keys=%s source=%s",
+                      backend, email, len(jwt), len(new_uri.password or ""),
+                      sorted(params.keys()), source)
+        # Inject username/password via connect_args. clickhouse-connect's
+        # SQLAlchemy dialect calls dbapi.connect(**opts) where opts comes
+        # from URL.translate_connect_args() + url.query — both of those
+        # ARE supposed to carry URL.password through, but we belt-and-
+        # braces it here so the wire-format never depends on the URL slot.
+        ca = params.setdefault("connect_args", {})
+        ca["username"] = email
+        ca["password"] = jwt
+        # Trace what HttpClient actually sends. urllib3 logs the
+        # Authorization-header LENGTH (not the value) at INFO so we can
+        # confirm the JWT made it onto the wire on each query.
+        try:
+            import urllib3
+            from urllib3.connectionpool import HTTPConnectionPool as _Pool
+            _orig_urlopen = _Pool.urlopen
+            if not getattr(_Pool, "_jwt_wrapped", False):
+                def _traced_urlopen(self, method, url, body=None, headers=None, **kw):
+                    if headers and "authorization" in {k.lower() for k in headers}:
+                        for k, v in headers.items():
+                            if k.lower() == "authorization":
+                                _jwt_log.info("HTTP %s %s Authorization=%s... len=%d",
+                                              method, url[:80], v[:12], len(v))
+                                break
+                    return _orig_urlopen(self, method, url, body=body, headers=headers, **kw)
+                _Pool.urlopen = _traced_urlopen
+                _Pool._jwt_wrapped = True
+        except Exception as exc:
+            _jwt_log.warning("urllib3 trace install failed: %s", exc)
+        return new_uri, params
+
+  # 40_force_https: the demo edge-proxy is L4 (`tls-to-tcp:8088`) — it
+  # terminates TLS upstream then forwards plain bytes, so no
+  # X-Forwarded-Proto header reaches gunicorn. Flask therefore reports
+  # `request.url_scheme == "http"` in the WSGI env, and authlib's
+  # `OAuth.authorize_redirect()` reflects that into the `redirect_uri`
+  # it sends to Auth0 — which then redirects the browser back over plain
+  # http, and Auth0 rejects unless we list the http:// callback in
+  # Allowed Callback URLs. `PREFERRED_URL_SCHEME` is shadowed by the
+  # active request's url_scheme, so we patch the WSGI env directly with
+  # a one-line middleware. FLASK_APP_MUTATOR runs after app construction
+  # so wsgi_app is set.
+  40_force_https: |
+    def FLASK_APP_MUTATOR(app):
+        inner = app.wsgi_app
+        def _force_https(environ, start_response):
+            environ["wsgi.url_scheme"] = "https"
+            return inner(environ, start_response)
+        app.wsgi_app = _force_https
+    PREFERRED_URL_SCHEME = "https"
+
+  # 50_feature_flags: enable the dashboard features we typically demo.
+  50_feature_flags: |
+    FEATURE_FLAGS = {
+        "DASHBOARD_NATIVE_FILTERS": True,
+        "DASHBOARD_CROSS_FILTERS": True,
+        "ENABLE_TEMPLATE_PROCESSING": True,
+    }
+
+  # 60_no_redis: override the chart's Redis-backed cache/celery defaults.
+  # We disabled the redis dependency in `redis.enabled: false`, but the
+  # chart still renders a CACHE_REDIS_URL etc., and SQL Lab's executor
+  # raises `invalid literal for int(): ''` when it tries to parse the
+  # empty REDIS_PORT. Replace with NullCache + a sync SQL Lab executor.
+  60_no_redis: |
+    from cachelib.simple import SimpleCache
+    CACHE_CONFIG = {"CACHE_TYPE": "NullCache"}
+    DATA_CACHE_CONFIG = CACHE_CONFIG
+    FILTER_STATE_CACHE_CONFIG = CACHE_CONFIG
+    EXPLORE_FORM_DATA_CACHE_CONFIG = CACHE_CONFIG
+    # Local in-memory results backend (SimpleCache) so SQL Lab can store
+    # query results without Redis. Demo-grade only.
+    RESULTS_BACKEND = SimpleCache(default_timeout=300)
+    # Force SQL Lab to run queries synchronously in the request thread
+    # (no celery). Disables the async pollable path.
+    SQLLAB_BACKEND_PERSISTENCE = False
+    SQLLAB_ASYNC_TIME_LIMIT_SEC = 60
+
+# Resource sizing — keep it modest, dashboards are not heavy.
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1
+    memory: 2Gi
+
+init:
+  # The chart's init job creates the admin user and bootstraps the metadata
+  # DB. Admin credentials below are only for emergency direct-login bypass
+  # (everyone else logs in via Auth0).
+  adminUser:
+    username: admin
+    firstname: Superset
+    lastname: Admin
+    email: admin@superset.local
+    password: REPLACE_ME_admin_only_break_glass
