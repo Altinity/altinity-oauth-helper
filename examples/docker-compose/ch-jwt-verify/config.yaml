@@ -1,0 +1,30 @@
+# ch-jwt-verify config for the docker-compose example.
+#
+# `issuer` must match the `iss` claim baked into tokens — that's the
+# host-facing URL because Dex puts its `issuer` config field into every
+# token verbatim. `jwks_url` overrides the discovery hop with the
+# container-resolvable name so the sidecar never has to talk to
+# `localhost:5556` (which inside the container points at the sidecar
+# itself, not Dex).
+listen:
+  tcp: "0.0.0.0:9999"
+
+oauth:
+  issuer: "http://localhost:5556/dex"
+  jwks_url: "http://dex:5556/dex/keys"
+  # Dex sets `aud` = client_id for first-party tokens. The Superset
+  # OAuth client_id is `superset` (see dex/config.yaml).
+  audience: "superset"
+  required_scopes: []
+  jwks_cache_ttl: 5m
+
+identity:
+  username_claim: email
+  match_mode: lowercase_equal
+  # Dex sets email_verified=true for staticPasswords users by default,
+  # so this flag is genuinely exercised by the test (not just permissive).
+  require_email_verified: true
+
+cache:
+  positive_ttl: 30s
+  negative_ttl: 5m

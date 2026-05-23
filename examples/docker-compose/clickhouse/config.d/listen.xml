@@ -1,0 +1,9 @@
+<!--
+  Default ClickHouse config listens only on 127.0.0.1 / ::1, which makes
+  the container unreachable from other containers on the docker network.
+  Open it up to all interfaces — the docker network is a private bridge,
+  so this is bounded by the host firewall + docker port-publish rules.
+-->
+<clickhouse>
+  <listen_host>0.0.0.0</listen_host>
+</clickhouse>

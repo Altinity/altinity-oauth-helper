@@ -1,0 +1,21 @@
+<!--
+  Wires ClickHouse's <http_authentication> handler to the colocated
+  ch-jwt-verify sidecar. Server name `ch_jwt_verify` matches the SQL
+  grammar used in 00-users.sql:
+
+    CREATE USER "alice@example.com"
+      IDENTIFIED WITH http SERVER 'ch_jwt_verify' SCHEME 'BASIC';
+-->
+<clickhouse>
+  <http_authentication_servers>
+    <ch_jwt_verify>
+      <uri>http://ch-jwt-verify:9999/verify</uri>
+      <forward_headers>
+        <header>Authorization</header>
+      </forward_headers>
+      <connection_timeout_ms>1000</connection_timeout_ms>
+      <receive_timeout_ms>3000</receive_timeout_ms>
+      <send_timeout_ms>1000</send_timeout_ms>
+    </ch_jwt_verify>
+  </http_authentication_servers>
+</clickhouse>

@@ -1,0 +1,53 @@
+# Dex (OIDC IdP) for the docker-compose example.
+#
+# Issuer URL is what the BROWSER hits — i.e. the host-side port mapping.
+# All containers reach Dex via the docker-network DNS name `dex:5556`, but
+# token claims must use the browser-facing URL because the browser is what
+# validates `iss` during the OAuth code exchange round trip.
+issuer: http://localhost:5556/dex
+
+storage:
+  type: postgres
+  config:
+    host: postgres
+    port: 5432
+    database: dex
+    user: dex
+    password: dex
+    ssl:
+      mode: disable
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  responseTypes: ["code"]
+  # Auto-approve so the browser walkthrough is one click (login form only,
+  # no consent screen).
+  skipApprovalScreen: true
+  # Wire the password grant (ROPC) to the local connector. Required for
+  # run-tests.sh's headless curl flow — without it Dex returns
+  # `invalid_grant_type: password` and the test can't get a token.
+  passwordConnector: local
+
+enablePasswordDB: true
+
+staticClients:
+  - id: superset
+    name: Superset
+    secret: supersetsecret
+    redirectURIs:
+      - http://localhost:8088/oauth-authorized/dex
+
+staticPasswords:
+  # password = "alice"  (bcrypt cost 10, regenerate via
+  # `htpasswd -bnBC 10 "" alice | tr -d ':\n'`)
+  - email: alice@example.com
+    hash: "$2y$10$Hpo9PfaSuUldvohVPJnaJOujU7tcGxncGMbA8lkL8CzC3Wwx0o6Qa"
+    username: alice
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+  # password = "bob"  (used by run-tests.sh's mismatch / negative cases)
+  - email: bob@example.com
+    hash: "$2y$10$1mb2y1vnbkC7YEVQTA6fbufqkvPWxv1vjWqcamFYw9PLkp5xeZKuu"
+    username: bob
+    userID: "1c1a1d4b-1111-2222-3333-444444444444"
