@@ -6,8 +6,15 @@
 #                     ClickHouse (oauth) connection.
 #   superset        — the web app, depends_on superset-init completing.
 #
-# Run via:
-#   ./up.sh           (which calls `compose -f ../../_platform/docker/compose.yml -f compose.yml up`)
+# `include:` is what makes the layering work: paths in each included
+# file are anchored to that file's directory. With plain `-f file1 -f
+# file2`, every path resolves from the first file's directory, which
+# breaks bind mounts to consumer-local configs.
+#
+# Run via ./up.sh (or `docker compose up -d`).
+
+include:
+  - ../../_platform/docker/compose.yml
 
 services:
   superset-init:

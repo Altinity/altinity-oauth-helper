@@ -13,12 +13,8 @@ else
     exit 1
 fi
 
-PLATFORM=../../_platform/docker/compose.yml
-LOCAL=./compose.yml
-OVERRIDE_ARGS=()
-if [[ -f docker-compose.override.yml ]]; then
-    OVERRIDE_ARGS=(-f docker-compose.override.yml)
-fi
-
-"${DC[@]}" -f "$PLATFORM" -f "$LOCAL" "${OVERRIDE_ARGS[@]}" down -v
+# Stack composition is via compose.yml's `include:` directive — pulls
+# in ../../_platform/docker/compose.yml automatically. Any local
+# docker-compose.override.yml is also picked up by convention.
+"${DC[@]}" down -v
 echo "✓ stack down (volumes removed)"

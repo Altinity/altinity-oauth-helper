@@ -37,20 +37,12 @@ fi
 export DOCKER_BUILDKIT=0
 export COMPOSE_DOCKER_CLI_BUILD=0
 
-# Compose stack: platform + this consumer. The platform compose file
-# also resolves its own relative paths from its own directory, so the
-# bind mounts under `_platform/docker/` work even though we invoke
-# compose from this directory.
-PLATFORM=../../_platform/docker/compose.yml
-LOCAL=./compose.yml
-OVERRIDE_ARGS=()
-if [[ -f docker-compose.override.yml ]]; then
-    OVERRIDE_ARGS=(-f docker-compose.override.yml)
-fi
-
-echo "→ ${DC[*]} -f $PLATFORM -f $LOCAL up -d --wait"
-"${DC[@]}" -f "$PLATFORM" -f "$LOCAL" "${OVERRIDE_ARGS[@]}" \
-    up -d --wait --wait-timeout 300
+# Stack composition is handled by compose.yml's `include:` directive,
+# which pulls in ../../_platform/docker/compose.yml with paths anchored
+# to each file's own directory. `docker-compose.override.yml` is picked
+# up automatically when present (compose's built-in convention).
+echo "→ ${DC[*]} up -d --wait"
+"${DC[@]}" up -d --wait --wait-timeout 300
 
 cat <<'EOF'
 
