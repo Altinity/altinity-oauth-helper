@@ -7,6 +7,26 @@
 # successfully before it starts gunicorn.
 set -euo pipefail
 
+# 1. Provision the Superset metadata DB+user in Postgres. The platform
+#    (../../_platform/docker/postgres/docker-entrypoint-initdb.d/) only
+#    creates the Dex DB; consumer overlays are responsible for their own
+#    metadata schemas. The two DO blocks are idempotent so re-runs are
+#    harmless.
+echo "→ provision superset DB/user in postgres"
+PGPASSWORD="${POSTGRES_ADMIN_PASSWORD:-postgres}" psql \
+    -h postgres -U "${POSTGRES_ADMIN_USER:-postgres}" -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'superset') THEN
+        CREATE ROLE superset WITH LOGIN ENCRYPTED PASSWORD 'superset';
+    END IF;
+END
+$$;
+SELECT 'CREATE DATABASE superset OWNER superset'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'superset')
+\gexec
+SQL
+
 echo "→ superset db upgrade"
 superset db upgrade
 

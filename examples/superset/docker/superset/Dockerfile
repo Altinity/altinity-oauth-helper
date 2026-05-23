@@ -8,6 +8,13 @@ FROM apache/superset:${SUPERSET_VERSION}
 
 USER root
 
+# psql client — used by init.sh to provision the superset DB+user before
+# `superset db upgrade` runs. The platform's postgres init only creates
+# the Dex DB.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client && \
+    rm -rf /var/lib/apt/lists/*
+
 # Superset 5.0.0 ships a `uv`-managed venv at /app/.venv; use `uv pip`
 # (not system pip) so the install lands in the venv the gunicorn
 # entrypoint actually uses.

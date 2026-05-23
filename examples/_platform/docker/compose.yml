@@ -1,0 +1,103 @@
+# Shared data plane for every consumer example.
+#
+# Brings up the four services that every consumer-of-ch-jwt-verify needs:
+#
+#   postgres        — IdP storage; consumers add their own metadata DB
+#   dex             — OIDC IdP, browser-facing login + JWKS
+#   clickhouse      — data plane, http_authentication wired to the sidecar
+#   ch-jwt-verify   — built from this repo, validates JWTs for CH
+#
+# Never run standalone. Each consumer example (../../<consumer>/docker/)
+# starts the stack with:
+#
+#   docker compose -f ../../_platform/docker/compose.yml -f ./compose.yml up -d
+#
+# The consumer overlay adds its own service (Superset, Grafana, your
+# Python script, an MCP server, …) and any extra DB or user provisioning
+# it needs. The platform stays consumer-agnostic.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ./postgres/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready -d dex` confirms both that the server is up AND that
+      # init SQL has created the dex database. Dex hangs at startup if
+      # the database isn't there yet.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dex"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    restart: unless-stopped
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex/config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "5556:5556"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:5556/dex/.well-known/openid-configuration"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    restart: unless-stopped
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+      - clickhouse-data:/var/lib/clickhouse
+    ports:
+      - "8123:8123"
+    depends_on:
+      ch-jwt-verify:
+        # Strictly speaking CH can come up first — its http_authentication
+        # backend is only contacted on the first user query. But making
+        # the order explicit keeps the log timeline easier to read.
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8123/ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  ch-jwt-verify:
+    build:
+      # Build context is the repo root so the multi-stage Dockerfile sees
+      # go.mod + cmd/ + pkg/.
+      context: ../../..
+      dockerfile: examples/_platform/docker/ch-jwt-verify/Dockerfile
+    image: altinity-oauth-helper-example-sidecar:local
+    restart: unless-stopped
+    command: ["--config", "/etc/ch-jwt-verify/config.yaml", "--log-level", "debug"]
+    volumes:
+      - ./ch-jwt-verify/config.yaml:/etc/ch-jwt-verify/config.yaml:ro
+    ports:
+      - "9999:9999"
+    depends_on:
+      dex:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:9999/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
+  clickhouse-data:

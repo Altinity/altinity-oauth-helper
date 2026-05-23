@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tear the stack down + remove its named volumes (postgres + clickhouse data).
+# Tear the stack down + remove named volumes (postgres + clickhouse data).
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -13,5 +13,12 @@ else
     exit 1
 fi
 
-"${DC[@]}" down -v
+PLATFORM=../../_platform/docker/compose.yml
+LOCAL=./compose.yml
+OVERRIDE_ARGS=()
+if [[ -f docker-compose.override.yml ]]; then
+    OVERRIDE_ARGS=(-f docker-compose.override.yml)
+fi
+
+"${DC[@]}" -f "$PLATFORM" -f "$LOCAL" "${OVERRIDE_ARGS[@]}" down -v
 echo "✓ stack down (volumes removed)"
