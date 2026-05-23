@@ -2,8 +2,39 @@
 
 OAuth helpers for ClickHouse-fronted deployments. The first (and currently
 only) helper is `ch-jwt-verify`: a tiny HTTP server that ClickHouse calls from
-its `<http_authentication>` handler to validate JWT bearers. Future helpers
-(JWE generators, token introspectors, …) will live alongside.
+its `<http_authentication>` handler to validate JWT bearers.
+
+## Why this exists
+
+Native OAuth / JWT authentication isn't in stock OSS ClickHouse. Today you
+get it in two places only:
+
+- **ClickHouse Cloud** (commercial), where SSO + JWT login is wired into the
+  managed control plane.
+- **[Altinity Antalya][antalya]**, Altinity's ClickHouse fork, which accepts
+  `Authorization: Bearer <jwt>` directly on the HTTP interface and validates
+  it against a JWKS the server is configured to trust.
+
+If you're running OSS ClickHouse outside Cloud, neither is available. The
+workaround this repo implements is to lean on ClickHouse's built-in
+[`<http_authentication_servers>`][ch-http-auth] mechanism: define an external
+HTTP authenticator, point ClickHouse at it, and let *that* service do the JWT
+validation. ClickHouse forwards the `Authorization` header to the helper on
+every authenticated request and trusts a `200 OK` response.
+
+`ch-jwt-verify` is that helper. The catch is that ClickHouse's HTTP auth
+backend only understands HTTP **Basic** — there's no Bearer path on OSS — so
+upstream consumers (Superset, Grafana, MCP servers, your own scripts) have to
+repack the user's JWT as the Basic-auth password (`base64(email:jwt)`) before
+calling ClickHouse. The helper then pulls the JWT back out of the password
+field, verifies it (signature, `iss`/`aud`/`exp`, identity policy), and
+either returns 200 or rejects. See the wire diagram below for the full path.
+
+If you can run Antalya, do — the entire repacking trick + this sidecar go
+away. This repo is the bridge for everyone still on OSS.
+
+[antalya]: https://github.com/Altinity/ClickHouse
+[ch-http-auth]: https://clickhouse.com/docs/operations/external-authenticators/http
 
 ## ch-jwt-verify
 
@@ -69,8 +100,9 @@ ClickHouse so the loopback trust model holds.
 See [`helm/ch-jwt-verify/README.md`](helm/ch-jwt-verify/README.md) for the
 wiring (including the clickhouse-operator `default` emptyDir quirk).
 
-For a worked end-to-end example with Apache Superset as the upstream, see
-[`examples/superset-otel/`](examples/superset-otel/).
+For worked end-to-end examples (Superset, Grafana, …), see
+[`examples/`](examples/) — the [`examples/README.md`](examples/README.md)
+matrix tracks which consumer × deploy-style combinations are working.
 
 ## Building images
 
@@ -92,7 +124,8 @@ cmd/ch-jwt-verify/     # the sidecar binary (main, config, settings, verify)
 pkg/oauth/             # JWKS-based JWT verifier + identity-policy helpers
 helm/ch-jwt-verify/    # Helm chart (ConfigMaps + container fragment, no Deployment)
 scripts/build-image.sh # multi-arch image build & push
-examples/              # curl smoke test, Superset deploy
+examples/              # _platform shared compose base, plus curl / superset /
+                       # grafana consumer overlays (see examples/README.md)
 Dockerfile             # consumed by scripts/build-image.sh
 ```
 
