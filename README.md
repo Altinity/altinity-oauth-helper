@@ -47,15 +47,15 @@ rejected with `SYNTAX_ERROR`.)
 git clone https://github.com/altinity/altinity-oauth-helper
 cd altinity-oauth-helper
 
-$EDITOR examples/curl-smoke-test/config.yaml      # fill in issuer + audience
-go run ./cmd/ch-jwt-verify -c examples/curl-smoke-test/config.yaml &
+$EDITOR examples/curl/config.yaml      # fill in issuer + audience
+go run ./cmd/ch-jwt-verify -c examples/curl/config.yaml &
 
-examples/curl-smoke-test/verify.sh alice@example.com "$JWT"
+examples/curl/verify.sh alice@example.com "$JWT"
 # → HTTP/1.1 200 OK
 #   {"settings":null,"email":"alice@example.com"}
 ```
 
-See [`examples/curl-smoke-test/README.md`](examples/curl-smoke-test/README.md)
+See [`examples/curl/README.md`](examples/curl/README.md)
 for the failure-mode cheatsheet.
 
 ### Deploy alongside ClickHouse

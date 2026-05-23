@@ -1,25 +1,33 @@
-# curl-smoke-test
+# `curl` — minimal "bring your own JWT" sidecar smoke test
 
-A local end-to-end smoke test of the `ch-jwt-verify` sidecar with a real JWT.
-Exercises the same wire contract ClickHouse uses (`Authorization: Basic
-base64(user:JWT)` against `/verify`), so any rejection you see here is the
-exact rejection CH would report.
+Smallest possible end-to-end exercise: run `ch-jwt-verify` locally with
+your real IdP's config, hit `/verify` with `curl` carrying a JWT *you*
+have already minted. Same wire contract ClickHouse uses
+(`Authorization: Basic base64(user:JWT)`), so any rejection you see is
+the exact rejection ClickHouse would report.
+
+Different shape from the other consumer examples: this one is
+**sidecar-only, BYO JWT**. The other examples (`../superset/docker/`,
+`../python/docker/`, …) bring up a full stack with Dex as the IdP, so
+you can drive the wire end-to-end without an external IdP at all. Use
+those when iterating on the consumer side; use this one when bringing
+the sidecar up against a brand-new external IdP for the first time.
 
 ## Run
 
 ```bash
 # 1. Fill in oauth.issuer + oauth.audience in config.yaml.
-$EDITOR examples/curl-smoke-test/config.yaml
+$EDITOR examples/curl/config.yaml
 
 # 2. Start the sidecar locally (from the repo root):
-go run ./cmd/ch-jwt-verify -c examples/curl-smoke-test/config.yaml &
+go run ./cmd/ch-jwt-verify -c examples/curl/config.yaml &
 
 # 3. Mint a JWT from your IdP (Auth0, Google, etc.) for the configured audience,
 #    then hit /verify with it:
-examples/curl-smoke-test/verify.sh alice@example.com "eyJhbGciOi…"
+examples/curl/verify.sh alice@example.com "eyJhbGciOi…"
 # or via env:
 CH_JWT_USER=alice@example.com CH_JWT_TOKEN="eyJhbGciOi…" \
-  examples/curl-smoke-test/verify.sh
+  examples/curl/verify.sh
 ```
 
 Expected on success:

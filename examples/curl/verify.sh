@@ -2,7 +2,7 @@
 # Smoke-test the ch-jwt-verify sidecar against a real JWT.
 #
 # Usage:
-#   examples/curl-smoke-test/verify.sh [user] [jwt]
+#   examples/curl/verify.sh [user] [jwt]
 #
 #   user — the email (or sub, depending on identity.username_claim in
 #          config.yaml) you expect to match against the token's claims.
@@ -11,7 +11,7 @@
 #
 # Prerequisites:
 #   1. ch-jwt-verify running locally with this directory's config.yaml:
-#        go run ./cmd/ch-jwt-verify -c examples/curl-smoke-test/config.yaml
+#        go run ./cmd/ch-jwt-verify -c examples/curl/config.yaml
 #      (from the repo root).
 #   2. config.yaml's oauth.issuer / oauth.audience filled in.
 #   3. A valid JWT minted by your IdP for that audience, with verified email.
