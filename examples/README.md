@@ -30,7 +30,7 @@ examples/
 | `altinity-mcp/`     | 🟡 planned                              | 🟡 planned (uses `../helm/ch-jwt-verify`) |
 | `superset/`         | ✅ [README](superset/docker/README.md)  | 🟡 planned                                |
 | `superset-mcp/`     | 🟡 planned                              | 🟡 planned                                |
-| `grafana/`          | 🟡 planned                              | 🟡 planned                                |
+| `grafana/`          | 🟡 [README](grafana/docker/README.md) (backend patch lands; frontend rework still needed — see README) | 🟡 planned |
 | `grafana-mcp/`      | 🟡 planned                              | 🟡 planned                                |
 
 ✅ working, 🟡 planned, 🔴 known broken on this version.

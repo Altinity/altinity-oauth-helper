@@ -1,0 +1,75 @@
+# Grafana overlay on top of ../../_platform/docker/compose.yml.
+#
+# Adds one service on top of the shared data plane (postgres, dex,
+# clickhouse, ch-jwt-verify):
+#
+#   grafana   — Grafana with a locally-patched build of the Altinity
+#               ClickHouse plugin (see grafana/plugin/0001-...patch).
+#               The patch teaches the plugin to substitute the
+#               logged-in user's OAuth access token as the Basic-auth
+#               password on every outbound query, so the sidecar +
+#               ClickHouse see the actual user identity per request.
+#
+# `include:` layers paths from each file's own directory, which keeps
+# the platform's relative bind mounts (`./dex/config.yaml` etc.) intact.
+#
+# Run via ./up.sh (or `docker compose up -d`).
+
+include:
+  - ../../_platform/docker/compose.yml
+
+services:
+  grafana:
+    image: altinity-oauth-helper-example-grafana:local
+    build:
+      context: ./grafana
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:3000
+      # Generic OAuth (Dex). The platform's `superset` static client is
+      # shared across consumer examples — its redirect-URI list already
+      # includes Grafana's callback. See
+      # ../../_platform/docker/dex/config.yaml.
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_NAME: Dex
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: superset
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: supersetsecret
+      GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email"
+      # Browser-facing Dex URL (what the user sees in the redirect bar).
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: http://localhost:5556/dex/auth
+      # Container-facing Dex URLs (token exchange + /userinfo run from
+      # Grafana's network namespace).
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: http://dex:5556/dex/token
+      GF_AUTH_GENERIC_OAUTH_API_URL:   http://dex:5556/dex/userinfo
+      GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH: email
+      GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH: email
+      GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP: "true"
+      GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT: "false"
+      # Refresh tokens are required: without them, Dex's 1-hour access
+      # token expires mid-session and subsequent queries 401. With
+      # USE_REFRESH_TOKEN=true, Grafana re-fetches before expiry.
+      GF_AUTH_GENERIC_OAUTH_USE_REFRESH_TOKEN: "true"
+      # Skip Grafana's own login form — the only login path is "Sign in
+      # with Dex". Removes the "user doesn't exist" failure mode when
+      # Grafana's local admin clashes with the OAuth user.
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      # Auto-assign new OAuth users as Admin so they can hit Explore
+      # without seeding roles. Demo only — real deployments map roles
+      # via `role_attribute_path`.
+      GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN: "false"
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Admin
+    ports:
+      - "3000:3000"
+    depends_on:
+      dex:
+        condition: service_healthy
+      ch-jwt-verify:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60

@@ -1,0 +1,12 @@
+# Optional override for environments that require an existing docker
+# network (e.g. sandboxed CI setups). Copy to docker-compose.override.yml
+# and edit the network name, then re-run ./up.sh.
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Plain Docker Engine users do NOT need this file.
+
+networks:
+  default:
+    external: true
+    name: ${DOCKER_NETWORK:-bridge}

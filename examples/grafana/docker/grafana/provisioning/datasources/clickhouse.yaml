@@ -1,0 +1,27 @@
+# Pre-provisioned ClickHouse (oauth) datasource.
+#
+# `oauthPassThru: true` is what makes the per-user JWT pass-through
+# work — Grafana forwards the logged-in user's `Authorization: Bearer
+# <jwt>` header into the plugin, which the patched plugin (see
+# ../../grafana/plugin/0001-jwt-as-password.patch) repacks as HTTP
+# Basic auth (`<email>:<jwt>`) on every outbound query, so OSS
+# ClickHouse can authenticate via the ch-jwt-verify sidecar.
+#
+# No `basicAuth*` set — without `oauthPassThru` the plugin falls back
+# to empty static creds and ClickHouse rejects as the `default` user.
+# That is intentional: the demo only works when the user is signed in
+# via Dex.
+
+apiVersion: 1
+
+datasources:
+  - name: ClickHouse (oauth)
+    type: vertamedia-clickhouse-datasource
+    access: proxy
+    url: http://clickhouse:8123
+    isDefault: true
+    jsonData:
+      oauthPassThru: true
+      addCorsHeader: false
+      defaultDatabase: default
+      usePOST: true

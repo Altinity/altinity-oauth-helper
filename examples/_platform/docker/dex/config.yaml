@@ -33,11 +33,16 @@ oauth2:
 enablePasswordDB: true
 
 staticClients:
+  # Shared across consumer examples — the sidecar's `audience: superset`
+  # check works for any consumer using this client. Add a new redirect URI
+  # here when wiring up another consumer; don't mint a per-consumer client
+  # unless the sidecar grows multi-audience support.
   - id: superset
     name: Superset
     secret: supersetsecret
     redirectURIs:
-      - http://localhost:8088/oauth-authorized/dex
+      - http://localhost:8088/oauth-authorized/dex      # superset
+      - http://localhost:3000/login/generic_oauth       # grafana
 
 staticPasswords:
   # password = "alice"  (bcrypt cost 10, regenerate via
