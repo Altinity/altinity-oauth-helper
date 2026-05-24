@@ -1,17 +1,20 @@
 # Superset config for the docker-compose example.
 #
-# Adapts the production Auth0 overlay at
-#   examples/superset-otel/superset-values.yaml
-# to a local Dex IdP, with a generic OIDC userinfo fetch in place of
-# Auth0's Bearer-token-against-/userinfo specifics. Three deliberate
-# differences:
-#   1. OAUTH_PROVIDERS uses split browser/backend URLs (Dex's issuer is
-#      browser-facing but containers reach Dex via the docker-DNS name).
-#   2. _userinfo() is a generic authlib remote.get("userinfo"); no
-#      Auth0-specific claim mapping is needed because Dex emits OIDC
-#      standard claims.
-#   3. The metadata DB connection points at the shared postgres service
-#      (which the chart manages in the helm example).
+# Wires Superset to a local Dex IdP via generic OIDC, captures the
+# user's access_token on login, and rewrites every outbound ClickHouse
+# connection to use `<email>:<jwt>` as Basic auth (which the
+# ch-jwt-verify sidecar then unpacks and validates). Three things
+# worth knowing if you're cribbing from this file:
+#
+#   1. OAUTH_PROVIDERS uses split browser/backend URLs — Dex's issuer
+#      is browser-facing (localhost:5556), but containers reach Dex
+#      via the docker-DNS name `dex:5556`. Authlib needs both.
+#   2. oauth_user_info() pulls the standard OIDC claims via
+#      remote.get("userinfo"); no IdP-specific claim mapping needed.
+#      Swap Dex for another OIDC provider by editing OAUTH_PROVIDERS.
+#   3. The metadata DB points at the shared `postgres` service from
+#      the platform compose; the chart-based deploy would point it at
+#      its own managed Postgres instead.
 import logging
 import os
 import threading
@@ -66,8 +69,9 @@ OAUTH_PROVIDERS = [
 
 # ---- JWT capture / DB connection mutator -------------------------------
 # Per-user JWT cache shared between request and worker threads. Demo-grade
-# only (single replica, no eviction). See examples/superset-otel for the
-# fuller rationale.
+# only (single replica, no eviction); a production deploy would use a
+# shared store (redis/sql) so multiple Superset workers see each other's
+# tokens.
 SESSION_TOKEN_KEY = "clickhouse_jwt"
 SESSION_TOKEN_EXP_KEY = "clickhouse_jwt_exp"
 
@@ -191,8 +195,9 @@ def DB_CONNECTION_MUTATOR(uri, params, username, security_manager, source):
 # matching redirect_uris on the wire.
 PREFERRED_URL_SCHEME = "http"
 
-# Demo runs without redis. Same NullCache/SimpleCache setup as the helm
-# overlay (see examples/superset-otel).
+# Demo runs without redis — NullCache for the Flask caches, an
+# in-process SimpleCache for SQL Lab results. Production should swap
+# both for a real backing store (redis, memcached).
 from cachelib.simple import SimpleCache  # noqa: E402
 CACHE_CONFIG = {"CACHE_TYPE": "NullCache"}
 DATA_CACHE_CONFIG = CACHE_CONFIG
