@@ -98,10 +98,14 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' \
 [[ "$code" == "403" ]] || fail "sidecar empty-token expected 403, got $code"
 pass "sidecar rejected empty bearer with 403"
 
-# ---- 6. tampered token (last byte mutated → bad signature) ----
+# ---- 6. tampered token (signature bytes mutated → bad signature) ----
+# Replace the last 5 chars of the JWT signature with "AAAAA". The very last
+# base64url char of an RSA-256 signature only carries 2 significant bits
+# (the rest are don't-care padding), so a single-char swap can decode to the
+# same bytes; mutating 5 chars guarantees a real signature change.
 echo "→ sidecar /verify (tampered token)"
 TOKEN_FRESH=$(mint_token)
-TAMPERED="${TOKEN_FRESH%?}X"
+TAMPERED="${TOKEN_FRESH::-5}AAAAA"
 code=$(curl -sS -o /dev/null -w '%{http_code}' \
     -u "alice@example.com:$TAMPERED" "${SIDECAR_URL}/verify")
 [[ "$code" == "403" ]] || fail "sidecar tampered-token expected 403, got $code"
