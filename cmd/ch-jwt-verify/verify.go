@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/altinity/altinity-oauth-helper/pkg/oauth"
+	"github.com/altinity/go-mcp-oauth-sdk/oauth"
 	"github.com/rs/zerolog/log"
 )
 
@@ -71,6 +71,8 @@ func NewVerifier(cfg *Config) *Verifier {
 	return &Verifier{
 		cfg: cfg,
 		oauthVer: oauth.NewVerifier(oauth.OAuthConfig{
+			Enabled:        true,
+			StrictJWTOnly:  true,
 			Issuer:         cfg.OAuth.Issuer,
 			JWKSURL:        cfg.OAuth.JWKSURL,
 			Audience:       cfg.OAuth.Audience,
