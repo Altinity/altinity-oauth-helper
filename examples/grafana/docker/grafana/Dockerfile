@@ -23,7 +23,7 @@ RUN go install github.com/magefile/mage@latest
 RUN mage -v buildAll
 
 # ---- 2. frontend: webpack bundle ----
-FROM node:20 AS plugin-js-builder
+FROM node:26 AS plugin-js-builder
 COPY --from=plugin-go-builder /src /src
 WORKDIR /src
 RUN npm ci --no-audit --no-fund --legacy-peer-deps
