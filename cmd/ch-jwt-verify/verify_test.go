@@ -586,7 +586,7 @@ func TestPermanentErrorIsNegativeCached(t *testing.T) {
 	require.Equal(t, 1, cacheLen, "permanent rejections must populate negative cache")
 }
 
-// TestJWKSHealthTracking asserts the underlying pkg/oauth Verifier records
+// TestJWKSHealthTracking asserts the underlying go-mcp-oauth-sdk Verifier records
 // fetch attempts/successes/errors that the sidecar's /readyz handler
 // consumes. We don't HTTP-test /readyz directly because the handler lives in
 // main.go and the wiring is trivial — the meaningful contract is the health

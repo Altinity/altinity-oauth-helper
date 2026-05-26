@@ -86,5 +86,5 @@ Per-example README template:
 These examples are intentionally laptop-sized: plain HTTP, demo-grade
 secrets in YAML, single replicas, in-memory caches. The `helm/ch-jwt-verify/`
 chart in the repo root is the production-shaped artifact; consult
-`helm/ch-jwt-verify/values.yaml` and the comments in `pkg/oauth/config.go`
-for the real knobs.
+`helm/ch-jwt-verify/values.yaml` and the comments in
+`cmd/ch-jwt-verify/config.go` for the real knobs.

@@ -121,7 +121,6 @@ Helm values continue to work.
 
 ```
 cmd/ch-jwt-verify/     # the sidecar binary (main, config, settings, verify)
-pkg/oauth/             # JWKS-based JWT verifier + identity-policy helpers
 helm/ch-jwt-verify/    # Helm chart (ConfigMaps + container fragment, no Deployment)
 scripts/build-image.sh # multi-arch image build & push
 examples/              # _platform shared compose base, plus curl / superset /
@@ -129,9 +128,9 @@ examples/              # _platform shared compose base, plus curl / superset /
 Dockerfile             # consumed by scripts/build-image.sh
 ```
 
-`pkg/oauth` is intentionally leaf-level (no `internal/` ties to the
-sidecar): other helpers in this repo and downstream consumers can import it
-directly.
+JWKS fetching, JWT validation, and the shared identity-policy helpers live
+in [`github.com/altinity/go-mcp-oauth-sdk`](https://github.com/altinity/go-mcp-oauth-sdk);
+this repo consumes that module via `go.mod`.
 
 ## License
 

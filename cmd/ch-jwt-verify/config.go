@@ -35,10 +35,11 @@ type ListenConfig struct {
 	TCP  string `yaml:"tcp"`
 }
 
-// OAuthConfig is the subset of pkg/oauth knobs the sidecar needs. We don't
-// reuse pkg/oauth.OAuthConfig verbatim because that struct carries broker-mode
-// fields (client_id/client_secret/refresh-token TTL) which are meaningless on
-// the sidecar — keeping a narrow type rejects misconfiguration at parse time.
+// OAuthConfig is the subset of go-mcp-oauth-sdk knobs the sidecar needs. We
+// don't reuse oauth.OAuthConfig verbatim because that struct carries
+// broker-mode fields (client_id/client_secret/refresh-token TTL) which are
+// meaningless on the sidecar — keeping a narrow type rejects misconfiguration
+// at parse time.
 type OAuthConfig struct {
 	Issuer           string        `yaml:"issuer"`
 	JWKSURL          string        `yaml:"jwks_url"`
