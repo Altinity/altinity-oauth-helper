@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/examples/_platform/docker/ch-jwt-verify"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/examples/grafana/docker/grafana"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/examples/superset/docker/superset"
+    schedule:
+      interval: "weekly"
