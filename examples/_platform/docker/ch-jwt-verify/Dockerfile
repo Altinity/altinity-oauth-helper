@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go build \
     -ldflags="-s -w -X main.version=docker-compose" \
     -o /out/ch-jwt-verify ./cmd/ch-jwt-verify
 
-FROM alpine:3.22
+FROM alpine:3.23
 RUN apk --no-cache add ca-certificates
 COPY --from=build /out/ch-jwt-verify /bin/ch-jwt-verify
 EXPOSE 9999
