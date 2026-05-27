@@ -1,0 +1,44 @@
+{{- if .Values.standalone.enabled }}
+{{/*
+Standalone deployment mode: run ch-jwt-verify as its own 1-pod Deployment +
+Service instead of a colocated CH sidecar. Use this when attaching a sidecar
+to the CH pod is undesirable (e.g. a large managed/production CHI where a
+full-podTemplate-replace CHIT is too risky under clickhouse-operator's
+replace-by-name container merge). ClickHouse then reaches the verifier over
+the Service DNS via <http_authentication_servers><...><uri> instead of
+loopback — set `ch.url` accordingly. The verifier is stateless (JWKS-only),
+so a single replica is fine; scale up for availability.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ch-jwt-verify.fullname" . }}
+  labels: {{- include "ch-jwt-verify.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.standalone.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "ch-jwt-verify.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "ch-jwt-verify.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.standalone.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.standalone.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.standalone.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        {{- include "ch-jwt-verify.container" . | nindent 8 }}
+      volumes:
+        - name: ch-jwt-verify-config
+          configMap:
+            name: {{ include "ch-jwt-verify.fullname" . }}-config
+{{- end }}

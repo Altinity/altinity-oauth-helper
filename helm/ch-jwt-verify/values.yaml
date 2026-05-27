@@ -15,6 +15,23 @@ image:
   tag: ""           # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
 
+# -- Standalone mode: render a 1-pod Deployment + ClusterIP Service instead of
+# the colocated-sidecar fragment. Use when you can't (or won't) attach a
+# sidecar to the CH pod — e.g. a large/managed CHI where a full-podTemplate
+# CHIT is too risky under clickhouse-operator's replace-by-name container
+# merge. In standalone mode ClickHouse reaches the verifier over the Service
+# DNS, so set `ch.url` to
+#   http://<release-fullname>.<namespace>.svc.cluster.local:<service.port>/verify
+# The verifier is stateless (JWKS-only); 1 replica is fine, scale for HA.
+standalone:
+  enabled: false
+  replicas: 1
+  imagePullSecrets: []
+  nodeSelector: {}
+  tolerations: []
+  service:
+    port: 9999
+
 # -- Sidecar listener. Pick exactly one of unix or tcp. Unix is preferred:
 # zero port surface, fs permissions gate access. Use TCP when bind-mounted
 # sockets are awkward (e.g. some managed CH operators).

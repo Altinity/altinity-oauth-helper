@@ -1,0 +1,24 @@
+{{- if .Values.standalone.enabled }}
+{{/*
+Service fronting the standalone deployment. ClickHouse points
+<http_authentication_servers><...><uri> at
+  http://<this-service>.<ns>.svc.cluster.local:<port>/verify
+(set as .Values.ch.url in standalone mode). ClusterIP only — never expose
+the verifier outside the cluster.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ch-jwt-verify.fullname" . }}
+  labels: {{- include "ch-jwt-verify.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "ch-jwt-verify.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: verify
+      port: {{ .Values.standalone.service.port }}
+      targetPort: {{ regexFind "[0-9]+$" .Values.listen.tcp | int }}
+      protocol: TCP
+{{- end }}
