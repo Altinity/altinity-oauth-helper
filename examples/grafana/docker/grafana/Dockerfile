@@ -30,7 +30,7 @@ RUN npm ci --no-audit --no-fund --legacy-peer-deps
 RUN npm run build:frontend
 
 # ---- 3. Grafana with the built plugin layered in ----
-FROM grafana/grafana:11.4.0
+FROM grafana/grafana:13.1.0
 COPY --from=plugin-js-builder /src/dist \
         /var/lib/grafana/plugins/vertamedia-clickhouse-datasource
 COPY provisioning /etc/grafana/provisioning
