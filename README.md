@@ -106,6 +106,16 @@ matrix tracks which consumer × deploy-style combinations are working.
 
 ## Building images
 
+**CI (default):** [`.github/workflows/build-ch-jwt-verify.yml`](.github/workflows/build-ch-jwt-verify.yml)
+builds and pushes automatically on every push to `main` that touches
+`cmd/ch-jwt-verify/**`, `go.mod`/`go.sum`, or the `Dockerfile` — tag
+`sidecar-<short-sha>`, multi-arch (amd64+arm64), pushed to
+`ghcr.io/altinity/ch-jwt-verify` using the repo's own `GITHUB_TOKEN` (no PAT
+needed). Trigger a one-off build with a custom prefix via **Actions → Build &
+push ch-jwt-verify image → Run workflow**.
+
+**Manual / local:**
+
 ```bash
 scripts/build-image.sh feature-strict-iss
 # → ghcr.io/altinity/ch-jwt-verify:feature-strict-iss-<short-sha>
@@ -115,7 +125,10 @@ scripts/build-image.sh feature-strict-iss
 The script cross-compiles statically-linked binaries for amd64+arm64, builds
 with legacy `DOCKER_BUILDKIT=0`, pushes per-arch, and assembles the multi-arch
 manifest. Image name stays at `ghcr.io/altinity/ch-jwt-verify` so existing
-Helm values continue to work.
+Helm values continue to work. The CI workflow does the same thing (buildx +
+QEMU instead of Docker Desktop's built-in emulation) — use this locally when
+you need a build from an unmerged branch or a sandbox without registry push
+access.
 
 ## Layout
 
