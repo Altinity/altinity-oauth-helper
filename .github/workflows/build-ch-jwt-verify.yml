@@ -1,0 +1,101 @@
+name: Build & push ch-jwt-verify image
+
+# Mirrors scripts/build-image.sh: cross-compile a static Go binary per arch,
+# build+push a per-arch image, then assemble a multi-arch manifest under the
+# same ghcr.io/altinity/ch-jwt-verify repo so existing Helm values keep working.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/ch-jwt-verify/**"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - ".github/workflows/build-ch-jwt-verify.yml"
+  workflow_dispatch:
+    inputs:
+      tag_prefix:
+        description: "Tag prefix (final tag: <prefix>-<short-sha>)"
+        required: false
+        default: "sidecar"
+
+concurrency:
+  group: build-ch-jwt-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: altinity/ch-jwt-verify
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: vars
+        run: |
+          prefix="${{ inputs.tag_prefix }}"
+          echo "tag=${prefix:-sidecar}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cross-compile static binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build \
+            -ldflags="-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
+            -o ch-jwt-verify ./cmd/ch-jwt-verify
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.arch }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push per-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.tag }}-${{ matrix.arch }}
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble multi-arch manifest
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          FULL="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          docker buildx imagetools create -t "${FULL}:${TAG}" \
+            "${FULL}:${TAG}-amd64" \
+            "${FULL}:${TAG}-arm64"
+          echo "Pushed ${FULL}:${TAG} (amd64+arm64)"
