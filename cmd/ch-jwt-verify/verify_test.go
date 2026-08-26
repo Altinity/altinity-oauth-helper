@@ -453,6 +453,40 @@ func TestNegativeCachePreservesErrorIdentity(t *testing.T) {
 	require.ErrorIs(t, err2, oauth.ErrEmailNotVerified, "cached error must keep sentinel identity")
 }
 
+// TestCacheKeyIncludesUsername is the regression test for GH-13: the
+// verification cache was keyed on sha256(token) alone, so once a token had
+// been verified for one Basic-auth username, replaying the SAME token under
+// a DIFFERENT username hit the cache and skipped the user-vs-claim check
+// entirely — letting an attacker in possession of alice's JWT authenticate
+// as bob (or any other configured user) after alice's first request warmed
+// the cache.
+func TestCacheKeyIncludesUsername(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	v := NewVerifier(baseConfig(p))
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub":            "u-1",
+		"email":          "alice@example.com",
+		"email_verified": true,
+	})
+
+	// First request as alice succeeds and populates the cache.
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// Replaying the SAME token as bob must still be rejected — a cache hit
+	// keyed only on the token would incorrectly let bob in as alice.
+	req2 := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req2.Header.Set("Authorization", basicHeader("bob@example.com", tok))
+	rr2 := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr2, req2)
+	require.Equal(t, http.StatusForbidden, rr2.Code, rr2.Body.String())
+	require.Contains(t, rr2.Body.String(), "does not match")
+}
+
 func TestParseBasicAuth(t *testing.T) {
 	t.Parallel()
 	u, tk, ok := parseBasicAuth("Basic " + base64.StdEncoding.EncodeToString([]byte("alice@example.com:jwt-string")))

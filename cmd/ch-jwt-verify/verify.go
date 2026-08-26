@@ -174,7 +174,7 @@ func (v *Verifier) Handler() http.Handler {
 // verify performs the actual JWT validation + identity policy + scope→settings
 // derivation. It also handles the small verification cache.
 func (v *Verifier) verify(ctx context.Context, user, token string) (*verifyResponse, error) {
-	cacheKey := sha256Hex(token)
+	cacheKey := sha256Hex(user + "\x00" + token)
 
 	v.mu.Lock()
 	if entry, found := v.cache[cacheKey]; found && time.Now().Before(entry.expiresAt) {
@@ -361,13 +361,18 @@ func parseBasicAuth(header string) (user, token string, ok bool) {
 	return string(decoded[:idx]), string(decoded[idx+1:]), true
 }
 
-// sha256Hex returns the full hex-encoded SHA256(token). The cache key is
-// the digest, not a prefix — a prefix would let a hash-collision between
-// a bad token and a legit one DoS the legit user via the negative cache
-// for negative_ttl (no access-grant risk because signatures are still
+// sha256Hex returns the full hex-encoded SHA256 digest of its input. The
+// cache key is the digest, not a prefix — a prefix would let a hash-collision
+// between a bad token and a legit one DoS the legit user via the negative
+// cache for negative_ttl (no access-grant risk because signatures are still
 // re-verified on cache miss, but a real availability bug). 64-char keys
 // at the 10k-entry cap cost ~640 KiB extra — immaterial.
-func sha256Hex(token string) string {
-	sum := sha256.Sum256([]byte(token))
+//
+// The Basic auth user is folded into the verify() cache key alongside the
+// token (NUL-separated) so a cached positive result can't be replayed under
+// a different username than the one it was verified against — see
+// verify()'s cacheKey construction.
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
