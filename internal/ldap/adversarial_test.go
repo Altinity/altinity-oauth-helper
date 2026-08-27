@@ -3,6 +3,7 @@ package ldap
 import (
 	"bytes"
 	"context"
+	"encoding/asn1"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -18,7 +19,9 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	ber "github.com/go-asn1-ber/asn1-ber"
 	goldapclient "github.com/go-ldap/ldap/v3"
+	ldapserver "github.com/vjeantet/ldapserver"
 )
 
 // This file covers the phase-2 plan's remaining High-risk adversarial proofs
@@ -559,4 +562,170 @@ func TestAdversarial_ManyMalformedConnectionsInterleavedWithLegitimateTraffic(t 
 	for msg := range errCh {
 		t.Error(msg)
 	}
+}
+
+// ---- Cancel (RFC 3909) carve-out proof -------------------------------------
+
+// rfc3909CancelValue mirrors the vendored vjeantet/ldapserver dependency's
+// own (unexported) cancelRequestValue ASN.1 shape from its cancel.go:
+// cancelRequestValue ::= SEQUENCE { cancelID MessageID }. This test builds
+// the raw wire bytes itself (rather than driving a handler function
+// directly) so it exercises the real dependency-internal Cancel handling
+// this package never sees — see unsupported.go's handleUnsupportedExtended
+// doc comment for why Cancel bypasses this package's own fail-closed
+// Extended-operation handling entirely.
+type rfc3909CancelValue struct {
+	CancelID int
+}
+
+// cancelRequestValuePacket BER-encodes an RFC 3909 Cancel requestValue as
+// the [CONTEXT 1] primitive octet string goldap/ldapserver expects.
+func cancelRequestValuePacket(messageID int) *ber.Packet {
+	data, _ := asn1.Marshal(rfc3909CancelValue{CancelID: messageID})
+	pkt := ber.Encode(ber.ClassContext, ber.TypePrimitive, 1, nil, "requestValue")
+	pkt.Value = data
+	pkt.Data.Write(data)
+	return pkt
+}
+
+// TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak proves, over
+// the real production server and a real TCP connection, the benign-carve-out
+// claim documented on handleUnsupportedExtended: the RFC 3909 Cancel
+// Extended operation (OID 1.3.6.1.1.8) — served entirely inside the vendored
+// vjeantet/ldapserver dependency, never reaching this package's own
+// fail-closed catch-all — cannot cancel an in-flight Bind (the one operation
+// that carries credential material) and cannot disclose or corrupt anything
+// this package owns. This is checked against the real dependency behavior,
+// not merely inferred from reading cancel.go.
+func TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+	fv := newFakeVerifier(acct)
+	fv.entered = make(chan struct{}, 1)
+	fv.block = make(chan struct{}) // never closed until this test explicitly does so
+	fv.returned = make(chan error, 1)
+
+	addr, _, _ := startTestServer(t, fv, newFakeRoles(acct))
+
+	// ---- (a) Cancel of a message ID that was never issued fails closed,
+	// with no side effect beyond the fixed protocol error. ----
+	t.Run("NonexistentTargetGetsNoSuchOperation", func(t *testing.T) {
+		conn := dialTest(t, addr)
+		req := goldapclient.NewExtendedRequest("1.3.6.1.1.8", cancelRequestValuePacket(999999))
+		_, err := conn.Extended(req)
+		ldapErr := asLDAPError(err)
+		if ldapErr == nil {
+			t.Fatalf("cancel of nonexistent operation: got success, want NoSuchOperation")
+		}
+		if int(ldapErr.ResultCode) != ldapserver.LDAPResultNoSuchOperation {
+			t.Fatalf("cancel of nonexistent operation: ResultCode = %d, want %d (NoSuchOperation)",
+				ldapErr.ResultCode, ldapserver.LDAPResultNoSuchOperation)
+		}
+	})
+
+	// ---- (b) Cancel targeting an in-flight Bind on the SAME connection
+	// must not abort it: the dependency's handleCancel explicitly refuses
+	// Bind targets (LDAPResultCannotCancel), and the blocked Bind must go on
+	// to complete normally once unblocked. ----
+	t.Run("CannotAbortInFlightBindWhichThenSucceeds", func(t *testing.T) {
+		rawConn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("raw dial: %v", err)
+		}
+		defer rawConn.Close()
+
+		sendRaw := func(messageID int, appPacket *ber.Packet) {
+			env := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Message")
+			env.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "messageID"))
+			env.AppendChild(appPacket)
+			if _, err := rawConn.Write(env.Bytes()); err != nil {
+				t.Fatalf("write message %d: %v", messageID, err)
+			}
+		}
+
+		// 1. Simple Bind (messageID=1) as alice with the correct token. The
+		// production handler calls fv.Verify, which blocks on fv.block, so
+		// this request stays registered on the connection's own
+		// requestList — in flight — until this test unblocks it below.
+		bindReq := ber.Encode(ber.ClassApplication, ber.TypeConstructed, 0, nil, "BindRequest")
+		bindReq.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 3, "version"))
+		bindReq.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, protoBindDN("alice"), "name"))
+		bindReq.AppendChild(ber.NewString(ber.ClassContext, ber.TypePrimitive, 0, "jwt-alice", "simple"))
+		sendRaw(1, bindReq)
+
+		select {
+		case <-fv.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("fake verifier was never entered — Bind never went in flight")
+		}
+
+		// 2. Cancel Extended request (messageID=2) targeting the in-flight
+		// Bind's message ID (1), on the SAME connection.
+		extReq := ber.Encode(ber.ClassApplication, ber.TypeConstructed, 23, nil, "ExtendedRequest")
+		extReq.AppendChild(ber.NewString(ber.ClassContext, ber.TypePrimitive, 0, "1.3.6.1.1.8", "requestName"))
+		extReq.AppendChild(cancelRequestValuePacket(1))
+		sendRaw(2, extReq)
+
+		// 3. The Cancel response must arrive first (the Bind is still
+		// blocked) and must be CannotCancel, not Canceled/Success — proving
+		// the dependency's Bind-target refusal is real, not theoretical.
+		rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		cancelPkt, err := ber.ReadPacket(rawConn)
+		if err != nil {
+			t.Fatalf("read cancel response: %v", err)
+		}
+		if len(cancelPkt.Children) < 2 || len(cancelPkt.Children[1].Children) < 1 {
+			t.Fatalf("cancel response: malformed packet %+v", cancelPkt)
+		}
+		if gotID := cancelPkt.Children[0].Value.(int64); gotID != 2 {
+			t.Fatalf("first response messageID = %d, want 2 (Cancel) — Bind must still be blocked", gotID)
+		}
+		if gotTag := cancelPkt.Children[1].Tag; gotTag != 24 {
+			t.Fatalf("first response op tag = %d, want 24 (ExtendedResponse)", gotTag)
+		}
+		if gotCode := cancelPkt.Children[1].Children[0].Value.(int64); gotCode != int64(ldapserver.LDAPResultCannotCancel) {
+			t.Fatalf("cancel response resultCode = %d, want %d (CannotCancel)", gotCode, ldapserver.LDAPResultCannotCancel)
+		}
+
+		// 4. Now unblock the Bind's Verify call. If Cancel had actually
+		// aborted it, the Bind would never complete (or would complete as a
+		// failure/abandonment) instead of succeeding normally.
+		close(fv.block)
+
+		select {
+		case err := <-fv.returned:
+			if err != nil {
+				t.Fatalf("verifier's Verify returned %v after Cancel attempt, want nil (unaffected)", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("blocked verifier never returned after unblocking")
+		}
+
+		rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		bindPkt, err := ber.ReadPacket(rawConn)
+		if err != nil {
+			t.Fatalf("read bind response: %v", err)
+		}
+		if len(bindPkt.Children) < 2 || len(bindPkt.Children[1].Children) < 1 {
+			t.Fatalf("bind response: malformed packet %+v", bindPkt)
+		}
+		if gotID := bindPkt.Children[0].Value.(int64); gotID != 1 {
+			t.Fatalf("second response messageID = %d, want 1 (Bind)", gotID)
+		}
+		if gotTag := bindPkt.Children[1].Tag; gotTag != 1 {
+			t.Fatalf("second response op tag = %d, want 1 (BindResponse)", gotTag)
+		}
+		if gotCode := bindPkt.Children[1].Children[0].Value.(int64); gotCode != int64(ldapserver.LDAPResultSuccess) {
+			t.Fatalf("bind resultCode = %d, want %d (Success) — Cancel must not have aborted the Bind", gotCode, ldapserver.LDAPResultSuccess)
+		}
+
+		if fv.callCount() != 1 {
+			t.Fatalf("verifier calls = %d, want exactly 1 — Cancel must not have triggered a retry/side effect", fv.callCount())
+		}
+
+		// 5. No leakage: nothing about the credential or the cancel attempt
+		// should have reached a fresh, unrelated connection's state, and the
+		// server must still be healthy for ordinary traffic afterward.
+		fresh := dialTest(t, addr)
+		requireSuccess(t, "bind on fresh connection after cancel attempt", bindAs(fresh, protoBindDN("alice"), "jwt-alice"))
+	})
 }

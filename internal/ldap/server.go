@@ -64,6 +64,22 @@ type roleResolver interface {
 // Server wraps the vjeantet/ldapserver dependency's connection lifecycle
 // (accept loop, per-connection goroutines, graceful shutdown) behind a
 // small production surface: New, Serve, Stop.
+//
+// At most one Server may exist per process at a time. Construct a new one
+// only after any prior instance has fully stopped (its Stop call has
+// returned) — never concurrently with a still-live or still-tearing-down
+// instance. This is not a property of Server itself, but of New's mandatory
+// dependency logging hardening below: ldapserver.Logger is a package-level
+// global in the vendored dependency, not scoped per-instance, so a second
+// concurrent New()/Serve() while a prior instance is still closing
+// connections races against that same assignment (see also the related,
+// independently-observed Server.wg.Add()/Server.wg.Wait() race against this
+// same reassignment documented in adversarial_test.go). That underlying
+// dependency race is a known, accepted limitation — out of scope to fix
+// here — but the "one Server per process, constructed only after the prior
+// one's Stop has returned" discipline this package requires is what avoids
+// hitting it in cmd/ch-oauth-ldap's actual usage (exactly one New() call for
+// the life of the process).
 type Server struct {
 	ldapSrv *ldapserver.Server
 }
@@ -72,6 +88,11 @@ type Server struct {
 // fails construction when the configured user or group base DN cannot be
 // parsed (see dn.go) — the plan's "fail startup on invalid configured DNs"
 // requirement — or when verifier/roles is nil.
+//
+// Per the Server type doc above, at most one Server may exist per process
+// at a time: New must not be called again until any prior instance's Stop
+// has returned, because it unconditionally reassigns the vendored
+// dependency's package-level ldapserver.Logger.
 //
 // rootCtx is the runtime lifecycle context, deliberately a constructor
 // argument rather than a Config field: it is not static configuration, it
@@ -106,7 +127,9 @@ func New(rootCtx context.Context, cfg Config, v verifier, roles roleResolver) (*
 	// This MUST happen before any listener ever serves traffic; doing it
 	// here, inside the constructor every call site must invoke before it
 	// can Serve, is what guarantees that ordering rather than relying on
-	// caller discipline.
+	// caller discipline. This is also the assignment the Server type doc's
+	// "at most one Server per process at a time" constraint above exists to
+	// protect: ldapserver.Logger is package-level, not per-instance.
 	ldapserver.Logger = ldapserver.DiscardingLogger
 
 	hs := &handlerSource{

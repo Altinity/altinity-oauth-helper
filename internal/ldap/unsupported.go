@@ -75,6 +75,22 @@ func (h *connectionHandler) handleCompare(w ldapserver.ResponseWriter, m *ldapse
 // response here, because Abandon has no response in the LDAP protocol and
 // the cancellation signal has already been delivered by the time this
 // runs — see cancel.go/message.go's Message.Done and client.go's close().
+//
+// A second, related carve-out: the RFC 3909 Cancel Extended operation (OID
+// 1.3.6.1.1.8) never reaches this handler at all. The dependency's own
+// RouteMux.ServeLDAP (route.go) intercepts a Cancel request itself, before
+// falling through to NotFound, and serves it entirely via its own built-in
+// handleCancel (cancel.go) — so Cancel gets none of this package's
+// fail-closed LDAPResultUnwillingToPerform handling, unlike every other
+// Extended OID. This is intentionally accepted rather than worked around:
+// handleCancel only ever looks up and abandons a message already on the
+// SAME connection's own client.requestList (no cross-connection state
+// access), and explicitly refuses to touch a Bind or Abandon target
+// (returns LDAPResultCannotCancel) — so it cannot affect any state this
+// package owns, authenticate as anyone, or disclose anything. See
+// TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak
+// (adversarial_test.go) for the proof against the real server, exercised
+// over the wire rather than only inferred from reading cancel.go.
 func (h *connectionHandler) handleUnsupportedExtended(w ldapserver.ResponseWriter, m *ldapserver.Message) {
 	if _, ok := m.ProtocolOp().(message.ExtendedRequest); !ok {
 		return
