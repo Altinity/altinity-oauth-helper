@@ -219,9 +219,20 @@ func startTestServer(t *testing.T, v verifier, r roleResolver) (addr string, roo
 	var once sync.Once
 	stop = func() {
 		once.Do(func() {
+			// Close OUR OWN listener reference directly instead of calling
+			// srv.Stop() first — see cmd/ch-oauth-ldap/main.go's run() for
+			// the full explanation. The vendored vjeantet/ldapserver
+			// dependency stores the listener in a plain, unsynchronized
+			// struct field, written by the background Serve goroutine and
+			// read by Stop with no lock between them; calling Stop()
+			// concurrently with that goroutine is a genuine data race.
+			// Closing ln here unblocks Serve's Accept() call, and
+			// receiving from serveErr below is a channel synchronization
+			// point that makes the subsequent srv.Stop() call race-free.
+			_ = ln.Close()
+			<-serveErr
 			srv.Stop()
 			cancel()
-			<-serveErr
 		})
 	}
 	t.Cleanup(stop)

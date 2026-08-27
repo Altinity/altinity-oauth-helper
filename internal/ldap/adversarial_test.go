@@ -117,13 +117,28 @@ func TestAdversarial_ShutdownCancelsBlockedVerifierAndServerTerminates(t *testin
 	// terminates — Serve must return — not merely that the one already-
 	// canceled request was abandoned. A hung Serve here would mean a
 	// leaked accept loop/goroutine surviving process shutdown.
-	srv.Stop()
+	//
+	// Close OUR OWN listener reference directly rather than calling
+	// srv.Stop() first — see cmd/ch-oauth-ldap/main.go's run() for the full
+	// explanation. The vendored vjeantet/ldapserver dependency stores the
+	// listener in a plain, unsynchronized struct field, written by the
+	// background Serve goroutine and read by Stop with no lock between
+	// them; calling Stop() concurrently with that goroutine is a genuine
+	// data race. Closing ln here unblocks Serve's Accept() call, and
+	// receiving from serveErr below is a channel synchronization point
+	// that makes the subsequent srv.Stop() call (still needed for its
+	// wg.Wait() graceful-drain semantics) race-free.
+	if err := ln.Close(); err != nil {
+		t.Fatalf("ln.Close: %v", err)
+	}
 
 	select {
 	case <-serveErr:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("Serve never returned after Stop: server did not terminate")
+		t.Fatalf("Serve never returned after closing the listener: server did not terminate")
 	}
+
+	srv.Stop()
 
 	select {
 	case <-bindDone:

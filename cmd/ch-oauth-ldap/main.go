@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/signal"
@@ -133,8 +134,39 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	select {
 	case <-signalCtx.Done():
 		log.Info().Msg("ch-oauth-ldap shutting down")
+
+		// Close OUR OWN reference to the listener directly, instead of
+		// calling ldapServer.Stop() first. The vendored vjeantet/ldapserver
+		// dependency stores the listener in a plain, unsynchronized struct
+		// field (Server.Listener): Serve writes it (background goroutine,
+		// above) and Stop reads it (server.go:186) with no lock between
+		// them — calling Stop() concurrently with the still-running Serve
+		// goroutine is a genuine data race in the dependency itself
+		// (confirmed with -race).
+		//
+		// Closing our own listener reference unblocks the background
+		// goroutine's blocked Accept() call, which returns an error that
+		// propagates through Serve() into errCh. Receiving from errCh
+		// below is a channel synchronization point: by the time that
+		// receive completes, the background goroutine's earlier write to
+		// Server.Listener (which happened at the very start of Serve,
+		// long before Accept ever blocked) is guaranteed visible to this
+		// goroutine. Only then do we call ldapServer.Stop() — its own
+		// internal Listener.Close() now races against nothing, since the
+		// background goroutine has already returned.
+		if err := listener.Close(); err != nil {
+			log.Warn().Err(err).Msg("closing LDAP listener during shutdown")
+		}
+		serveErr := <-errCh
+
+		// Stop() is still required after the above for its s.wg.Wait()
+		// graceful-drain semantics (waiting for already-accepted client
+		// connections to finish). Its own internal Listener.Close() call
+		// is now a no-op-shaped close of an already-closed listener, which
+		// Stop() already ignores.
 		ldapServer.Stop()
-		if serveErr := <-errCh; serveErr != nil {
+
+		if serveErr != nil && !errors.Is(serveErr, net.ErrClosed) {
 			return serveErr
 		}
 		return nil
