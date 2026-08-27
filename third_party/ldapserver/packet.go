@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 
 	ldap "github.com/vjeantet/goldap/message"
 )
@@ -77,7 +78,7 @@ func readLdapMessageBytes(br *bufio.Reader) (ret *[]byte, err error) {
 	if err != nil {
 		return
 	}
-	readBytes(br, &bytes, tagAndLength.Length)
+	_, err = readBytes(br, &bytes, tagAndLength.Length)
 	return &bytes, err
 }
 
@@ -166,16 +167,21 @@ func readTagAndLength(conn *bufio.Reader, bytes *[]byte) (ret ldap.TagAndLength,
 	return
 }
 
-// Read "length" bytes from the connection
+// Read "length" bytes from the connection, reading to completion rather
+// than assuming one underlying conn.Read call fills the buffer — a single
+// Read is explicitly allowed by io.Reader's contract to return fewer bytes
+// than requested even with a nil error (e.g. a TCP segment boundary lands
+// mid-message), so io.ReadFull's read-until-full-or-error loop is required
+// here, not optional. See PATCHES.md item 2 for the full writeup of the bug
+// this replaced (a lone conn.Read call plus a caller that discarded this
+// function's return values entirely).
+//
 // Append the read bytes to "bytes"
 // Return the last read byte
 func readBytes(conn *bufio.Reader, bytes *[]byte, length int) (b byte, err error) {
 	newbytes := make([]byte, length)
-	n, err := conn.Read(newbytes)
-	if n != length {
-		err = fmt.Errorf("%d bytes read instead of %d", n, length)
-		return
-	} else if err != nil {
+	_, err = io.ReadFull(conn, newbytes)
+	if err != nil {
 		return
 	}
 	*bytes = append(*bytes, newbytes...)

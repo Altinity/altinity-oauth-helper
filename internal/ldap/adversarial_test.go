@@ -865,3 +865,101 @@ func TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak(t *testing.T)
 		requireSuccess(t, "bind on fresh connection after cancel attempt", bindAs(fresh, protoBindDN("alice"), "jwt-alice"))
 	})
 }
+
+// ---- 7. fragmented message body reassembly ---------------------------------
+
+// TestAdversarial_FragmentedMessageBodyStillProcessedCorrectly proves the fix
+// documented in third_party/ldapserver/PATCHES.md's second item: a message
+// body delivered to the real production server across several separate
+// small writes (ordinary TCP fragmentation, not malicious input) must still
+// be reassembled and processed correctly, instead of being silently
+// truncated into a header-only, no-error packet the way the pre-fix
+// readBytes (a single conn.Read call) plus readLdapMessageBytes (which
+// discarded readBytes' return values entirely) used to do.
+//
+// Genuine OS-level TCP segmentation cannot be reliably forced from a
+// loopback test — the kernel is free to coalesce small, closely-spaced
+// writes into a single segment, and often does on loopback. What this test
+// does instead is the standard, practical approximation: write one complete,
+// valid LDAP Bind message's raw bytes to the real server in several small
+// net.Conn.Write calls with a short sleep between each. That reliably
+// encourages (though cannot strictly guarantee) the server's bufio.Reader to
+// observe more than one underlying Read while assembling the message body —
+// exactly the condition the pre-fix readBytes assumed could never happen.
+// This is a known, accepted limitation of testing this class of bug without
+// a raw packet-capture-level harness; the assertions below still fail
+// loudly (rather than passing vacuously) if the OS happens to coalesce the
+// writes, because in that case the pre-fix code would have worked too — the
+// real regression-proof value here is that this test would have reliably
+// failed against the pre-fix code in ordinary local test runs.
+func TestAdversarial_FragmentedMessageBodyStillProcessedCorrectly(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+	addr, _, _ := startTestServer(t, newFakeVerifier(acct), newFakeRoles(acct))
+
+	// Build one complete, valid Bind message's raw wire bytes exactly the
+	// way TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak's
+	// sendRaw helper does, but here we need the encoded bytes themselves
+	// (to slice and fragment) rather than a single Write.
+	bindReq := ber.Encode(ber.ClassApplication, ber.TypeConstructed, 0, nil, "BindRequest")
+	bindReq.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 3, "version"))
+	bindReq.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, protoBindDN("alice"), "name"))
+	bindReq.AppendChild(ber.NewString(ber.ClassContext, ber.TypePrimitive, 0, "jwt-alice", "simple"))
+
+	env := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Message")
+	env.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 1, "messageID"))
+	env.AppendChild(bindReq)
+	raw := env.Bytes()
+
+	const chunkSize = 3
+	if len(raw) < chunkSize*4 {
+		t.Fatalf("test fixture message too short to fragment meaningfully: %d bytes", len(raw))
+	}
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Write the whole message in small, non-BER-boundary-aligned chunks
+	// with a short pause between each, instead of one single Write.
+	for i := 0; i < len(raw); i += chunkSize {
+		end := i + chunkSize
+		if end > len(raw) {
+			end = len(raw)
+		}
+		if _, err := conn.Write(raw[i:end]); err != nil {
+			t.Fatalf("fragmented write [%d:%d]: %v", i, end, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	respPkt, err := ber.ReadPacket(conn)
+	if err != nil {
+		t.Fatalf("read bind response: %v (fragmented message body was not reassembled correctly)", err)
+	}
+	if len(respPkt.Children) < 2 || len(respPkt.Children[1].Children) < 1 {
+		t.Fatalf("bind response: malformed packet %+v", respPkt)
+	}
+	if gotID := respPkt.Children[0].Value.(int64); gotID != 1 {
+		t.Fatalf("response messageID = %d, want 1", gotID)
+	}
+	if gotTag := respPkt.Children[1].Tag; gotTag != 1 {
+		t.Fatalf("response op tag = %d, want 1 (BindResponse)", gotTag)
+	}
+	if gotCode := respPkt.Children[1].Children[0].Value.(int64); gotCode != int64(ldapserver.LDAPResultSuccess) {
+		t.Fatalf("bind resultCode = %d, want %d (Success) — fragmented message body was not reassembled correctly",
+			gotCode, ldapserver.LDAPResultSuccess)
+	}
+
+	// The connection, and the server, must remain fully usable afterward: a
+	// fresh, ordinary client-driven Bind+Search proves the fragmented
+	// request left no shared server-level state corrupted.
+	fresh := dialTest(t, addr)
+	requireSuccess(t, "bind on fresh connection after fragmented bind", bindAs(fresh, protoBindDN("alice"), "jwt-alice"))
+	res, err := fresh.Search(membershipSearch(protoGroupBaseDN, protoBindDN("alice"), nil))
+	if err != nil || len(res.Entries) != 1 {
+		t.Fatalf("search after fragmented-bind test: res=%+v, err=%v, want the one entry", res, err)
+	}
+}

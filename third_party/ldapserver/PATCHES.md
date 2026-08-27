@@ -2,7 +2,7 @@
 
 This is a vendored, patched copy of `github.com/vjeantet/ldapserver`'s root
 package, pinned via a `replace` directive in the root `go.mod`. It exists
-solely to carry one fix the pinned version
+solely to carry two fixes the pinned version
 (`v1.0.2-0.20260725103726-663e6b9910fb`) lacks. `LICENSE` is the unmodified
 upstream MIT license, preserved per its terms; only `packet.go` differs from
 upstream, as follows. Every other file (`cancel.go`, `client.go`,
@@ -58,9 +58,86 @@ and asserts both that the connection is closed without a bounded-allocation
 budget being exceeded (proving the fix, not just server survival) and that a
 fresh connection still Binds/Searches correctly afterward.
 
+## A single short `Read` silently truncated message bodies with no error
+
+`packet.go`'s `readBytes` is the function every byte read off the wire goes
+through — both the one-byte-at-a-time tag/length parsing in
+`readTagAndLength` and the bulk body read `readLdapMessageBytes` issues once
+the declared length is known. The pre-fix version did exactly one
+`conn.Read(newbytes)` call and treated it as authoritative:
+
+```go
+func readBytes(conn *bufio.Reader, bytes *[]byte, length int) (b byte, err error) {
+	newbytes := make([]byte, length)
+	n, err := conn.Read(newbytes)
+	if n != length {
+		err = fmt.Errorf("%d bytes read instead of %d", n, length)
+		return
+	}
+	...
+}
+```
+
+That assumption is simply wrong: per Go's `io.Reader` contract, a single
+`Read` call is explicitly allowed to return fewer bytes than requested even
+with `err == nil` — this is not a hypothetical edge case, it is normal,
+expected behavior whenever a TCP message body happens to arrive split across
+more than one network segment (entirely plausible for, e.g., a longer
+JWT-as-Bind-password). A correct reader must loop until it has everything it
+asked for, EOF, or a real error; this one didn't.
+
+It got worse one call site up. `readLdapMessageBytes` called this function
+for the message body and discarded *both* of its return values:
+
+```go
+func readLdapMessageBytes(br *bufio.Reader) (ret *[]byte, err error) {
+	var bytes []byte
+	var tagAndLength ldap.TagAndLength
+	tagAndLength, err = readTagAndLength(br, &bytes)
+	if err != nil {
+		return
+	}
+	readBytes(br, &bytes, tagAndLength.Length)   // return values ignored
+	return &bytes, err
+}
+```
+
+On a short body read, `readBytes` hit its `n != length` branch and returned
+*before* appending anything to `*bytes` (the `append` only runs on the
+exact-length success path) — so `bytes` stayed as just the tag+length
+header, `readLdapMessageBytes`'s own `err` stayed `nil` (it was last set by
+the already-successful `readTagAndLength` call), and the caller got back a
+truncated, header-only byte slice with **no error signal at all**. BER
+decoding that truncated slice downstream then either failed unpredictably
+or, via the `recover()` in `messagePacket.readMessage()`, got silently
+turned into a generic "invalid packet" error — either way, an ordinary,
+non-malicious client whose message body happened not to arrive in a single
+`Read` could have its connection fail for no legitimate protocol reason.
+
+The fix has two parts, both in `packet.go`:
+
+1. `readBytes` now uses `io.ReadFull(conn, newbytes)` instead of a single
+   `conn.Read` call. `io.ReadFull` already implements exactly the
+   read-until-full-or-error loop this needed, and returns a proper error
+   (`io.ErrUnexpectedEOF` on a short read due to EOF, or the underlying
+   error otherwise) that the existing `if err != nil { return }` control
+   flow handles correctly with no further change.
+2. `readLdapMessageBytes` now captures and returns `readBytes`' error
+   (`_, err = readBytes(br, &bytes, tagAndLength.Length)`) instead of
+   discarding it, so a short/failed body read makes the function return a
+   non-nil `err` rather than a truncated slice with `err == nil`.
+
+See `internal/ldap/adversarial_test.go` in the consuming repo for the
+regression test
+(`TestAdversarial_FragmentedMessageBodyStillProcessedCorrectly`) that
+delivers one valid, complete LDAP message's bytes to the real production
+server as several small, separately-timed writes (to encourage the server
+side to observe them as separate `Read` calls) and asserts the message is
+still processed correctly end to end.
+
 ## Keeping this fork in sync
 
 If the pinned `github.com/vjeantet/ldapserver` version in the root `go.mod`
 is ever bumped, re-diff this directory against the new upstream package and
-re-apply exactly this change to `readTagAndLength` (or drop this fork
-entirely if upstream has fixed it by then).
+re-apply both of the changes above (or drop this fork entirely if upstream
+has fixed them by then).
