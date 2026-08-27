@@ -164,6 +164,32 @@ func TestVerifierAcceptsValidJWT(t *testing.T) {
 	require.Equal(t, "alice@example.com", resp.Email)
 }
 
+// TestVerifierAcceptsLegacySingularAudienceEndToEnd is the HTTP-level
+// counterpart of TestValidateConfigAcceptsLegacySingularAudience: the
+// legacy singular oauth.audience form must still authenticate a real
+// request through the full Handler, not merely pass config activation.
+func TestVerifierAcceptsLegacySingularAudienceEndToEnd(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.OAuth.ExpectedAudiences = nil
+	cfg.OAuth.Audience = p.audience
+	v := newTestVerifier(t, cfg)
+
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub":            "u-1",
+		"email":          "alice@example.com",
+		"email_verified": true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
 func TestVerifierRejectsWrongAudience(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
