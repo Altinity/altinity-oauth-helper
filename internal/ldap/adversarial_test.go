@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -48,7 +49,11 @@ import (
 //     invariant under overlapping traffic (never a stale/foreign principal's
 //     role), not only "runs clean under -race";
 //   - the malformed-input test here exercises several distinct malformed
-//     BER shapes, not one.
+//     BER shapes, not one;
+//   - the oversized-declared-length test here proves the fix in
+//     third_party/ldapserver/PATCHES.md by bounding the actual allocation a
+//     malicious 6-byte header can provoke, not merely that the server
+//     survives it — see that PATCHES.md for the full vulnerability writeup.
 
 // ---- 1. blocking-verifier cancellation: root cancellation + Stop ----------
 
@@ -486,6 +491,81 @@ func TestAdversarial_MalformedBERVariantsSurviveThenFreshConnectionWorks(t *test
 				t.Fatalf("search after %s: res=%+v, err=%v, want the one entry", name, res, err)
 			}
 		})
+	}
+}
+
+// TestAdversarial_OversizedDeclaredLengthRejectedWithoutBoundedAllocation
+// proves the fix documented in third_party/ldapserver/PATCHES.md: the exact
+// 6-byte header used as the "truncated long-form declared len" case above
+// (0x30 0x84 0x7f 0xff 0xff 0xff — SEQUENCE, long-form length, decoding to
+// 0x7fffffff, ~2 GiB) must be rejected by closing the connection WITHOUT
+// ever attempting the advertised allocation, not merely "survived" the way
+// the test above only checks. Both the vulnerable and the fixed dependency
+// eventually error out on this exact input (the connection has no more
+// bytes to satisfy the declared length either way), so a plain
+// "did the server return an error" assertion cannot tell them apart; only
+// bounding the actual memory the server allocated handling it can. This
+// test therefore asserts two things a bounded-allocation fix — and only a
+// bounded-allocation fix — produces: the connection is closed promptly
+// (never blocked trying to fill a ~2 GiB buffer that will never arrive),
+// and total process allocation attributable to handling it stays far below
+// what a single such attempt would cost.
+func TestAdversarial_OversizedDeclaredLengthRejectedWithoutBoundedAllocation(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+	addr, _, _ := startTestServer(t, newFakeVerifier(acct), newFakeRoles(acct))
+
+	oversizedHeader := []byte{0x30, 0x84, 0x7f, 0xff, 0xff, 0xff}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := raw.Write(oversizedHeader); err != nil {
+		t.Fatalf("write oversized header: %v", err)
+	}
+
+	// A fixed server rejects the declared length before trying to read the
+	// ~2 GiB body it advertised, and closes the connection immediately —
+	// it must never sit blocked waiting for bytes that will never arrive.
+	// A bounded read deadline distinguishes "server closed it" (read
+	// returns promptly, with 0 bytes) from "server is still blocked trying
+	// to fill the advertised buffer" (read times out).
+	raw.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 16)
+	n, readErr := raw.Read(buf)
+	raw.Close()
+
+	if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("server never closed the connection after the oversized declared length (read timed out) — looks like it is still blocked trying to fill the advertised ~2 GiB buffer")
+	}
+	if n != 0 {
+		t.Fatalf("expected the server to close the connection without sending any bytes, got %d bytes", n)
+	}
+
+	runtime.ReadMemStats(&after)
+
+	// 8 MiB is generous headroom over third_party/ldapserver's 1 MiB
+	// maxMessageBodyLength cap plus ordinary test/runtime allocation noise
+	// (goroutine stacks, GC bookkeeping, the client dial itself); the
+	// vulnerable code path would have attempted make([]byte, 0x7fffffff)
+	// (~2 GiB) here — two orders of magnitude past this budget, so this
+	// assertion cannot pass by accident.
+	const allocBudget = 8 << 20 // 8 MiB
+	if delta := after.TotalAlloc - before.TotalAlloc; delta > allocBudget {
+		t.Fatalf("handling the oversized declared length allocated %d bytes (budget %d) — looks like the server attempted the advertised ~2 GiB allocation before rejecting the header", delta, allocBudget)
+	}
+
+	// A fresh, ordinary connection must still work correctly afterward —
+	// preserving the "survives, then works" proof this test extends.
+	conn := dialTest(t, addr)
+	requireSuccess(t, "bind after oversized declared length", bindAs(conn, protoBindDN("alice"), "jwt-alice"))
+	res, err := conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("alice"), nil))
+	if err != nil || len(res.Entries) != 1 {
+		t.Fatalf("search after oversized declared length: res=%+v, err=%v, want the one entry", res, err)
 	}
 }
 

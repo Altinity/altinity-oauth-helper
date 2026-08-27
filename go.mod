@@ -37,3 +37,10 @@ require (
 // correlation past 127, and a missing ModifyDNResponse.SetResultCode
 // needed for fail-closed ModifyDN handling. See third_party/goldap/PATCHES.md.
 replace github.com/vjeantet/goldap => ./third_party/goldap
+
+// Local fork carrying a pre-authentication memory-safety fix the pinned
+// version lacks: an unauthenticated 4-byte BER long-form length can declare
+// up to ~2 GiB, and the dependency allocated a buffer of exactly that
+// declared size before any Bind/auth ever runs. See
+// third_party/ldapserver/PATCHES.md.
+replace github.com/vjeantet/ldapserver => ./third_party/ldapserver
