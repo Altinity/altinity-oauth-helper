@@ -67,7 +67,10 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	verifier := NewVerifier(cfg)
+	verifier, err := NewVerifier(cfg)
+	if err != nil {
+		return err
+	}
 
 	signalCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

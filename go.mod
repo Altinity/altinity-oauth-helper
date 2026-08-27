@@ -19,8 +19,8 @@ require (
 )
 
 require (
-	github.com/altinity/go-mcp-oauth-sdk v0.1.0
+	github.com/altinity/go-mcp-oauth-sdk v0.2.0
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
-	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 )

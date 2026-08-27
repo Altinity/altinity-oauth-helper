@@ -2,58 +2,28 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/altinity/go-mcp-oauth-sdk/oauth"
 	"github.com/rs/zerolog/log"
+
+	"github.com/altinity/altinity-oauth-helper/internal/verification"
 )
 
-// Verifier wraps the oauth.Verifier with the sidecar-specific identity policy
-// and a bounded cache of verification outcomes. The cache is the only state
-// the sidecar carries beyond config; per-JWT-hash entries expire after
-// positiveTTL/negativeTTL so a rotated token can't be replayed past its real
-// exp anyway.
-//
-// Cache bounding has two layers:
-//   - cacheMaxEntries hard cap with TTL-aware insertion-time eviction (drops
-//     expired entries first; if still over cap, drops the entry closest to
-//     expiry). Defense against memory growth under token churn.
-//   - Optional background reaper that walks the cache periodically and
-//     prunes expired entries (started by NewVerifierWithReaper).
-//
-// The mutex is a single sync.Mutex — fine for a sidecar that's at-most-one
-// replica per CH pod and serves only loopback requests; contention is bounded.
+// Verifier is the sidecar's thin HTTP adapter over the shared
+// internal/verification core: Basic-auth parsing, the GET/POST /verify
+// handler, and scope→settings response derivation are sidecar-specific;
+// JWT/JWKS verification, identity binding, and the verification cache all
+// live in internal/verification (and, beneath that, in
+// github.com/altinity/go-mcp-oauth-sdk/oauth).
 type Verifier struct {
-	cfg      *Config
-	oauthVer *oauth.Verifier
-
-	mu       sync.Mutex
-	cache    map[string]cacheEntry
-	cacheCap int // 0 = unlimited (used by tests)
+	cfg  *Config
+	core *verification.Verifier
 }
-
-type cacheEntry struct {
-	ok        bool
-	settings  map[string]string
-	email     string // preserved so a cache hit still surfaces email in the response (log-friendly)
-	failure   error  // preserved as-is so errors.Is/As still works after a cache hit (sentinels keep identity)
-	expiresAt time.Time
-}
-
-// cacheMaxEntries bounds in-memory growth. Each entry is ~256 B with typical
-// settings/email payloads. At 10000 entries the cache footprint is ~2.5 MiB —
-// fits comfortably in the 128 MiB sidecar resource limit even before TTLs fire.
-// 10000 also outstrips realistic OAuth-active-user counts for a single CH pod.
-const cacheMaxEntries = 10000
 
 // verifyResponse is the JSON body returned to ClickHouse on success. The
 // `settings` field is the only one CH consumes; we include `email` so an
@@ -64,70 +34,61 @@ type verifyResponse struct {
 	Email    string            `json:"email,omitempty"`
 }
 
-// NewVerifier constructs a Verifier. The oauth.Verifier inside it shares the
-// JWKS cache implementation with MCP — keeping the JWKS-rotation behaviour
-// identical across binaries simplifies operator mental model.
-func NewVerifier(cfg *Config) *Verifier {
-	return &Verifier{
-		cfg: cfg,
-		oauthVer: oauth.NewVerifier(oauth.OAuthConfig{
-			Enabled:        true,
-			StrictJWTOnly:  true,
-			Issuer:         cfg.OAuth.Issuer,
-			JWKSURL:        cfg.OAuth.JWKSURL,
-			Audience:       cfg.OAuth.Audience,
-			RequiredScopes: cfg.OAuth.RequiredScopes,
-			JWKSCacheTTL:   cfg.OAuth.JWKSCacheTTL,
-		}),
-		cache:    make(map[string]cacheEntry),
-		cacheCap: cacheMaxEntries,
+// errAuthenticationFailed is the only error text ever returned for a
+// request whose Authorization header parsed but whose credential then
+// failed identity/token validation. Collapsing every distinct validation
+// failure reason — bad signature, issuer mismatch, audience mismatch,
+// missing/malformed/expired exp, username-claim mismatch, reserved
+// username, verified-email/domain policy, insufficient scopes, or a
+// transient JWKS/network failure — into this one fixed string is a
+// deliberate security property, required by the issue's identity contract
+// ("authentication failures should not disclose whether failure was caused
+// by signature, issuer, audience, username mismatch, reserved username,
+// email policy, or token expiry"), not an oversight or a simplification.
+// The SDK's ValidateStrictJWT and internal/identity/internal/verification
+// return distinct, specific typed errors internally — precisely so callers
+// wanting errors.Is/As (like the verification cache, which must preserve
+// error identity across cache hits — see CLAUDE.md's cache-correctness
+// rule) can still do so. This sidecar is the trust boundary where that
+// distinction must stop: operators get the real reason from the structured
+// debug log line the handler emits alongside this response (see Handler),
+// never from the HTTP body a caller (or anything relaying its response) can
+// observe.
+//
+// This is distinct from the 401 the handler returns when the Authorization
+// header itself is missing or unparseable (see the parseBasicAuth branch in
+// Handler) — that's a transport-level precondition, not one of the
+// identity/token checks this non-disclosure guarantee covers, so it
+// intentionally isn't collapsed into this string.
+var errAuthenticationFailed = errors.New("authentication failed")
+
+// NewVerifier constructs a Verifier over the shared verification core built
+// from cfg. Returns an error on invalid configuration (e.g. an empty
+// effective audience list, a negative verifier_leeway, or an unknown
+// identity.match_mode) — main.go treats this as a fatal startup error.
+func NewVerifier(cfg *Config) (*Verifier, error) {
+	core, err := verification.New(cfg.toVerificationConfig())
+	if err != nil {
+		return nil, err
 	}
+	return &Verifier{cfg: cfg, core: core}, nil
 }
 
-// JWKSHealth surfaces the underlying oauth.Verifier's JWKS-fetch health for
+// JWKSHealth surfaces the shared verification core's JWKS-fetch health for
 // /readyz. The triple is (last attempt, last success, last error). All-zero
 // times mean "no fetch attempted yet" — readiness handlers treat that as a
 // boot-grace OK so the kubelet doesn't keep the pod NotReady forever waiting
 // for the first /verify request.
 func (v *Verifier) JWKSHealth() (lastAttempt, lastSuccess time.Time, lastErr error) {
-	return v.oauthVer.JWKSHealth()
+	return v.core.JWKSHealth()
 }
 
-// StartReaper launches a background goroutine that prunes expired cache
-// entries every interval and exits when ctx is cancelled. Optional; the
-// insertion-time eviction in storeCache is the primary memory bound.
-// Called from main with the same signal-derived context the HTTP server uses.
+// StartReaper launches a background goroutine that prunes expired
+// verification-cache entries every interval and exits when ctx is
+// cancelled. Called from main with the same signal-derived context the HTTP
+// server uses.
 func (v *Verifier) StartReaper(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		return
-	}
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				v.pruneExpired()
-			}
-		}
-	}()
-}
-
-// pruneExpired walks the cache once and drops entries whose TTL has elapsed.
-// O(n) under the mutex; called from the background reaper and from
-// storeCache when the cap is hit. Cache sizes here (~10 k max) make this
-// trivial — a full walk takes microseconds.
-func (v *Verifier) pruneExpired() {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	now := time.Now()
-	for k, e := range v.cache {
-		if now.After(e.expiresAt) {
-			delete(v.cache, k)
-		}
-	}
+	v.core.StartReaper(ctx, interval)
 }
 
 // Handler returns the http.Handler for /verify. Any non-200 status tells
@@ -151,195 +112,37 @@ func (v *Verifier) Handler() http.Handler {
 		}
 		user, token, ok := parseBasicAuth(r.Header.Get("Authorization"))
 		if !ok {
+			// Intentionally a distinct, transport-level rejection (401 +
+			// its own message), not the generic credential-validation
+			// failure below: there is no credential here to have failed a
+			// check, so this isn't a case the errAuthenticationFailed
+			// non-disclosure guarantee needs to cover. Do not collapse
+			// this into errAuthenticationFailed.
 			log.Debug().Msg("verify: missing or malformed Basic Authorization header")
 			http.Error(w, "missing or malformed Authorization", http.StatusUnauthorized)
 			return
 		}
 
-		resp, err := v.verify(r.Context(), user, token)
+		result, err := v.core.Verify(r.Context(), user, token)
 		if err != nil {
+			// Full detail goes to the operator-facing debug log only. The
+			// HTTP response never gets more than errAuthenticationFailed —
+			// see that var's doc comment for why.
 			log.Debug().Err(err).Str("user", user).Msg("verify: rejected")
-			http.Error(w, err.Error(), http.StatusForbidden)
+			http.Error(w, errAuthenticationFailed.Error(), http.StatusForbidden)
 			return
 		}
 
+		resp := &verifyResponse{
+			Settings: settingsFromScopes(result.Claims.Scopes, v.cfg.SettingsFromScope),
+			Email:    result.Claims.Email,
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// verifyResponse is two map[string]string + string fields — Encode
 		// can't realistically fail here (no marshal hooks, no Writer
 		// errors are surfaced past the header write). Drop deliberately.
 		_ = json.NewEncoder(w).Encode(resp)
 	})
-}
-
-// verify performs the actual JWT validation + identity policy + scope→settings
-// derivation. It also handles the small verification cache.
-func (v *Verifier) verify(ctx context.Context, user, token string) (*verifyResponse, error) {
-	cacheKey := sha256Hex(user + "\x00" + token)
-
-	v.mu.Lock()
-	if entry, found := v.cache[cacheKey]; found && time.Now().Before(entry.expiresAt) {
-		v.mu.Unlock()
-		if entry.ok {
-			// Preserve email on cache hits so operator logs / response
-			// bodies stay consistent with cache-miss responses.
-			return &verifyResponse{Settings: entry.settings, Email: entry.email}, nil
-		}
-		// Return the original error so errors.Is(err, oauth.ErrEmailNotVerified)
-		// (etc.) still works after a cache hit. Sentinels are package-level
-		// vars and safe to share across goroutines.
-		return nil, entry.failure
-	}
-	v.mu.Unlock()
-
-	resp, err := v.verifyUncached(ctx, user, token)
-	v.storeCache(cacheKey, resp, err)
-	return resp, err
-}
-
-func (v *Verifier) verifyUncached(ctx context.Context, user, token string) (*verifyResponse, error) {
-	claims, err := v.oauthVer.ValidateToken(ctx, token)
-	if err != nil {
-		return nil, fmt.Errorf("token validation failed: %w", err)
-	}
-	if claims == nil {
-		// ValidateToken soft-passes opaque tokens and JWTs with no JWKS — both
-		// are misconfigurations on the sidecar side (we always have a JWKS).
-		return nil, errors.New("token validation produced no claims; sidecar requires a signed JWT")
-	}
-
-	principal, err := v.principalFromClaims(claims)
-	if err != nil {
-		return nil, err
-	}
-
-	if !v.matchUser(user, principal) {
-		return nil, fmt.Errorf("Basic user %q does not match JWT %s claim %q", user, v.cfg.Identity.UsernameClaim, principal)
-	}
-
-	if err := v.applyIdentityPolicy(claims); err != nil {
-		return nil, err
-	}
-
-	return &verifyResponse{
-		Settings: settingsFromScopes(claims.Scopes, v.cfg.SettingsFromScope),
-		Email:    claims.Email,
-	}, nil
-}
-
-// principalFromClaims picks the JWT claim to match against the Basic user
-// half. For `email`, we fall back to the namespaced `*/email` claim used by
-// Auth0 third-party tokens.
-func (v *Verifier) principalFromClaims(claims *oauth.Claims) (string, error) {
-	switch v.cfg.Identity.UsernameClaim {
-	case "email", "":
-		if e := strings.TrimSpace(claims.Email); e != "" {
-			return e, nil
-		}
-		if e := oauth.EmailFromNamespacedExtra(claims.Extra); e != "" {
-			return e, nil
-		}
-		return "", errors.New("JWT carries no email claim")
-	case "sub":
-		if s := strings.TrimSpace(claims.Subject); s != "" {
-			return s, nil
-		}
-		return "", errors.New("JWT carries no sub claim")
-	default:
-		if raw, ok := claims.Extra[v.cfg.Identity.UsernameClaim]; ok {
-			if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
-				return strings.TrimSpace(s), nil
-			}
-		}
-		return "", fmt.Errorf("JWT carries no %q claim", v.cfg.Identity.UsernameClaim)
-	}
-}
-
-func (v *Verifier) matchUser(user, principal string) bool {
-	switch v.cfg.Identity.MatchMode {
-	case "exact":
-		return user == principal
-	default:
-		return strings.EqualFold(strings.TrimSpace(user), strings.TrimSpace(principal))
-	}
-}
-
-// applyIdentityPolicy enforces verified-email + domain allow-lists. These were
-// previously enforced in pkg/oauth on the MCP side; they live on the sidecar
-// alone now because MCP no longer terminates the JWT cryptographically.
-//
-// RequireEmailVerified intentionally only fires when an email claim is
-// present. Tokens without an email claim bypass this gate — by design, since
-// `username_claim: sub` deployments don't need email at all. Use
-// allowed_email_domains for the orthogonal "require an email claim, and
-// require its domain in the allowlist" policy.
-func (v *Verifier) applyIdentityPolicy(claims *oauth.Claims) error {
-	if v.cfg.Identity.RequireEmailVerified && claims.Email != "" && !claims.EmailVerified {
-		return oauth.ErrEmailNotVerified
-	}
-	if len(v.cfg.Identity.AllowedEmailDomains) > 0 {
-		domain := oauth.EmailDomain(claims.Email)
-		if domain == "" || !oauth.ContainsDomain(v.cfg.Identity.AllowedEmailDomains, domain) {
-			return oauth.ErrUnauthorizedDomain
-		}
-	}
-	if len(v.cfg.Identity.AllowedHostedDomains) > 0 {
-		if claims.HostedDomain == "" || !oauth.ContainsDomain(v.cfg.Identity.AllowedHostedDomains, claims.HostedDomain) {
-			return oauth.ErrUnauthorizedDomain
-		}
-	}
-	return nil
-}
-
-func (v *Verifier) storeCache(key string, resp *verifyResponse, err error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	// Insertion-time eviction: if we'd exceed the cap, drop expired entries
-	// first (cheap and correct); if still over cap, drop the entry closest
-	// to expiry. O(n) walk under the mutex — fine at cacheMaxEntries scale.
-	if v.cacheCap > 0 && len(v.cache) >= v.cacheCap {
-		now := time.Now()
-		for k, e := range v.cache {
-			if now.After(e.expiresAt) {
-				delete(v.cache, k)
-			}
-		}
-		if len(v.cache) >= v.cacheCap {
-			var earliestKey string
-			var earliestAt time.Time
-			for k, e := range v.cache {
-				if earliestKey == "" || e.expiresAt.Before(earliestAt) {
-					earliestKey, earliestAt = k, e.expiresAt
-				}
-			}
-			delete(v.cache, earliestKey)
-		}
-	}
-
-	if err != nil {
-		// Transient errors (JWKS-fetch network blip, upstream 5xx, post-
-		// refresh kid miss during a key rotation) are explicitly NOT
-		// negative-cached: a single replica's bad-luck network hiccup
-		// would otherwise pin a legitimate token as forbidden for
-		// negative_ttl while sibling replicas serve it fine. Let the
-		// next request retry from scratch. See docs/ch-jwt-verify.md
-		// "Multi-replica behavior".
-		if errors.Is(err, oauth.ErrTransient) {
-			return
-		}
-		v.cache[key] = cacheEntry{
-			ok:        false,
-			failure:   err,
-			expiresAt: time.Now().Add(v.cfg.Cache.NegativeTTL),
-		}
-		return
-	}
-	v.cache[key] = cacheEntry{
-		ok:        true,
-		settings:  resp.Settings,
-		email:     resp.Email,
-		expiresAt: time.Now().Add(v.cfg.Cache.PositiveTTL),
-	}
 }
 
 // parseBasicAuth pulls out the user:token pair from `Authorization: Basic …`.
@@ -359,20 +162,4 @@ func parseBasicAuth(header string) (user, token string, ok bool) {
 		return "", "", false
 	}
 	return string(decoded[:idx]), string(decoded[idx+1:]), true
-}
-
-// sha256Hex returns the full hex-encoded SHA256 digest of its input. The
-// cache key is the digest, not a prefix — a prefix would let a hash-collision
-// between a bad token and a legit one DoS the legit user via the negative
-// cache for negative_ttl (no access-grant risk because signatures are still
-// re-verified on cache miss, but a real availability bug). 64-char keys
-// at the 10k-entry cap cost ~640 KiB extra — immaterial.
-//
-// The Basic auth user is folded into the verify() cache key alongside the
-// token (NUL-separated) so a cached positive result can't be replayed under
-// a different username than the one it was verified against — see
-// verify()'s cacheKey construction.
-func sha256Hex(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
 }

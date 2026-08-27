@@ -20,8 +20,10 @@
 #   HTTP/1.1 200 OK
 #   {"settings":null,"email":"…@…"}    # or non-empty settings, per your config
 #
-# On rejection the sidecar returns a 403 with a short text reason
-# (`token validation failed: …` / `does not match` / etc.).
+# On rejection the sidecar returns a 403 with a single fixed body,
+# "authentication failed" — deliberately the same regardless of which check
+# failed (signature/issuer/audience/expiry/username/domain policy). Run the
+# sidecar with --log-level debug to see the real reason server-side.
 
 set -euo pipefail
 

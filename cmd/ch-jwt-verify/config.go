@@ -7,6 +7,11 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/altinity/go-mcp-oauth-sdk/oauth"
+
+	"github.com/altinity/altinity-oauth-helper/internal/identity"
+	"github.com/altinity/altinity-oauth-helper/internal/verification"
 )
 
 // Config is the YAML configuration consumed by the ch-jwt-verify sidecar.
@@ -40,10 +45,26 @@ type ListenConfig struct {
 // broker-mode fields (client_id/client_secret/refresh-token TTL) which are
 // meaningless on the sidecar — keeping a narrow type rejects misconfiguration
 // at parse time.
+//
+// Audience has two forms: the legacy singular Audience (kept for backward
+// compatibility with every existing deployment) and the canonical plural
+// ExpectedAudiences. validateConfig rejects configuring both non-empty at
+// once — see effectiveAudiences and the "Audience normalization rules"
+// section of the phase-1 plan.
 type OAuthConfig struct {
-	Issuer           string        `yaml:"issuer"`
-	JWKSURL          string        `yaml:"jwks_url"`
-	Audience         string        `yaml:"audience"`
+	Issuer  string `yaml:"issuer"`
+	JWKSURL string `yaml:"jwks_url"`
+	// Audience is the legacy singular compatibility form. Still the only
+	// form the CH_JWT_VERIFY_OAUTH_AUDIENCE env override writes to.
+	Audience string `yaml:"audience"`
+	// ExpectedAudiences is the canonical plural form. Mutually exclusive
+	// with Audience after YAML+env layering.
+	ExpectedAudiences []string `yaml:"expected_audiences"`
+	// VerifierLeeway bounds the clock-skew tolerance applied to exp/nbf/iat.
+	// Defaults to 60s (defaultConfig), preserving the SDK's previously
+	// fixed internal tolerance. An explicitly configured 0s means no
+	// tolerance. Negative values fail config activation.
+	VerifierLeeway   time.Duration `yaml:"verifier_leeway"`
 	RequiredScopes   []string      `yaml:"required_scopes"`
 	JWKSCacheTTL     time.Duration `yaml:"jwks_cache_ttl"`
 	JWKSRefreshAhead time.Duration `yaml:"jwks_refresh_ahead"`
@@ -54,18 +75,21 @@ type OAuthConfig struct {
 // header's user half (`email` for OIDC-style deployments, `sub` for opaque
 // principals). MatchMode selects the comparison: `exact` requires byte-equal,
 // `lowercase_equal` (the default) tolerates case differences common when
-// operators provision CH users in lowercase.
+// operators provision CH users in lowercase. DeniedUsernames defaults to
+// empty so merely upgrading an existing deployment does not begin denying
+// previously accepted usernames.
 type IdentityConfig struct {
 	UsernameClaim        string   `yaml:"username_claim"`
 	MatchMode            string   `yaml:"match_mode"`
 	RequireEmailVerified bool     `yaml:"require_email_verified"`
 	AllowedEmailDomains  []string `yaml:"allowed_email_domains"`
 	AllowedHostedDomains []string `yaml:"allowed_hosted_domains"`
+	DeniedUsernames      []string `yaml:"denied_usernames"`
 }
 
 // CacheConfig governs the per-JWT verification cache. Positive entries are
-// keyed by SHA256(JWT) and short-lived — refreshed often enough that clock
-// skew between sidecar and IdP doesn't strand an expired token. Negative
+// keyed by SHA256(username + NUL + JWT) and short-lived — capped at the raw
+// JWT exp regardless of PositiveTTL (see internal/verification). Negative
 // entries reuse the same key to suppress repeated cryptographic checks when
 // an upstream replays a bad token.
 type CacheConfig struct {
@@ -98,12 +122,13 @@ func LoadConfig(cfgPath string) (*Config, error) {
 }
 
 // defaultConfig sets values that the operator usually doesn't need to tune:
-// JWKS cache TTL, identity-policy defaults, cache windows.
+// JWKS cache TTL, verifier leeway, identity-policy defaults, cache windows.
 func defaultConfig() *Config {
 	return &Config{
 		OAuth: OAuthConfig{
 			JWKSCacheTTL:     5 * time.Minute,
 			JWKSRefreshAhead: 1 * time.Minute,
+			VerifierLeeway:   60 * time.Second,
 		},
 		Identity: IdentityConfig{
 			UsernameClaim:        "email",
@@ -145,19 +170,101 @@ func validateConfig(cfg *Config) error {
 	if strings.TrimSpace(cfg.OAuth.Issuer) == "" && strings.TrimSpace(cfg.OAuth.JWKSURL) == "" {
 		return fmt.Errorf("oauth: either issuer or jwks_url must be set")
 	}
-	if strings.TrimSpace(cfg.OAuth.Audience) == "" {
-		return fmt.Errorf("oauth: audience is required (RFC 8707 byte-equal match)")
+
+	rawPluralConfigured := len(cfg.OAuth.ExpectedAudiences) > 0
+	pluralNonEmpty := len(filterNonEmpty(cfg.OAuth.ExpectedAudiences)) > 0
+	singularConfigured := strings.TrimSpace(cfg.OAuth.Audience) != ""
+
+	switch {
+	case rawPluralConfigured && !pluralNonEmpty:
+		return fmt.Errorf("oauth: expected_audiences must contain at least one non-empty value")
+	case pluralNonEmpty && singularConfigured:
+		// Covers both the YAML-plural + YAML-singular case and the
+		// YAML-plural + CH_JWT_VERIFY_OAUTH_AUDIENCE case (the env override
+		// writes to the same singular field applyEnvOverrides always did) —
+		// both are now populated, so config activation fails deterministically
+		// rather than silently picking one.
+		return fmt.Errorf("oauth: expected_audiences and audience (including CH_JWT_VERIFY_OAUTH_AUDIENCE) are mutually exclusive; configure exactly one")
+	case !pluralNonEmpty && !singularConfigured:
+		return fmt.Errorf("oauth: audience is required (set oauth.audience or oauth.expected_audiences, RFC 8707 byte-exact match)")
 	}
-	switch cfg.Identity.MatchMode {
-	case "", "exact", "lowercase_equal":
-	default:
-		return fmt.Errorf("identity.match_mode: must be exact or lowercase_equal, got %q", cfg.Identity.MatchMode)
+
+	if cfg.OAuth.VerifierLeeway < 0 {
+		return fmt.Errorf("oauth: verifier_leeway must not be negative")
 	}
-	if cfg.Identity.MatchMode == "" {
-		cfg.Identity.MatchMode = "lowercase_equal"
+
+	return nil
+}
+
+// filterNonEmpty drops empty/whitespace-only entries from list while
+// preserving the exact bytes of every retained entry — audience values are
+// never trimmed or otherwise normalized before comparison, only tested for
+// emptiness.
+func filterNonEmpty(list []string) []string {
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if strings.TrimSpace(s) == "" {
+			continue
+		}
+		out = append(out, s)
 	}
-	if cfg.Identity.UsernameClaim == "" {
-		cfg.Identity.UsernameClaim = "email"
+	return out
+}
+
+// dedupePreserveOrder removes duplicate strings, keeping the first
+// occurrence's position.
+func dedupePreserveOrder(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// effectiveAudiences resolves the configured audience form into the single
+// list internal/verification compares against: the deduplicated plural
+// expected_audiences when non-empty, otherwise the legacy singular audience
+// as a one-element list. validateConfig has already established that at
+// most one form is non-empty by the time this runs.
+func effectiveAudiences(cfg OAuthConfig) []string {
+	if list := filterNonEmpty(cfg.ExpectedAudiences); len(list) > 0 {
+		return dedupePreserveOrder(list)
+	}
+	if strings.TrimSpace(cfg.Audience) != "" {
+		return []string{cfg.Audience}
 	}
 	return nil
+}
+
+// toVerificationConfig builds the normalized internal/verification.Config
+// this sidecar's shared verifier is constructed from.
+func (cfg *Config) toVerificationConfig() verification.Config {
+	return verification.Config{
+		ExpectedIssuer:    cfg.OAuth.Issuer,
+		JWKSURL:           cfg.OAuth.JWKSURL,
+		ExpectedAudiences: effectiveAudiences(cfg.OAuth),
+		VerifierLeeway:    cfg.OAuth.VerifierLeeway,
+		RequiredScopes:    cfg.OAuth.RequiredScopes,
+		JWKSCacheTTL:      cfg.OAuth.JWKSCacheTTL,
+		PositiveTTL:       cfg.Cache.PositiveTTL,
+		NegativeTTL:       cfg.Cache.NegativeTTL,
+		Identity: identity.Config{
+			UsernameClaim:   cfg.Identity.UsernameClaim,
+			MatchMode:       cfg.Identity.MatchMode,
+			DeniedUsernames: cfg.Identity.DeniedUsernames,
+			ClaimPolicy: oauth.IdentityPolicy{
+				RequireEmailVerified: cfg.Identity.RequireEmailVerified,
+				AllowedEmailDomains:  cfg.Identity.AllowedEmailDomains,
+				AllowedHostedDomains: cfg.Identity.AllowedHostedDomains,
+			},
+		},
+	}
 }
