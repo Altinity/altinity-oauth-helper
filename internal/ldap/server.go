@@ -201,12 +201,15 @@ func (hs *handlerSource) GetHandler() ldapserver.Handler {
 	// the empty string, which no real Extended request ever is — so an
 	// .Extended(...) registration here would silently never fire. Routing
 	// every Extended request through NotFound, instead, is what actually
-	// makes handleUnsupportedExtended a true catch-all. Unbind needs no
-	// route (the dependency's normal connection-close path handles it
-	// before any handler runs) and Abandon is deliberately left
+	// makes handleNotFound a true catch-all. ModifyDN has no RouteMux method
+	// at all (route.go defines routes only for the operations registered
+	// above plus Extended/Abandon/Cancel), so it lands on this same
+	// catch-all unconditionally — see unsupported.go's handleNotFound.
+	// Unbind needs no route (the dependency's normal connection-close path
+	// handles it before any handler runs) and Abandon is deliberately left
 	// unregistered so the dependency's own built-in Abandon-signaling
 	// fallback keeps running unmodified — see unsupported.go.
-	routes.NotFound(h.handleUnsupportedExtended)
+	routes.NotFound(h.handleNotFound)
 
 	return routes
 }

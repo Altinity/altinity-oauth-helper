@@ -62,12 +62,17 @@ func (h *connectionHandler) handleCompare(w ldapserver.ResponseWriter, m *ldapse
 	w.Write(res)
 }
 
-// handleUnsupportedExtended is registered as this connection's RouteMux
-// NotFound handler (see server.go's GetHandler for why: the dependency's
-// route matcher makes an unqualified .Extended(...) registration
-// unreachable, so routing every Extended request through NotFound is what
-// makes this a true catch-all for StartTLS, password modification, WhoAmI
-// and any other Extended OID).
+// handleNotFound is registered as this connection's RouteMux NotFound
+// handler (see server.go's GetHandler for why: the dependency's route
+// matcher makes an unqualified .Extended(...) registration unreachable, so
+// routing every Extended request through NotFound is what makes this a true
+// catch-all for StartTLS, password modification, WhoAmI and any other
+// Extended OID). It also fail-closes ModifyDNRequest: the dependency's
+// RouteMux exposes no ModifyDN route method at all (route.go defines routes
+// only for Bind/Search/Add/Modify/Delete/Compare/Extended/Abandon/Cancel),
+// so every ModifyDNRequest falls through the same NotFound path regardless
+// of whether it's ever registered — this handler is the only place that can
+// ever see one.
 //
 // NotFound is also, as a dependency quirk, reached once more for an
 // AbandonRequest the dependency's own built-in fallback has already
@@ -75,6 +80,8 @@ func (h *connectionHandler) handleCompare(w ldapserver.ResponseWriter, m *ldapse
 // response here, because Abandon has no response in the LDAP protocol and
 // the cancellation signal has already been delivered by the time this
 // runs — see cancel.go/message.go's Message.Done and client.go's close().
+// Neither switch case below matches AbandonRequest, so it falls through to
+// the same no-op silently, preserving that behavior.
 //
 // A second, related carve-out: the RFC 3909 Cancel Extended operation (OID
 // 1.3.6.1.1.8) never reaches this handler at all. The dependency's own
@@ -91,12 +98,23 @@ func (h *connectionHandler) handleCompare(w ldapserver.ResponseWriter, m *ldapse
 // TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak
 // (adversarial_test.go) for the proof against the real server, exercised
 // over the wire rather than only inferred from reading cancel.go.
-func (h *connectionHandler) handleUnsupportedExtended(w ldapserver.ResponseWriter, m *ldapserver.Message) {
-	if _, ok := m.ProtocolOp().(message.ExtendedRequest); !ok {
-		return
+func (h *connectionHandler) handleNotFound(w ldapserver.ResponseWriter, m *ldapserver.Message) {
+	switch m.ProtocolOp().(type) {
+	case message.ExtendedRequest:
+		res := ldapserver.NewExtendedResponse(ldapserver.LDAPResultUnwillingToPerform)
+		res.SetDiagnosticMessage(unsupportedOperationDiagnostic)
+		logUnsupported("extended", ldapserver.LDAPResultUnwillingToPerform)
+		w.Write(res)
+	case message.ModifyDNRequest:
+		// message.ModifyDNResponse is `type ModifyDNResponse LDAPResult`,
+		// like AddResponse/ModifyResponse/DelResponse/CompareResponse — it
+		// exposes only SetResultCode (see third_party/goldap/PATCHES.md item
+		// 2, which is what makes this call possible at all), not
+		// SetDiagnosticMessage, matching the same fixed-diagnostic-free
+		// shape as handleAdd/handleModify/handleDelete/handleCompare below.
+		res := message.ModifyDNResponse{}
+		res.SetResultCode(ldapserver.LDAPResultUnwillingToPerform)
+		logUnsupported("modifyDN", ldapserver.LDAPResultUnwillingToPerform)
+		w.Write(res)
 	}
-	res := ldapserver.NewExtendedResponse(ldapserver.LDAPResultUnwillingToPerform)
-	res.SetDiagnosticMessage(unsupportedOperationDiagnostic)
-	logUnsupported("extended", ldapserver.LDAPResultUnwillingToPerform)
-	w.Write(res)
 }

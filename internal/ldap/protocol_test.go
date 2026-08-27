@@ -623,6 +623,21 @@ func TestProtocol_UnsupportedOperationsFailClosed(t *testing.T) {
 		_, err := conn.Compare("cn=x,"+protoGroupBaseDN, "cn", "x")
 		requireUnwillingToPerform(t, err)
 	})
+	t.Run("ModifyDN", func(t *testing.T) {
+		// The pinned vjeantet/ldapserver dependency's RouteMux exposes no
+		// ModifyDN route method at all (route.go defines routes only for
+		// Bind/Search/Add/Modify/Delete/Compare/Extended/Abandon/Cancel), so
+		// every ModifyDNRequest falls through to the same NotFound catch-all
+		// as an unregistered Extended OID — see unsupported.go's
+		// handleNotFound. Before that handler learned to recognize
+		// message.ModifyDNRequest, this request got no response at all
+		// (conn.ModifyDN would hang until a client-side timeout), not a
+		// clear fail-closed LDAP result.
+		conn := dialTest(t, addr)
+		conn.SetTimeout(5 * time.Second)
+		err := conn.ModifyDN(goldapclient.NewModifyDNRequest("cn=x,"+protoGroupBaseDN, "cn=y", true, ""))
+		requireUnwillingToPerform(t, err)
+	})
 	t.Run("Extended WhoAmI", func(t *testing.T) {
 		conn := dialTest(t, addr)
 		_, err := conn.WhoAmI(nil)

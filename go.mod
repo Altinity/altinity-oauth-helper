@@ -31,3 +31,9 @@ require (
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
+
+// Local fork carrying two fixes upstream lacks as of the pinned version:
+// a BER INTEGER sign-disambiguation bug that corrupts MessageID
+// correlation past 127, and a missing ModifyDNResponse.SetResultCode
+// needed for fail-closed ModifyDN handling. See third_party/goldap/PATCHES.md.
+replace github.com/vjeantet/goldap => ./third_party/goldap

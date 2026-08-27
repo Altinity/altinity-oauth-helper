@@ -328,14 +328,16 @@ func TestAdversarial_OverlappingReBindSearchNeverExposesForeignPrincipal(t *test
 	conn := dialTest(t, addr)
 	requireSuccess(t, "initial bind", bindAs(conn, protoBindDN("race-alice"), "jwt-race-alice"))
 
-	// Kept modest and well under 128 total messages on this one connection,
-	// for the same reason as protocol_test.go's
-	// TestProtocol_ConcurrentReBindAndSearchRace: the pinned goldap
-	// dependency's generic BER INTEGER writer mis-encodes a message ID once
-	// it reaches the 128-255 range (missing sign-disambiguation padding),
-	// which desynchronizes response correlation on a long-lived connection.
-	// That is an independent, already-documented dependency defect, not
-	// something this test is trying to exercise.
+	// Kept modest, well clear of any connection-lifetime concern, since what
+	// this test is proving is the "only legal serialized outcomes" race
+	// property below, not message-ID-range behavior — that's covered
+	// separately and specifically by
+	// TestAdversarial_MessageIDBoundaryPreservesResponseCorrelation, which
+	// drives a connection's message ID across exactly the 127/128/129
+	// boundary the pinned goldap dependency's BER INTEGER writer used to
+	// mis-encode (missing sign-disambiguation padding once a message ID
+	// reached the 128-255 range); that defect is now patched locally, see
+	// third_party/goldap/PATCHES.md.
 	const rounds = 20
 	var violations []string
 	var violationsMu sync.Mutex
@@ -564,6 +566,60 @@ func TestAdversarial_ManyMalformedConnectionsInterleavedWithLegitimateTraffic(t 
 	}
 }
 
+// ---- 6. message ID boundary correlation -------------------------------------
+
+// TestAdversarial_MessageIDBoundaryPreservesResponseCorrelation drives one
+// real, long-lived TCP connection's message ID sequence across exactly
+// 127/128/129 — the boundary the pinned goldap dependency's generic BER
+// INTEGER writer used to mis-encode (a value >= 128 needs a leading
+// sign-disambiguation 0x00 byte to stay positive; the unpatched writer
+// omitted it, so message ID 128 went out as `02 01 80`, which decodes back
+// as -128, desynchronizing every response after it from its request) — and
+// asserts every response in that range still correlates correctly. This is
+// what third_party/goldap/PATCHES.md item 1 fixes; adversarial_test.go's
+// TestAdversarial_OverlappingReBindSearchNeverExposesForeignPrincipal and
+// protocol_test.go's TestProtocol_ConcurrentReBindAndSearchRace both
+// deliberately stay under 128 total messages because, before this fix, this
+// exact boundary would have made them flaky for a reason unrelated to what
+// they're proving.
+//
+// go-ldap/v3's Conn assigns message IDs sequentially starting at 1 for the
+// very first request issued on a connection (see conn.go's processMessages:
+// `var messageID int64 = 1`, incremented once per dispatched request,
+// covering every operation type on that connection — Bind included). The
+// initial Bind below is message 1; the 125 warm-up Searches that follow
+// consume messages 2 through 126; the three Searches after that are
+// messages 127, 128 and 129 exactly.
+func TestAdversarial_MessageIDBoundaryPreservesResponseCorrelation(t *testing.T) {
+	acct := account("mid-alice", "https://idp.test/", "sub-mid-alice", "jwt-mid-alice", []string{"ch_mid"})
+	addr, _, _ := startTestServer(t, newFakeVerifier(acct), newFakeRoles(acct))
+
+	conn := dialTest(t, addr)
+	// Without this, a response desynchronized by the pre-fix bug would hang
+	// the affected request until the test binary's own overall timeout
+	// instead of failing promptly with a clear cause.
+	conn.SetTimeout(5 * time.Second)
+
+	requireSuccess(t, "bind (messageID 1)", bindAs(conn, protoBindDN("mid-alice"), "jwt-mid-alice"))
+
+	const warmupRounds = 125 // consumes messageIDs 2..126
+	for i := 0; i < warmupRounds; i++ {
+		if _, err := conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("mid-alice"), nil)); err != nil {
+			t.Fatalf("warm-up search #%d (messageID %d): %v", i, i+2, err)
+		}
+	}
+
+	for _, id := range []int{127, 128, 129} {
+		res, err := conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("mid-alice"), nil))
+		if err != nil {
+			t.Fatalf("search at messageID %d: %v (response/request desynchronized?)", id, err)
+		}
+		if len(res.Entries) != 1 || res.Entries[0].GetAttributeValue("cn") != protoCNPrefix+"ch_mid" {
+			t.Fatalf("search at messageID %d: entries = %+v, want exactly one clickhouse_ch_mid entry", id, res.Entries)
+		}
+	}
+}
+
 // ---- Cancel (RFC 3909) carve-out proof -------------------------------------
 
 // rfc3909CancelValue mirrors the vendored vjeantet/ldapserver dependency's
@@ -571,8 +627,8 @@ func TestAdversarial_ManyMalformedConnectionsInterleavedWithLegitimateTraffic(t 
 // cancelRequestValue ::= SEQUENCE { cancelID MessageID }. This test builds
 // the raw wire bytes itself (rather than driving a handler function
 // directly) so it exercises the real dependency-internal Cancel handling
-// this package never sees — see unsupported.go's handleUnsupportedExtended
-// doc comment for why Cancel bypasses this package's own fail-closed
+// this package never sees — see unsupported.go's handleNotFound doc comment
+// for why Cancel bypasses this package's own fail-closed
 // Extended-operation handling entirely.
 type rfc3909CancelValue struct {
 	CancelID int
@@ -590,7 +646,7 @@ func cancelRequestValuePacket(messageID int) *ber.Packet {
 
 // TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak proves, over
 // the real production server and a real TCP connection, the benign-carve-out
-// claim documented on handleUnsupportedExtended: the RFC 3909 Cancel
+// claim documented on handleNotFound: the RFC 3909 Cancel
 // Extended operation (OID 1.3.6.1.1.8) — served entirely inside the vendored
 // vjeantet/ldapserver dependency, never reaching this package's own
 // fail-closed catch-all — cannot cancel an in-flight Bind (the one operation

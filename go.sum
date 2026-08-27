@@ -46,8 +46,6 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/urfave/cli/v3 v3.10.1 h1:7Kx9H50hrHbRbyxgO1KP6/BcbiGRz0uYh5YyQ30JEEY=
 github.com/urfave/cli/v3 v3.10.1/go.mod h1:ysVLtOEmg2tOy6PknnYVhDoouyC/6N42TMeoMzskhso=
-github.com/vjeantet/goldap v0.0.0-20260720153039-a51461838017 h1:mxK/9vZpUOR0cbPGIbWBVSXbtlU1WyiI1LCHDUVmRDw=
-github.com/vjeantet/goldap v0.0.0-20260720153039-a51461838017/go.mod h1:aj1IFnuSzoqIC0eLF+d92jyaS8j+zYMnxL6uj5cIlh0=
 github.com/vjeantet/ldapserver v1.0.2-0.20260725103726-663e6b9910fb h1:UtJy8LPJQqlroFRWLVNlrfMxlyK+2HOh8Dmj1q20KCQ=
 github.com/vjeantet/ldapserver v1.0.2-0.20260725103726-663e6b9910fb/go.mod h1:vXBy4rYGoovObq42JufxFhi2CH9d09EaYnBZC64MULo=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
