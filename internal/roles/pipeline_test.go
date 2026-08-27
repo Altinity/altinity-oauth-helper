@@ -61,6 +61,22 @@ func TestRolesDeduplicatesGroupsPreservingFirstOccurrence(t *testing.T) {
 	require.Equal(t, []string{"a", "b", "c"}, out)
 }
 
+// TestRolesRejectsPresentNullGroupsClaim proves a present-but-null groups
+// claim (e.g. a JSON `"groups": null` in the token, which json.Unmarshal
+// turns into a nil interface{} value stored under an existing map key) is
+// NOT treated the same as an absent claim. Only a genuinely missing key
+// yields zero roles; a present null is neither a string nor an array and
+// must be a hard ErrMalformedGroupsClaim failure like any other malformed
+// shape.
+func TestRolesRejectsPresentNullGroupsClaim(t *testing.T) {
+	t.Parallel()
+	p, err := New(Config{})
+	require.NoError(t, err)
+
+	_, err = p.Roles(claimsWithGroups(nil))
+	require.ErrorIs(t, err, ErrMalformedGroupsClaim)
+}
+
 func TestRolesRejectsMixedTypeArray(t *testing.T) {
 	t.Parallel()
 	p, err := New(Config{})

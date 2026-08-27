@@ -136,7 +136,7 @@ func (p *Pipeline) extractGroups(claims *oauth.Claims) ([]string, error) {
 		return nil, nil
 	}
 	raw, ok := claims.Extra[p.groupsClaim]
-	if !ok || raw == nil {
+	if !ok {
 		return nil, nil
 	}
 	switch v := raw.(type) {
