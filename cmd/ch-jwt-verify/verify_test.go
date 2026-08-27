@@ -911,6 +911,10 @@ func TestTransientErrorSkipsNegativeCache(t *testing.T) {
 // username, unverified email, disallowed email domain, disallowed hosted
 // domain, and a transient JWKS-fetch failure), so a caller can't distinguish
 // which check failed from the response alone.
+//
+// The missing/malformed-Authorization-header case is deliberately out of
+// scope here: it's a distinct, pre-existing 401 transport-level rejection,
+// not a credential-validation failure — see TestVerifierRejectsMissingAuthHeader.
 func TestVerifierHTTPBodyNeverDisclosesFailureReason(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)

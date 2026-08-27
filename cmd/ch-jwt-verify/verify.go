@@ -34,24 +34,32 @@ type verifyResponse struct {
 	Email    string            `json:"email,omitempty"`
 }
 
-// errAuthenticationFailed is the ONLY error text ever returned to an HTTP
-// caller of /verify. Collapsing every distinct failure reason — bad
-// signature, issuer mismatch, audience mismatch, missing/malformed/expired
-// exp, username-claim mismatch, reserved username, verified-email/domain
-// policy, insufficient scopes, or a transient JWKS/network failure — into
-// this one fixed string is a deliberate security property, required by the
-// issue's identity contract ("authentication failures should not disclose
-// whether failure was caused by signature, issuer, audience, username
-// mismatch, reserved username, email policy, or token expiry"), not an
-// oversight or a simplification. The SDK's ValidateStrictJWT and
-// internal/identity/internal/verification return distinct, specific typed
-// errors internally — precisely so callers wanting errors.Is/As (like the
-// verification cache, which must preserve error identity across cache
-// hits — see CLAUDE.md's cache-correctness rule) can still do so. This
-// sidecar is the trust boundary where that distinction must stop: operators
-// get the real reason from the structured debug log line the handler emits
-// alongside this response (see Handler), never from the HTTP body a caller
-// (or anything relaying its response) can observe.
+// errAuthenticationFailed is the only error text ever returned for a
+// request whose Authorization header parsed but whose credential then
+// failed identity/token validation. Collapsing every distinct validation
+// failure reason — bad signature, issuer mismatch, audience mismatch,
+// missing/malformed/expired exp, username-claim mismatch, reserved
+// username, verified-email/domain policy, insufficient scopes, or a
+// transient JWKS/network failure — into this one fixed string is a
+// deliberate security property, required by the issue's identity contract
+// ("authentication failures should not disclose whether failure was caused
+// by signature, issuer, audience, username mismatch, reserved username,
+// email policy, or token expiry"), not an oversight or a simplification.
+// The SDK's ValidateStrictJWT and internal/identity/internal/verification
+// return distinct, specific typed errors internally — precisely so callers
+// wanting errors.Is/As (like the verification cache, which must preserve
+// error identity across cache hits — see CLAUDE.md's cache-correctness
+// rule) can still do so. This sidecar is the trust boundary where that
+// distinction must stop: operators get the real reason from the structured
+// debug log line the handler emits alongside this response (see Handler),
+// never from the HTTP body a caller (or anything relaying its response) can
+// observe.
+//
+// This is distinct from the 401 the handler returns when the Authorization
+// header itself is missing or unparseable (see the parseBasicAuth branch in
+// Handler) — that's a transport-level precondition, not one of the
+// identity/token checks this non-disclosure guarantee covers, so it
+// intentionally isn't collapsed into this string.
 var errAuthenticationFailed = errors.New("authentication failed")
 
 // NewVerifier constructs a Verifier over the shared verification core built
@@ -104,6 +112,12 @@ func (v *Verifier) Handler() http.Handler {
 		}
 		user, token, ok := parseBasicAuth(r.Header.Get("Authorization"))
 		if !ok {
+			// Intentionally a distinct, transport-level rejection (401 +
+			// its own message), not the generic credential-validation
+			// failure below: there is no credential here to have failed a
+			// check, so this isn't a case the errAuthenticationFailed
+			// non-disclosure guarantee needs to cover. Do not collapse
+			// this into errAuthenticationFailed.
 			log.Debug().Msg("verify: missing or malformed Basic Authorization header")
 			http.Error(w, "missing or malformed Authorization", http.StatusUnauthorized)
 			return
