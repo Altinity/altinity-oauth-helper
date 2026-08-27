@@ -93,10 +93,16 @@ func TestAdversarial_ShutdownCancelsBlockedVerifierAndServerTerminates(t *testin
 		t.Fatalf("fake verifier was never entered")
 	}
 
-	// Exactly the plan's described shutdown sequence: cancel the root/
-	// process context AND invoke server shutdown.
+	// Cancel ONLY the root/process context first, deliberately without
+	// touching the connection or calling Stop yet. This isolates the
+	// invariant this test is actually about — root-context propagation
+	// into the in-flight request — from the independent Message.Done
+	// (connection-teardown) cancellation path that Stop() would otherwise
+	// also trigger and that TestProtocol_ConnectionCloseCancelsInFlightVerify
+	// already covers on its own. Conflating the two (as calling Stop()
+	// here too would) would let a broken root-context wire-up hide behind
+	// Stop()'s independent cancellation and still pass.
 	rootCancel()
-	srv.Stop()
 
 	select {
 	case err := <-fv.returned:
@@ -104,12 +110,15 @@ func TestAdversarial_ShutdownCancelsBlockedVerifierAndServerTerminates(t *testin
 			t.Fatalf("blocked verifier's Verify returned %v, want context.Canceled", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatalf("blocked verifier never observed root cancellation/shutdown")
+		t.Fatalf("blocked verifier never observed root cancellation (with the connection still open and Stop not yet called)")
 	}
 
-	// The server itself must terminate — Serve must return — not merely
-	// abandon the one in-flight request. A hung Serve here would mean a
+	// Only now invoke server shutdown, and assert the server itself
+	// terminates — Serve must return — not merely that the one already-
+	// canceled request was abandoned. A hung Serve here would mean a
 	// leaked accept loop/goroutine surviving process shutdown.
+	srv.Stop()
+
 	select {
 	case <-serveErr:
 	case <-time.After(5 * time.Second):
