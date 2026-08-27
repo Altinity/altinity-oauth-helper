@@ -231,6 +231,52 @@ func TestVerifyRejectsMissingExp(t *testing.T) {
 	require.ErrorIs(t, err, oauth.ErrInvalidToken)
 }
 
+func TestVerifyRejectsFutureNbfOutsideLeeway(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.VerifierLeeway = 10 * time.Second
+	v, err := New(cfg)
+	require.NoError(t, err)
+
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "email": "alice@example.com",
+		"nbf": time.Now().Add(time.Minute).Unix(), // well past the 10s leeway
+	})
+	_, err = v.Verify(context.Background(), "alice@example.com", tok)
+	require.ErrorIs(t, err, oauth.ErrInvalidToken)
+}
+
+func TestVerifyAcceptsFutureNbfInsideLeeway(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.VerifierLeeway = time.Minute
+	v, err := New(cfg)
+	require.NoError(t, err)
+
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "email": "alice@example.com",
+		"nbf": time.Now().Add(10 * time.Second).Unix(), // within the 1m leeway
+	})
+	_, err = v.Verify(context.Background(), "alice@example.com", tok)
+	require.NoError(t, err)
+}
+
+func TestVerifyRejectsMalformedNbf(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	v, err := New(baseConfig(p))
+	require.NoError(t, err)
+
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "email": "alice@example.com",
+		"nbf": "not-a-number",
+	})
+	_, err = v.Verify(context.Background(), "alice@example.com", tok)
+	require.ErrorIs(t, err, oauth.ErrInvalidToken)
+}
+
 func TestVerifyRejectsUsernameMismatch(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
