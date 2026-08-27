@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1018,6 +1021,51 @@ func TestVerifierHTTPBodyNeverContainsToken(t *testing.T) {
 	v.Handler().ServeHTTP(rr, req)
 	require.Equal(t, http.StatusForbidden, rr.Code)
 	require.NotContains(t, rr.Body.String(), marker)
+}
+
+// TestVerifyRejectionLogRedactsCredentialShapedRequestedUsername is the
+// captured-log regression for the review finding: nothing constrains the
+// shape of the Basic-auth username half ahead of verification, so a caller
+// (attacker-supplied, e.g. base64(<JWT-A>:<JWT-B>), or a confused client) can
+// put a whole JWT-shaped string there. The rejection debug log line
+// (`log.Debug().Err(err).Str("user", ...)`) must never write that raw value,
+// on ANY rejection path — including one, like this test's bad-signature
+// case, where verification fails before identity binding is ever reached,
+// so the marker never has a chance to be "the requested username" in any
+// success sense yet still reaches this log line unconditionally.
+//
+// This test intentionally does not call t.Parallel(): it swaps the package-
+// global zerolog logger for the duration of the request, which would race
+// with any concurrently-running parallel sibling that also logs. Every
+// other test in this file calls t.Parallel() as its first statement, so
+// none of them execute their body (including any log call) until after all
+// non-parallel tests — this one included — have already completed; see
+// TestLoadConfigPluralAudiencePlusLegacyEnvFailsActivation for the other
+// test in this file relying on the same non-parallel-for-global-state
+// discipline (there, for env vars).
+func TestVerifyRejectionLogRedactsCredentialShapedRequestedUsername(t *testing.T) {
+	const marker = "SECRET-HEADER-MARKER.SECRET-PAYLOAD-MARKER.SECRET-SIG-MARKER"
+
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	var buf bytes.Buffer
+	prevLogger := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { log.Logger = prevLogger })
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader(marker, "not-a-valid-token"))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	logged := buf.String()
+	require.NotContains(t, logged, marker)
+	require.NotContains(t, logged, "SECRET-HEADER-MARKER")
+	require.NotContains(t, logged, "SECRET-PAYLOAD-MARKER")
+	require.NotContains(t, logged, "SECRET-SIG-MARKER")
+	require.Contains(t, logged, "redacted", "the log line should show that redaction happened, not silently drop the field")
 }
 
 // TestJWKSHealthTracking asserts the underlying go-mcp-oauth-sdk Verifier records

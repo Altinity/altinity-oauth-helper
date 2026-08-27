@@ -11,6 +11,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/altinity/altinity-oauth-helper/internal/identity"
 	"github.com/altinity/altinity-oauth-helper/internal/verification"
 )
 
@@ -128,7 +129,14 @@ func (v *Verifier) Handler() http.Handler {
 			// Full detail goes to the operator-facing debug log only. The
 			// HTTP response never gets more than errAuthenticationFailed —
 			// see that var's doc comment for why.
-			log.Debug().Err(err).Str("user", user).Msg("verify: rejected")
+			// user is the raw, unvalidated Basic-auth username half —
+			// parseBasicAuth places no format constraint on it, so on
+			// any rejection path (even one where verification never got
+			// far enough to inspect identity, e.g. a bad signature) it
+			// could itself be an attacker-supplied JWT or other
+			// credential-shaped value. Route it through
+			// identity.RedactUsername rather than logging it raw.
+			log.Debug().Err(err).Str("user", identity.RedactUsername(user)).Msg("verify: rejected")
 			http.Error(w, errAuthenticationFailed.Error(), http.StatusForbidden)
 			return
 		}

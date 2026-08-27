@@ -215,9 +215,10 @@ func cacheKey(requestedUsername, token string) string {
 }
 
 // cloneResult returns a copy of r whose Claims.Audience, Claims.Scopes, and
-// Claims.Extra are independent of r's — so a caller mutating the returned
-// Result (or any of those members) can never affect the cached canonical
-// copy, nor therefore any other caller's subsequent cache hit.
+// Claims.Extra (recursively, including every nested map/array value it
+// contains) are independent of r's — so a caller mutating the returned
+// Result (or any of those members, at any depth) can never affect the cached
+// canonical copy, nor therefore any other caller's subsequent cache hit.
 func cloneResult(r *Result) *Result {
 	if r == nil {
 		return nil
@@ -228,8 +229,35 @@ func cloneResult(r *Result) *Result {
 	if r.Claims.Extra != nil {
 		claims.Extra = make(map[string]interface{}, len(r.Claims.Extra))
 		for k, val := range r.Claims.Extra {
-			claims.Extra[k] = val
+			claims.Extra[k] = deepCloneJSONValue(val)
 		}
 	}
 	return &Result{Claims: claims, Principal: r.Principal}
+}
+
+// deepCloneJSONValue returns a deep copy of v. Extra is populated straight
+// from unmarshaling a JWT payload's non-standard claims into
+// map[string]interface{} (github.com/altinity/go-mcp-oauth-sdk/oauth), so
+// every value reachable from it is one of encoding/json's decode-into-
+// interface{} types: map[string]interface{}, []interface{}, string,
+// float64, bool, or nil. Composite types (map, slice) are cloned
+// recursively; every other type is a value type already independent of its
+// source and is returned as-is.
+func deepCloneJSONValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(val))
+		for k, e := range val {
+			out[k] = deepCloneJSONValue(e)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(val))
+		for i, e := range val {
+			out[i] = deepCloneJSONValue(e)
+		}
+		return out
+	default:
+		return val
+	}
 }

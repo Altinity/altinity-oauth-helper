@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/altinity/go-mcp-oauth-sdk/oauth"
@@ -242,4 +243,90 @@ func TestBindRejectsNilClaims(t *testing.T) {
 	require.NoError(t, err)
 	_, err = p.Bind("alice@example.com", nil)
 	require.Error(t, err)
+}
+
+// jwtShapedMarker is a credential-shaped string that must never appear
+// verbatim in any error text or log line produced from an untrusted,
+// unauthenticated requested username — it has the three-dot-separated shape
+// of a compact JWT (header.payload.signature) without needing to be a real
+// signed token, since RedactUsername's guard is purely shape/length based.
+const jwtShapedMarker = "SECRET-HEADER-MARKER.SECRET-PAYLOAD-MARKER.SECRET-SIG-MARKER"
+
+func TestRedactUsernameLeavesPlainUsernamesUnchanged(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "alice@example.com", RedactUsername("alice@example.com"))
+	require.Equal(t, "ch-tenant-a", RedactUsername("ch-tenant-a"))
+}
+
+// TestRedactUsernameRedactsJWTShapedValue proves the specific attack shape
+// from the review finding: a Basic-auth "user" half that is itself an
+// arbitrary JWT-like string (three non-empty dot-separated segments) is
+// never returned verbatim.
+func TestRedactUsernameRedactsJWTShapedValue(t *testing.T) {
+	t.Parallel()
+	redacted := RedactUsername(jwtShapedMarker)
+	require.NotEqual(t, jwtShapedMarker, redacted)
+	require.NotContains(t, redacted, "SECRET-HEADER-MARKER")
+	require.NotContains(t, redacted, "SECRET-PAYLOAD-MARKER")
+	require.NotContains(t, redacted, "SECRET-SIG-MARKER")
+}
+
+// TestRedactUsernameRedactsOverlongValue proves the length guard fires
+// independently of the JWT dot-shape check — an implausibly long requested
+// username (e.g. any credential-shaped value that doesn't happen to be
+// exactly three dot-separated segments) is still redacted, and the redaction
+// never leaks a prefix of the original.
+func TestRedactUsernameRedactsOverlongValue(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("a", maxLoggedUsernameLen+1)
+	redacted := RedactUsername(long)
+	require.NotEqual(t, long, redacted)
+	require.NotContains(t, redacted, strings.Repeat("a", 16))
+}
+
+func TestRedactUsernameLeavesTwoSegmentValueUnchanged(t *testing.T) {
+	t.Parallel()
+	// Only three non-empty dot-separated segments count as JWT-shaped; two
+	// segments (or an empty one) is not, by itself, unsafe to log.
+	require.Equal(t, "a.b", RedactUsername("a.b"))
+	require.Equal(t, "a..b", RedactUsername("a..b"))
+}
+
+// TestBindUsernameMismatchErrorRedactsCredentialShapedRequestedUsername is
+// the regression for the review finding: an attacker (or a confused client)
+// can put an arbitrary JWT-shaped string in the Basic-auth username slot,
+// and ErrUsernameMismatch's message must never echo it verbatim.
+func TestBindUsernameMismatchErrorRedactsCredentialShapedRequestedUsername(t *testing.T) {
+	t.Parallel()
+	p, err := NewPolicy(Config{UsernameClaim: "email"})
+	require.NoError(t, err)
+
+	claims := &oauth.Claims{Email: "alice@example.com"}
+	_, err = p.Bind(jwtShapedMarker, claims)
+	require.ErrorIs(t, err, ErrUsernameMismatch)
+	require.NotContains(t, err.Error(), "SECRET-HEADER-MARKER")
+	require.NotContains(t, err.Error(), "SECRET-PAYLOAD-MARKER")
+	require.NotContains(t, err.Error(), "SECRET-SIG-MARKER")
+}
+
+// TestBindReservedUsernameErrorRedactsCredentialShapedRequestedUsername is
+// the ErrReservedUsername counterpart: the deny-list check runs after
+// requestedUsername is already known safe-shaped-or-not, but the error
+// constructor must still redact it independently, since a JWT-shaped string
+// could coincidentally normalize to a denied entry.
+func TestBindReservedUsernameErrorRedactsCredentialShapedRequestedUsername(t *testing.T) {
+	t.Parallel()
+	deniedShaped := "SECRET-DENIED-A.SECRET-DENIED-B.SECRET-DENIED-C"
+	p, err := NewPolicy(Config{
+		UsernameClaim:   "sub",
+		DeniedUsernames: []string{deniedShaped},
+	})
+	require.NoError(t, err)
+
+	claims := &oauth.Claims{Subject: deniedShaped}
+	_, err = p.Bind(deniedShaped, claims)
+	require.ErrorIs(t, err, ErrReservedUsername)
+	require.NotContains(t, err.Error(), "SECRET-DENIED-A")
+	require.NotContains(t, err.Error(), "SECRET-DENIED-B")
+	require.NotContains(t, err.Error(), "SECRET-DENIED-C")
 }

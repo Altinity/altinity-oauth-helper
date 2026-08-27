@@ -16,7 +16,11 @@ import (
 
 // Sentinel errors returned by Bind. They carry only safe metadata (claim
 // names, the requested username) — never the JWT or any claim value that
-// could itself be sensitive.
+// could itself be sensitive. "The requested username" here means the value
+// RedactUsername produces, not necessarily the raw Basic-auth username: the
+// username slot is attacker-controlled and unvalidated ahead of Bind (see
+// RedactUsername's doc comment), so both error constructors below run the
+// raw value through RedactUsername before interpolating it.
 var (
 	// ErrClaimMissing means the configured username claim was absent, empty,
 	// or not a string on an otherwise cryptographically valid token.
@@ -107,6 +111,50 @@ func NewPolicy(cfg Config) (*Policy, error) {
 	}, nil
 }
 
+// maxLoggedUsernameLen bounds how much of an unauthenticated, attacker-
+// influenced requested username RedactUsername will ever echo verbatim into
+// an error message or log line.
+const maxLoggedUsernameLen = 128
+
+// looksCredentialShaped reports whether s is unsafe to log verbatim: either
+// longer than any plausible username, or shaped like a compact JWT
+// (header.payload.signature — three non-empty, dot-separated segments).
+// Basic auth's user:token split has no format constraint on the "user"
+// half, so a caller (attacker-supplied, or a confused client) can put an
+// arbitrary string — including a whole JWT — there; this is the guard that
+// keeps such a string out of logs and error text.
+func looksCredentialShaped(s string) bool {
+	if len(s) > maxLoggedUsernameLen {
+		return true
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// RedactUsername returns a safe-to-log representation of a raw, unauthenticated
+// requested username (the Basic-auth "user" half — attacker-controlled until
+// identity binding succeeds): the value itself when it's short and doesn't
+// have the three-segment dot-separated shape of a compact JWT, or a
+// fixed-form redaction marker carrying only its byte length otherwise. It
+// never returns a prefix or suffix of an unsafe value — a truncated JWT is
+// still a credential fragment. Every place that logs, or interpolates into
+// an error/response, a requested username ahead of successful identity
+// binding must route it through this function first.
+func RedactUsername(u string) string {
+	if !looksCredentialShaped(u) {
+		return u
+	}
+	return fmt.Sprintf("[redacted requested-username, %d bytes]", len(u))
+}
+
 // normalizeUsername is the case-insensitive, outer-whitespace-tolerant form
 // used for reserved-username comparison, independent of the configured
 // MatchMode (per the plan: "reject a configured denied username using
@@ -169,7 +217,7 @@ func (p *Policy) Bind(requestedUsername string, claims *oauth.Claims) (Principal
 	}
 
 	if !p.matches(requestedUsername, resolved) {
-		return Principal{}, fmt.Errorf("%w: requested user %q does not match %s claim", ErrUsernameMismatch, requestedUsername, p.usernameClaim)
+		return Principal{}, fmt.Errorf("%w: requested user %q does not match %s claim", ErrUsernameMismatch, RedactUsername(requestedUsername), p.usernameClaim)
 	}
 
 	if err := oauth.ValidateIdentityClaims(claims, p.claimPolicy); err != nil {
@@ -177,7 +225,7 @@ func (p *Policy) Bind(requestedUsername string, claims *oauth.Claims) (Principal
 	}
 
 	if _, denied := p.deniedUsernames[normalizeUsername(requestedUsername)]; denied {
-		return Principal{}, fmt.Errorf("%w: %q", ErrReservedUsername, requestedUsername)
+		return Principal{}, fmt.Errorf("%w: %q", ErrReservedUsername, RedactUsername(requestedUsername))
 	}
 
 	return Principal{

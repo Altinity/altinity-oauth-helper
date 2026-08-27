@@ -461,6 +461,73 @@ func TestVerifyCachedResultCannotBeMutatedThroughCallerAlias(t *testing.T) {
 	}
 }
 
+// TestVerifyCachedResultCannotBeMutatedThroughNestedExtraAlias is the
+// nested-value counterpart to
+// TestVerifyCachedResultCannotBeMutatedThroughCallerAlias: cloneResult must
+// deep-clone Claims.Extra, not just remake its top-level map, so mutating an
+// element *inside* an existing nested array or map value returned under
+// Extra must never be observable through a later cache hit for the same
+// key. Unlike the sibling test (which adds a brand-new top-level Extra key —
+// safe merely because the top-level map is remade), this mutates in place
+// through the existing "groups" claim's backing array/map, which is exactly
+// the failure mode a shallow top-level-only clone misses.
+func TestVerifyCachedResultCannotBeMutatedThroughNestedExtraAlias(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	v, err := New(baseConfig(p))
+	require.NoError(t, err)
+
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub":   "u-1",
+		"email": "alice@example.com",
+		"aud":   p.audience,
+		// A JWT payload decodes non-standard claims into Extra via
+		// encoding/json's interface{} unmarshal, so "groups" arrives as
+		// []interface{}, and "profile" as map[string]interface{} — the
+		// exact reference-typed shapes cloneResult must deep-copy.
+		"groups": []string{"g1", "g2"},
+		"profile": map[string]interface{}{
+			"nickname": "original",
+		},
+	})
+
+	first, err := v.Verify(context.Background(), "alice@example.com", tok)
+	require.NoError(t, err)
+
+	groups, ok := first.Claims.Extra["groups"].([]interface{})
+	require.True(t, ok, "groups must decode to []interface{}")
+	require.NotEmpty(t, groups)
+	groups[0] = "poisoned-group"
+
+	profile, ok := first.Claims.Extra["profile"].(map[string]interface{})
+	require.True(t, ok, "profile must decode to map[string]interface{}")
+	profile["nickname"] = "poisoned-nickname"
+
+	second, err := v.Verify(context.Background(), "alice@example.com", tok) // cache hit
+	require.NoError(t, err)
+
+	secondGroups, ok := second.Claims.Extra["groups"].([]interface{})
+	require.True(t, ok)
+	require.Equal(t, "g1", secondGroups[0], "mutation through the first caller's nested array alias must not leak into a later cache hit")
+
+	secondProfile, ok := second.Claims.Extra["profile"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "original", secondProfile["nickname"], "mutation through the first caller's nested map alias must not leak into a later cache hit")
+
+	// Mutating the second (independently cloned) result must likewise not
+	// affect a third cache hit — proves the isolation holds symmetrically,
+	// not just on the first clone off the cached canonical copy.
+	secondGroups[0] = "poisoned-again"
+	secondProfile["nickname"] = "poisoned-again"
+
+	third, err := v.Verify(context.Background(), "alice@example.com", tok)
+	require.NoError(t, err)
+	thirdGroups := third.Claims.Extra["groups"].([]interface{})
+	thirdProfile := third.Claims.Extra["profile"].(map[string]interface{})
+	require.Equal(t, "g1", thirdGroups[0])
+	require.Equal(t, "original", thirdProfile["nickname"])
+}
+
 func TestCacheCapEvicts(t *testing.T) {
 	t.Parallel()
 	c := newCache(3)
