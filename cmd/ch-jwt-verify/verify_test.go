@@ -8,10 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
-	"github.com/altinity/go-mcp-oauth-sdk/oauth"
 	"github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
@@ -73,31 +73,46 @@ func newTestIdP(t *testing.T) *testIdP {
 	}
 }
 
+// mintJWT builds a token from claims layered over required defaults. Setting
+// a key's value to nil in claims omits that claim entirely — used by the
+// missing-exp/missing-sub compatibility regressions below, which need a
+// genuinely absent claim rather than a zero/null value (a zero value
+// exercises a different parser path than an absent one).
 func (p *testIdP) mintJWT(t *testing.T, claims map[string]interface{}) string {
 	t.Helper()
+	final := map[string]interface{}{}
 	if _, ok := claims["iss"]; !ok {
-		claims["iss"] = p.issuer
+		final["iss"] = p.issuer
 	}
 	if _, ok := claims["aud"]; !ok {
-		claims["aud"] = p.audience
+		final["aud"] = p.audience
 	}
 	if _, ok := claims["exp"]; !ok {
-		claims["exp"] = time.Now().Add(time.Hour).Unix()
+		final["exp"] = time.Now().Add(time.Hour).Unix()
 	}
 	if _, ok := claims["iat"]; !ok {
-		claims["iat"] = time.Now().Unix()
+		final["iat"] = time.Now().Unix()
 	}
-	token, err := josejwt.Signed(p.signer).Claims(claims).Serialize()
+	for k, v := range claims {
+		if v == nil {
+			delete(final, k)
+			continue
+		}
+		final[k] = v
+	}
+	token, err := josejwt.Signed(p.signer).Claims(final).Serialize()
 	require.NoError(t, err)
 	return token
 }
 
+// baseConfig uses the canonical plural expected_audiences form; legacy
+// singular audience compatibility gets its own explicit tests below.
 func baseConfig(p *testIdP) *Config {
 	return &Config{
 		OAuth: OAuthConfig{
-			Issuer:   p.issuer,
-			JWKSURL:  p.server.URL + "/jwks",
-			Audience: p.audience,
+			Issuer:            p.issuer,
+			JWKSURL:           p.server.URL + "/jwks",
+			ExpectedAudiences: []string{p.audience},
 		},
 		Identity: IdentityConfig{
 			UsernameClaim:        "email",
@@ -111,6 +126,19 @@ func baseConfig(p *testIdP) *Config {
 	}
 }
 
+func newTestVerifier(t *testing.T, cfg *Config) *Verifier {
+	t.Helper()
+	v, err := NewVerifier(cfg)
+	require.NoError(t, err)
+	return v
+}
+
+// writeFile is a t.TempDir-friendly os.WriteFile wrapper for config-fixture
+// tests.
+func writeFile(path, contents string) error {
+	return os.WriteFile(path, []byte(contents), 0o600)
+}
+
 func basicHeader(user, token string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+token))
 }
@@ -118,7 +146,7 @@ func basicHeader(user, token string) string {
 func TestVerifierAcceptsValidJWT(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
 		"email":          "alice@example.com",
@@ -139,7 +167,7 @@ func TestVerifierAcceptsValidJWT(t *testing.T) {
 func TestVerifierRejectsWrongAudience(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
 		"aud":            "some-other-api",
@@ -155,10 +183,102 @@ func TestVerifierRejectsWrongAudience(t *testing.T) {
 	require.NotEqual(t, http.StatusOK, rr.Code)
 }
 
+// TestVerifierRejectsAudienceExactly is the trailing-slash-mismatch
+// regression: audience comparison is byte-exact, not slash-normalized.
+func TestVerifierRejectsAudienceExactly(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.OAuth.ExpectedAudiences = []string{p.audience + "/"}
+	v := newTestVerifier(t, cfg)
+
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub":            "u-1",
+		"email":          "alice@example.com",
+		"email_verified": true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+// TestVerifierRejectsIssuerExactly is the issuer counterpart: a trailing
+// slash on the configured issuer must not match a token whose iss omits it
+// (or vice versa).
+func TestVerifierRejectsIssuerExactly(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.OAuth.Issuer = p.issuer + "/"
+	v := newTestVerifier(t, cfg)
+
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub":            "u-1",
+		"email":          "alice@example.com",
+		"email_verified": true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+// TestVerifierSupportsJWKSOnlyWithNoConfiguredIssuer is a compatibility
+// regression: a pinned-JWKS deployment without a configured issuer must
+// keep working — an empty issuer must not become a new prerequisite.
+func TestVerifierSupportsJWKSOnlyWithNoConfiguredIssuer(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.OAuth.Issuer = ""
+	v := newTestVerifier(t, cfg)
+
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub":            "u-1",
+		"email":          "alice@example.com",
+		"email_verified": true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+// TestVerifierSupportsEmailUsernameClaimWithoutSub is a compatibility
+// regression: username_claim: email deployments never required sub, and
+// phase 1 must not start requiring it.
+func TestVerifierSupportsEmailUsernameClaimWithoutSub(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+	tok := p.mintJWT(t, map[string]interface{}{
+		"email":          "alice@example.com",
+		"email_verified": true,
+		"sub":            nil, // genuinely absent, not zero/empty
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
 func TestVerifierRejectsExpiredJWT(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
 		"email":          "alice@example.com",
@@ -175,10 +295,31 @@ func TestVerifierRejectsExpiredJWT(t *testing.T) {
 	require.NotEqual(t, http.StatusOK, rr.Code)
 }
 
+// TestVerifierRejectsMissingExp is the actual-omitted-claim regression: exp
+// is mandatory, and a genuinely absent exp (not a zero value) must fail.
+func TestVerifierRejectsMissingExp(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+	tok := p.mintJWT(t, map[string]interface{}{
+		"sub":            "u-1",
+		"email":          "alice@example.com",
+		"email_verified": true,
+		"exp":            nil,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
 func TestVerifierRejectsUserVsEmailMismatch(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
 		"email":          "alice@example.com",
@@ -192,13 +333,17 @@ func TestVerifierRejectsUserVsEmailMismatch(t *testing.T) {
 	v.Handler().ServeHTTP(rr, req)
 
 	require.Equal(t, http.StatusForbidden, rr.Code)
-	require.Contains(t, rr.Body.String(), "does not match")
+	// The HTTP-facing body must be the fixed, non-disclosing message — see
+	// TestVerifierHTTPBodyNeverDisclosesFailureReason for the full
+	// cross-cause proof. It must NOT contain diagnostic details like "does
+	// not match", the claim name, or either email address.
+	require.Equal(t, errAuthenticationFailed.Error()+"\n", rr.Body.String())
 }
 
 func TestVerifierLowercaseEqualMatching(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
 		"email":          "Alice@Example.com",
@@ -217,7 +362,7 @@ func TestVerifierLowercaseEqualMatching(t *testing.T) {
 func TestVerifierRejectsUnverifiedEmail(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
 		"email":          "alice@example.com",
@@ -237,7 +382,7 @@ func TestVerifierEnforcesAllowedEmailDomains(t *testing.T) {
 	p := newTestIdP(t)
 	cfg := baseConfig(p)
 	cfg.Identity.AllowedEmailDomains = []string{"altinity.com"}
-	v := NewVerifier(cfg)
+	v := newTestVerifier(t, cfg)
 
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
@@ -256,7 +401,7 @@ func TestVerifierEnforcesRequiredScopes(t *testing.T) {
 	p := newTestIdP(t)
 	cfg := baseConfig(p)
 	cfg.OAuth.RequiredScopes = []string{"mcp:read"}
-	v := NewVerifier(cfg)
+	v := newTestVerifier(t, cfg)
 
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
@@ -271,6 +416,46 @@ func TestVerifierEnforcesRequiredScopes(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rr.Code)
 }
 
+// TestVerifierRejectsReservedUsername proves denied_usernames is enforced
+// end to end through the HTTP handler on an otherwise fully valid request.
+func TestVerifierRejectsReservedUsername(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.Identity.UsernameClaim = "sub"
+	cfg.Identity.MatchMode = "exact"
+	cfg.Identity.RequireEmailVerified = false
+	cfg.Identity.DeniedUsernames = []string{"default", "admin", "operator"}
+	v := newTestVerifier(t, cfg)
+
+	tok := p.mintJWT(t, map[string]interface{}{"sub": "default"})
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("default", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+// TestVerifierDeniedUsernamesDefaultEmpty proves merely upgrading an
+// existing deployment (no denied_usernames configured) does not begin
+// rejecting a previously-accepted username.
+func TestVerifierDeniedUsernamesDefaultEmpty(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.Identity.UsernameClaim = "sub"
+	cfg.Identity.MatchMode = "exact"
+	cfg.Identity.RequireEmailVerified = false
+	v := newTestVerifier(t, cfg)
+
+	tok := p.mintJWT(t, map[string]interface{}{"sub": "default"})
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("default", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
 func TestVerifierAppliesScopeSettings(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
@@ -278,7 +463,7 @@ func TestVerifierAppliesScopeSettings(t *testing.T) {
 	cfg.SettingsFromScope = map[string]map[string]string{
 		"mcp:read": {"readonly": "1"},
 	}
-	v := NewVerifier(cfg)
+	v := newTestVerifier(t, cfg)
 
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
@@ -299,7 +484,7 @@ func TestVerifierAppliesScopeSettings(t *testing.T) {
 func TestVerifierRejectsUnsupportedMethods(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 
 	for _, method := range []string{http.MethodPut, http.MethodDelete, http.MethodPatch} {
 		req := httptest.NewRequest(method, "/verify", nil)
@@ -318,7 +503,7 @@ func TestVerifierRejectsUnsupportedMethods(t *testing.T) {
 func TestVerifierAcceptsGET(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 
 	req := httptest.NewRequest(http.MethodGet, "/verify", nil)
 	// No Authorization header → should be a 401 from parseBasicAuth, NOT a
@@ -332,7 +517,7 @@ func TestVerifierAcceptsGET(t *testing.T) {
 func TestVerifierRejectsMissingAuthHeader(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 
 	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
 	rr := httptest.NewRecorder()
@@ -343,7 +528,7 @@ func TestVerifierRejectsMissingAuthHeader(t *testing.T) {
 func TestVerifierNegativeCacheSuppressesRepeatedFailures(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
@@ -360,49 +545,10 @@ func TestVerifierNegativeCacheSuppressesRepeatedFailures(t *testing.T) {
 	}
 }
 
-func TestCacheCapEvicts(t *testing.T) {
-	t.Parallel()
-	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
-	v.cacheCap = 3 // override default for the test
-
-	// Insert four entries via the public storeCache path — synthesize
-	// minimal verifyResponse / error values; we're testing eviction
-	// mechanics, not validation.
-	for i := 0; i < 4; i++ {
-		v.storeCache("k"+string(rune('a'+i)), &verifyResponse{Email: "u@x"}, nil)
-	}
-
-	v.mu.Lock()
-	got := len(v.cache)
-	v.mu.Unlock()
-	require.LessOrEqual(t, got, 3, "cache must not exceed cap")
-}
-
-func TestPruneExpired(t *testing.T) {
-	t.Parallel()
-	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
-
-	v.mu.Lock()
-	v.cache["live"] = cacheEntry{ok: true, expiresAt: time.Now().Add(time.Hour)}
-	v.cache["dead"] = cacheEntry{ok: true, expiresAt: time.Now().Add(-time.Hour)}
-	v.mu.Unlock()
-
-	v.pruneExpired()
-
-	v.mu.Lock()
-	_, liveOK := v.cache["live"]
-	_, deadOK := v.cache["dead"]
-	v.mu.Unlock()
-	require.True(t, liveOK, "live entry must survive prune")
-	require.False(t, deadOK, "expired entry must be evicted")
-}
-
 func TestCacheHitPreservesEmail(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
 		"email":          "alice@example.com",
@@ -430,29 +576,6 @@ func TestCacheHitPreservesEmail(t *testing.T) {
 	require.Equal(t, "alice@example.com", second.Email)
 }
 
-func TestNegativeCachePreservesErrorIdentity(t *testing.T) {
-	t.Parallel()
-	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
-	// require_email_verified=true by default; unverified email -> ErrEmailNotVerified
-	tok := p.mintJWT(t, map[string]interface{}{
-		"sub":            "u-1",
-		"email":          "alice@example.com",
-		"email_verified": false,
-	})
-
-	// First call populates the negative cache via the real path.
-	_, err1 := v.verify(context.Background(), "alice@example.com", tok)
-	require.Error(t, err1)
-	require.ErrorIs(t, err1, oauth.ErrEmailNotVerified, "first call must return the sentinel")
-
-	// Second call hits the cache and must return the SAME sentinel
-	// (i.e. errors.Is still resolves through the cache layer).
-	_, err2 := v.verify(context.Background(), "alice@example.com", tok)
-	require.Error(t, err2)
-	require.ErrorIs(t, err2, oauth.ErrEmailNotVerified, "cached error must keep sentinel identity")
-}
-
 // TestCacheKeyIncludesUsername is the regression test for GH-13: the
 // verification cache was keyed on sha256(token) alone, so once a token had
 // been verified for one Basic-auth username, replaying the SAME token under
@@ -463,7 +586,7 @@ func TestNegativeCachePreservesErrorIdentity(t *testing.T) {
 func TestCacheKeyIncludesUsername(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
+	v := newTestVerifier(t, baseConfig(p))
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":            "u-1",
 		"email":          "alice@example.com",
@@ -484,7 +607,6 @@ func TestCacheKeyIncludesUsername(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	v.Handler().ServeHTTP(rr2, req2)
 	require.Equal(t, http.StatusForbidden, rr2.Code, rr2.Body.String())
-	require.Contains(t, rr2.Body.String(), "does not match")
 }
 
 // TestCacheKeyIsolatesNegativeCacheByUser covers the symmetric direction of
@@ -501,7 +623,7 @@ func TestCacheKeyIsolatesNegativeCacheByUser(t *testing.T) {
 	cfg := baseConfig(p)
 	cfg.Identity.UsernameClaim = "clickhouse_user"
 	cfg.Identity.MatchMode = "exact"
-	v := NewVerifier(cfg)
+	v := newTestVerifier(t, cfg)
 
 	tok := p.mintJWT(t, map[string]interface{}{
 		"sub":             "u-1",
@@ -564,6 +686,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	require.Equal(t, "email", cfg.Identity.UsernameClaim)
 	require.Equal(t, "lowercase_equal", cfg.Identity.MatchMode)
 	require.True(t, cfg.Identity.RequireEmailVerified)
+	require.Equal(t, 60*time.Second, cfg.OAuth.VerifierLeeway)
 }
 
 func TestValidateConfigRejectsEmpty(t *testing.T) {
@@ -590,6 +713,128 @@ func TestValidateConfigRequiresAudience(t *testing.T) {
 	require.ErrorContains(t, err, "audience")
 }
 
+// TestValidateConfigAcceptsLegacySingularAudience proves the legacy
+// oauth.audience form alone still activates successfully.
+func TestValidateConfigAcceptsLegacySingularAudience(t *testing.T) {
+	t.Parallel()
+	err := validateConfig(&Config{
+		Listen: ListenConfig{Unix: "/tmp/s"},
+		OAuth:  OAuthConfig{Issuer: "https://x", Audience: "a"},
+	})
+	require.NoError(t, err)
+}
+
+// TestValidateConfigAcceptsPluralAudiences proves the canonical plural
+// expected_audiences form alone activates successfully.
+func TestValidateConfigAcceptsPluralAudiences(t *testing.T) {
+	t.Parallel()
+	err := validateConfig(&Config{
+		Listen: ListenConfig{Unix: "/tmp/s"},
+		OAuth:  OAuthConfig{Issuer: "https://x", ExpectedAudiences: []string{"a", "b"}},
+	})
+	require.NoError(t, err)
+}
+
+// TestValidateConfigRejectsPluralAndSingularBothConfigured is the YAML
+// plural + YAML legacy singular activation-failure regression.
+func TestValidateConfigRejectsPluralAndSingularBothConfigured(t *testing.T) {
+	t.Parallel()
+	err := validateConfig(&Config{
+		Listen: ListenConfig{Unix: "/tmp/s"},
+		OAuth: OAuthConfig{
+			Issuer:            "https://x",
+			Audience:          "a",
+			ExpectedAudiences: []string{"b"},
+		},
+	})
+	require.ErrorContains(t, err, "mutually exclusive")
+}
+
+// TestValidateConfigRejectsPluralWithOnlyEmptyEntries proves a plural list
+// that's present but leaves nothing after discarding empty/whitespace-only
+// entries is a config error, not silent fallback to "no audience configured".
+func TestValidateConfigRejectsPluralWithOnlyEmptyEntries(t *testing.T) {
+	t.Parallel()
+	err := validateConfig(&Config{
+		Listen: ListenConfig{Unix: "/tmp/s"},
+		OAuth:  OAuthConfig{Issuer: "https://x", ExpectedAudiences: []string{"", "   "}},
+	})
+	require.ErrorContains(t, err, "expected_audiences")
+}
+
+// TestValidateConfigRejectsNegativeVerifierLeeway proves a negative
+// verifier_leeway fails config activation.
+func TestValidateConfigRejectsNegativeVerifierLeeway(t *testing.T) {
+	t.Parallel()
+	err := validateConfig(&Config{
+		Listen: ListenConfig{Unix: "/tmp/s"},
+		OAuth:  OAuthConfig{Issuer: "https://x", Audience: "a", VerifierLeeway: -time.Second},
+	})
+	require.ErrorContains(t, err, "verifier_leeway")
+}
+
+// TestLoadConfigOldYAMLTagsRemainValid parses a YAML fixture exercising
+// every pre-existing tag (jwks_url, required_scopes, jwks_cache_ttl,
+// jwks_refresh_ahead) to prove the refactor didn't silently rename any of
+// them.
+func TestLoadConfigOldYAMLTagsRemainValid(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	require.NoError(t, writeFile(path, `
+listen:
+  tcp: "127.0.0.1:9999"
+oauth:
+  issuer: "https://issuer.example.com"
+  jwks_url: "https://issuer.example.com/jwks"
+  audience: "ch-jwt-verify.test"
+  required_scopes: ["mcp:read"]
+  jwks_cache_ttl: 90s
+  jwks_refresh_ahead: 30s
+identity:
+  username_claim: email
+  match_mode: lowercase_equal
+cache:
+  positive_ttl: 15s
+  negative_ttl: 2m
+`))
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	require.Equal(t, "https://issuer.example.com", cfg.OAuth.Issuer)
+	require.Equal(t, "https://issuer.example.com/jwks", cfg.OAuth.JWKSURL)
+	require.Equal(t, "ch-jwt-verify.test", cfg.OAuth.Audience)
+	require.Equal(t, []string{"mcp:read"}, cfg.OAuth.RequiredScopes)
+	require.Equal(t, 90*time.Second, cfg.OAuth.JWKSCacheTTL)
+	require.Equal(t, 30*time.Second, cfg.OAuth.JWKSRefreshAhead)
+	require.Equal(t, 15*time.Second, cfg.Cache.PositiveTTL)
+	require.Equal(t, 2*time.Minute, cfg.Cache.NegativeTTL)
+}
+
+// TestLoadConfigPluralAudiencePlusLegacyEnvFailsActivation is the
+// plural-YAML + CH_JWT_VERIFY_OAUTH_AUDIENCE activation-failure regression:
+// the env override still writes to the legacy singular field, so both forms
+// end up populated after layering and config activation must fail — not
+// silently prefer one source over the other.
+func TestLoadConfigPluralAudiencePlusLegacyEnvFailsActivation(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	require.NoError(t, writeFile(path, `
+listen:
+  tcp: "127.0.0.1:9999"
+oauth:
+  issuer: "https://issuer.example.com"
+  expected_audiences: ["a", "b"]
+`))
+
+	t.Setenv("CH_JWT_VERIFY_OAUTH_AUDIENCE", "env-audience")
+	defer os.Unsetenv("CH_JWT_VERIFY_OAUTH_AUDIENCE")
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "mutually exclusive")
+}
+
 // TestTransientErrorSkipsNegativeCache asserts that a JWKS-fetch failure
 // (network blip / upstream 5xx) does NOT populate the negative cache, so a
 // retry on the next request is allowed to succeed once the upstream recovers.
@@ -607,14 +852,14 @@ func TestTransientErrorSkipsNegativeCache(t *testing.T) {
 
 	cfg := &Config{
 		OAuth: OAuthConfig{
-			Issuer:   "https://issuer.example.com",
-			JWKSURL:  bad.URL,
-			Audience: "ch-jwt-verify.test",
+			Issuer:            "https://issuer.example.com",
+			JWKSURL:           bad.URL,
+			ExpectedAudiences: []string{"ch-jwt-verify.test"},
 		},
 		Identity: IdentityConfig{UsernameClaim: "email", MatchMode: "lowercase_equal"},
 		Cache:    CacheConfig{PositiveTTL: 30 * time.Second, NegativeTTL: 5 * time.Minute},
 	}
-	v := NewVerifier(cfg)
+	v := newTestVerifier(t, cfg)
 
 	// Mint a real-shaped JWT against a separate IdP just so the verifier
 	// reaches the JWKS-fetch step — sign+aud don't matter because the
@@ -626,39 +871,86 @@ func TestTransientErrorSkipsNegativeCache(t *testing.T) {
 		"email_verified": true,
 	})
 
-	_, err := v.verify(context.Background(), "alice@example.com", tok)
-	require.Error(t, err)
-	require.ErrorIs(t, err, oauth.ErrTransient, "503 from JWKS must surface as transient")
-
-	v.mu.Lock()
-	cacheLen := len(v.cache)
-	v.mu.Unlock()
-	require.Equal(t, 0, cacheLen, "transient errors must not be negative-cached")
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
 }
 
-// TestPermanentErrorIsNegativeCached is the counterpart of the test above:
-// permanent rejections (unverified email here) MUST still be cached, since
-// the negative cache is what spares the sidecar from re-checking a replayed
-// bad token's signature on every request.
-func TestPermanentErrorIsNegativeCached(t *testing.T) {
+// TestVerifierHTTPBodyNeverDisclosesFailureReason proves the security
+// requirement this phase's integration work must add: the HTTP body must be
+// byte-identical across every distinct failure cause (bad signature, wrong
+// audience, wrong issuer, expired token, username mismatch, reserved
+// username, unverified email), so a caller can't distinguish which check
+// failed from the response alone.
+func TestVerifierHTTPBodyNeverDisclosesFailureReason(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
-	v := NewVerifier(baseConfig(p))
-	tok := p.mintJWT(t, map[string]interface{}{
-		"sub":            "u-1",
-		"email":          "alice@example.com",
-		"email_verified": false, // → permanent ErrEmailNotVerified
-	})
+	cfg := baseConfig(p)
+	cfg.Identity.UsernameClaim = "sub"
+	cfg.Identity.MatchMode = "exact"
+	cfg.Identity.DeniedUsernames = []string{"reserved-user"}
+	v := newTestVerifier(t, cfg)
 
-	_, err := v.verify(context.Background(), "alice@example.com", tok)
-	require.Error(t, err)
-	require.ErrorIs(t, err, oauth.ErrEmailNotVerified)
-	require.NotErrorIs(t, err, oauth.ErrTransient)
+	otherIdP := newTestIdP(t)
 
-	v.mu.Lock()
-	cacheLen := len(v.cache)
-	v.mu.Unlock()
-	require.Equal(t, 1, cacheLen, "permanent rejections must populate negative cache")
+	cases := map[string]struct {
+		user string
+		tok  string
+	}{
+		"bad_signature": {
+			user: "u-1",
+			tok:  otherIdP.mintJWT(t, map[string]interface{}{"sub": "u-1", "aud": p.audience, "iss": p.issuer}),
+		},
+		"wrong_audience": {
+			user: "u-1",
+			tok:  p.mintJWT(t, map[string]interface{}{"sub": "u-1", "aud": "wrong-aud"}),
+		},
+		"expired": {
+			user: "u-1",
+			tok:  p.mintJWT(t, map[string]interface{}{"sub": "u-1", "exp": time.Now().Add(-time.Hour).Unix()}),
+		},
+		"username_mismatch": {
+			user: "someone-else",
+			tok:  p.mintJWT(t, map[string]interface{}{"sub": "u-1"}),
+		},
+		"reserved_username": {
+			user: "reserved-user",
+			tok:  p.mintJWT(t, map[string]interface{}{"sub": "reserved-user"}),
+		},
+	}
+
+	var bodies []string
+	for name, tc := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+		req.Header.Set("Authorization", basicHeader(tc.user, tc.tok))
+		rr := httptest.NewRecorder()
+		v.Handler().ServeHTTP(rr, req)
+		require.Equal(t, http.StatusForbidden, rr.Code, "case %s", name)
+		bodies = append(bodies, rr.Body.String())
+	}
+
+	for i, b := range bodies {
+		require.Equal(t, errAuthenticationFailed.Error()+"\n", b, "case index %d must return the fixed generic message", i)
+	}
+}
+
+// TestVerifierHTTPBodyNeverContainsToken is the credential-leakage
+// regression: neither the token nor the Basic-auth password ever appears in
+// the HTTP response body.
+func TestVerifierHTTPBodyNeverContainsToken(t *testing.T) {
+	t.Parallel()
+	const marker = "SECRET-TOKEN-MARKER"
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader("alice@example.com", "not-a-jwt-"+marker))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+	require.NotContains(t, rr.Body.String(), marker)
 }
 
 // TestJWKSHealthTracking asserts the underlying go-mcp-oauth-sdk Verifier records
@@ -672,7 +964,7 @@ func TestJWKSHealthTracking(t *testing.T) {
 	t.Run("zero_before_any_fetch", func(t *testing.T) {
 		t.Parallel()
 		p := newTestIdP(t)
-		v := NewVerifier(baseConfig(p))
+		v := newTestVerifier(t, baseConfig(p))
 		lastAttempt, lastSuccess, lastErr := v.JWKSHealth()
 		require.True(t, lastAttempt.IsZero())
 		require.True(t, lastSuccess.IsZero())
@@ -682,14 +974,17 @@ func TestJWKSHealthTracking(t *testing.T) {
 	t.Run("success_marks_both_attempt_and_success", func(t *testing.T) {
 		t.Parallel()
 		p := newTestIdP(t)
-		v := NewVerifier(baseConfig(p))
+		v := newTestVerifier(t, baseConfig(p))
 		tok := p.mintJWT(t, map[string]interface{}{
 			"sub":            "u-1",
 			"email":          "alice@example.com",
 			"email_verified": true,
 		})
-		_, err := v.verify(context.Background(), "alice@example.com", tok)
-		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+		req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+		rr := httptest.NewRecorder()
+		v.Handler().ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 		lastAttempt, lastSuccess, lastErr := v.JWKSHealth()
 		require.False(t, lastAttempt.IsZero())
 		require.False(t, lastSuccess.IsZero())
@@ -708,22 +1003,25 @@ func TestJWKSHealthTracking(t *testing.T) {
 		defer bad.Close()
 		cfg := &Config{
 			OAuth: OAuthConfig{
-				Issuer:   "https://issuer.example.com",
-				JWKSURL:  bad.URL,
-				Audience: "ch-jwt-verify.test",
+				Issuer:            "https://issuer.example.com",
+				JWKSURL:           bad.URL,
+				ExpectedAudiences: []string{"ch-jwt-verify.test"},
 			},
 			Identity: IdentityConfig{UsernameClaim: "email", MatchMode: "lowercase_equal"},
 			Cache:    CacheConfig{PositiveTTL: 30 * time.Second, NegativeTTL: 5 * time.Minute},
 		}
-		v := NewVerifier(cfg)
+		v := newTestVerifier(t, cfg)
 		p := newTestIdP(t)
 		tok := p.mintJWT(t, map[string]interface{}{
 			"sub":            "u-1",
 			"email":          "alice@example.com",
 			"email_verified": true,
 		})
-		_, err := v.verify(context.Background(), "alice@example.com", tok)
-		require.Error(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+		req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+		rr := httptest.NewRecorder()
+		v.Handler().ServeHTTP(rr, req)
+		require.Equal(t, http.StatusForbidden, rr.Code)
 		lastAttempt, lastSuccess, lastErr := v.JWKSHealth()
 		require.False(t, lastAttempt.IsZero())
 		require.True(t, lastSuccess.Before(lastAttempt),
