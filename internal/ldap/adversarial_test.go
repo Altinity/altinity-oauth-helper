@@ -3,6 +3,7 @@ package ldap
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -219,10 +220,19 @@ func TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel(t *testing.T) 
 
 	stdout := stopCapture()
 
-	if strings.Contains(appLog.String(), sentinelToken) || strings.Contains(stdout, sentinelToken) {
+	// The dependency's own packet logger renders raw packet bytes with
+	// "%x" (see client.go's "<<< ... hex=%x"), so a leaked credential shows
+	// up there as its hex encoding, not as literal readable text — check
+	// both forms in both captured channels.
+	sentinelHex := hex.EncodeToString([]byte(sentinelToken))
+	passwordHex := hex.EncodeToString([]byte("jwt-alice"))
+
+	if strings.Contains(appLog.String(), sentinelToken) || strings.Contains(stdout, sentinelToken) ||
+		strings.Contains(appLog.String(), sentinelHex) || strings.Contains(stdout, sentinelHex) {
 		t.Fatalf("sentinel credential leaked into captured output:\napp log:\n%s\nstdout:\n%s", appLog.String(), stdout)
 	}
-	if strings.Contains(appLog.String(), "jwt-alice") || strings.Contains(stdout, "jwt-alice") {
+	if strings.Contains(appLog.String(), "jwt-alice") || strings.Contains(stdout, "jwt-alice") ||
+		strings.Contains(appLog.String(), passwordHex) || strings.Contains(stdout, passwordHex) {
 		t.Fatalf("real bind password leaked into captured output:\napp log:\n%s\nstdout:\n%s", appLog.String(), stdout)
 	}
 }
