@@ -908,8 +908,9 @@ func TestTransientErrorSkipsNegativeCache(t *testing.T) {
 // requirement this phase's integration work must add: the HTTP body must be
 // byte-identical across every distinct failure cause (bad signature, wrong
 // audience, wrong issuer, expired token, username mismatch, reserved
-// username, unverified email), so a caller can't distinguish which check
-// failed from the response alone.
+// username, unverified email, disallowed email domain, disallowed hosted
+// domain, and a transient JWKS-fetch failure), so a caller can't distinguish
+// which check failed from the response alone.
 func TestVerifierHTTPBodyNeverDisclosesFailureReason(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)
@@ -917,6 +918,8 @@ func TestVerifierHTTPBodyNeverDisclosesFailureReason(t *testing.T) {
 	cfg.Identity.UsernameClaim = "sub"
 	cfg.Identity.MatchMode = "exact"
 	cfg.Identity.DeniedUsernames = []string{"reserved-user"}
+	cfg.Identity.AllowedEmailDomains = []string{"allowed.example.com"}
+	cfg.Identity.AllowedHostedDomains = []string{"allowed-hd.example.com"}
 	v := newTestVerifier(t, cfg)
 
 	otherIdP := newTestIdP(t)
@@ -943,7 +946,23 @@ func TestVerifierHTTPBodyNeverDisclosesFailureReason(t *testing.T) {
 		},
 		"reserved_username": {
 			user: "reserved-user",
-			tok:  p.mintJWT(t, map[string]interface{}{"sub": "reserved-user"}),
+			tok: p.mintJWT(t, map[string]interface{}{
+				"sub": "reserved-user", "email": "alice@allowed.example.com", "email_verified": true,
+				"hd": "allowed-hd.example.com",
+			}),
+		},
+		"disallowed_email_domain": {
+			user: "u-2",
+			tok: p.mintJWT(t, map[string]interface{}{
+				"sub": "u-2", "email": "alice@not-allowed.example.com", "email_verified": true,
+			}),
+		},
+		"disallowed_hosted_domain": {
+			user: "u-3",
+			tok: p.mintJWT(t, map[string]interface{}{
+				"sub": "u-3", "email": "alice@allowed.example.com", "email_verified": true,
+				"hd": "not-allowed-hd.example.com",
+			}),
 		},
 	}
 
@@ -956,6 +975,24 @@ func TestVerifierHTTPBodyNeverDisclosesFailureReason(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, rr.Code, "case %s", name)
 		bodies = append(bodies, rr.Body.String())
 	}
+
+	// A transient JWKS-fetch failure must produce the identical body too —
+	// this uses its own Verifier (a different JWKS backend is what makes the
+	// failure transient), so it's checked separately from the map above.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer bad.Close()
+	transientCfg := baseConfig(p)
+	transientCfg.OAuth.JWKSURL = bad.URL
+	transientV := newTestVerifier(t, transientCfg)
+	transientTok := p.mintJWT(t, map[string]interface{}{"sub": "u-1", "email": "alice@example.com", "email_verified": true})
+	reqTransient := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	reqTransient.Header.Set("Authorization", basicHeader("alice@example.com", transientTok))
+	rrTransient := httptest.NewRecorder()
+	transientV.Handler().ServeHTTP(rrTransient, reqTransient)
+	require.Equal(t, http.StatusForbidden, rrTransient.Code)
+	bodies = append(bodies, rrTransient.Body.String())
 
 	for i, b := range bodies {
 		require.Equal(t, errAuthenticationFailed.Error()+"\n", b, "case index %d must return the fixed generic message", i)
