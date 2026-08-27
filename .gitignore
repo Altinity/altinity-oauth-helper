@@ -14,3 +14,9 @@ coverage.txt
 
 # Local secrets (mirrors examples/superset-otel/superset-secrets.yaml.example)
 examples/*/superset-secrets.yaml
+
+# Claude Code project config: keep settings.json (if any), drop local-only state
+.claude/settings.local.json
+
+# Skill dependencies (installed via `npm ci` in the skill dir, not committed)
+skills/*/node_modules/
