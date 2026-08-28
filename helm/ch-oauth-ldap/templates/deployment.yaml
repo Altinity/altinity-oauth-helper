@@ -1,0 +1,150 @@
+{{- include "ch-oauth-ldap.validate" . -}}
+{{/*
+The environment-level workload. Container listener is fixed to 3389 (named
+`ldap`); the Service in templates/service.yaml maps the standard LDAP port
+389 to it, which avoids requiring NET_BIND_SERVICE. There is no HTTP
+surface — probes below are plain TCP, matching the binary having no health
+endpoint. See templates/service.yaml, templates/pdb.yaml, and
+templates/networkpolicy.yaml for the rest of the topology; all four use
+ch-oauth-ldap.selectorLabels for every selector so they can never disagree.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ch-oauth-ldap.fullname" . }}
+  labels:
+    {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "ch-oauth-ldap.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ch-oauth-ldap.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- /*
+        Forces a rolling replacement whenever the rendered config.yaml
+        ConfigMap changes. Bound to the config ConfigMap only (not the
+        ClickHouse-side one, which CH mounts, not this Deployment).
+        */}}
+        {{ include "ch-oauth-ldap.configChecksumAnnotationKey" . }}: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      terminationGracePeriodSeconds: 40
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- /*
+      A non-empty explicit `affinity` replaces the generated soft
+      anti-affinity entirely, rather than merging with it — an operator who
+      sets .Values.affinity owns placement outright.
+      */}}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if .Values.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: {{ .Values.podAntiAffinity.weight }}
+              podAffinityTerm:
+                topologyKey: {{ .Values.podAntiAffinity.topologyKey }}
+                labelSelector:
+                  matchLabels:
+                    {{- include "ch-oauth-ldap.selectorLabels" . | nindent 20 }}
+      {{- end }}
+      containers:
+        - name: ch-oauth-ldap
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/ch-oauth-ldap/config.yaml
+          env:
+            - name: CH_OAUTH_LDAP_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: ldap
+              containerPort: 3389
+              protocol: TCP
+          # Plain TCP only — the binary has no HTTP health endpoint. A
+          # successful handshake proves the listener accepts connections;
+          # it does not prove JWT/JWKS health, does not perform an LDAP
+          # Bind, and does not reflect the 256-connection saturation limit
+          # (an accepted probe connection briefly consumes a server
+          # connection slot, and a handshake can complete just before the
+          # server closes the excess connection). See README.md.
+          readinessProbe:
+            tcpSocket:
+              port: ldap
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: ldap
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 1
+            failureThreshold: 3
+          # Best-effort endpoint-propagation window before SIGTERM closes
+          # the LDAP listener — not a guaranteed Kubernetes convergence
+          # bound. terminationGracePeriodSeconds: 40 budgets this 5s plus
+          # up to the existing 30s LDAP connection timeout plus ~5s margin.
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sleep
+                  - "5"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ch-oauth-ldap
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "ch-oauth-ldap.fullname" . }}-config

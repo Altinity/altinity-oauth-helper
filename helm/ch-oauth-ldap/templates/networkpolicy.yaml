@@ -1,0 +1,41 @@
+{{- include "ch-oauth-ldap.validate" . -}}
+{{/*
+Ingress-only source restriction — the only network-layer mitigation
+available without TLS, given the recorded decision that the OAuth bearer
+travels in clear text as the LDAP bind password (see values.yaml). This is
+reachability control, not transport confidentiality; see README.md.
+
+`networkPolicy.enabled=false` is a documented compatibility escape hatch:
+it omits only this resource and never changes Service exposure.
+
+`ch-oauth-ldap.validate` (§5 rules 8-9) already guarantees
+clickhousePodSelector is substantive whenever this renders, and that
+clickhouseNamespaceSelector is either absent (`{}`, meaning "no namespace
+restriction") or itself substantive — so the peer below is never an
+empty/allow-all selector, and there is never an empty source peer.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ch-oauth-ldap.fullname" . }}
+  labels:
+    {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ch-oauth-ldap.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            {{- toYaml .Values.networkPolicy.clickhousePodSelector | nindent 12 }}
+          {{- if eq (include "ch-oauth-ldap.selectorSubstantive" .Values.networkPolicy.clickhouseNamespaceSelector) "true" }}
+          namespaceSelector:
+            {{- toYaml .Values.networkPolicy.clickhouseNamespaceSelector | nindent 12 }}
+          {{- end }}
+      ports:
+        - protocol: TCP
+          port: ldap
+{{- end }}
