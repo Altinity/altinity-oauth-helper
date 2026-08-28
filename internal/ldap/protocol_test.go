@@ -518,6 +518,35 @@ func TestProtocol_SearchReturnsFullSyntheticEntry(t *testing.T) {
 	}
 }
 
+// TestProtocol_MixedNoAttributesOIDSelectorIgnoresOneOne is a real-TCP
+// regression test for RFC 4511 §4.5.1.8: the "1.1" (NoAttributes) OID only
+// suppresses all attributes when it is the *sole* requested selector. Mixed
+// into a list alongside a real attribute name, it must be ignored rather
+// than nuking the whole response — see internal/ldap/entry.go's
+// projectedAttributes.
+func TestProtocol_MixedNoAttributesOIDSelectorIgnoresOneOne(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_engineer"})
+	addr, _, _ := startTestServer(t, newFakeVerifier(acct), newFakeRoles(acct))
+
+	conn := dialTest(t, addr)
+	requireSuccess(t, "bind", bindAs(conn, protoBindDN("alice"), "jwt-alice"))
+
+	res, err := conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("alice"), []string{"1.1", "cn"}))
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(res.Entries))
+	}
+	e := res.Entries[0]
+	if got := e.GetAttributeValue("cn"); got != "clickhouse_ch_engineer" {
+		t.Fatalf("cn = %q, want clickhouse_ch_engineer (mixed \"1.1\" selector must not suppress it)", got)
+	}
+	if got := e.GetAttributeValue("objectClass"); got != "" {
+		t.Fatalf("objectClass = %q, want empty (not requested)", got)
+	}
+}
+
 // ---- 10. bound user with zero roles gets successful empty Search ---------
 
 func TestProtocol_ZeroRoleBindGetsSuccessfulEmptySearch(t *testing.T) {

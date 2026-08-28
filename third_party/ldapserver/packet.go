@@ -26,14 +26,19 @@ type messagePacket struct {
 // eventual readBytes call try to allocate that much, per connection, before
 // any credential is ever checked. See PATCHES.md for the full writeup.
 //
-// 1 MiB is far larger than any legitimate message this repo's consumer
+// 64 KiB is far larger than any legitimate message this repo's consumer
 // (cmd/ch-oauth-ldap's simple Bind + restricted role-mapping Search) ever
 // sends or receives: a Bind carries one DN and one JWT bearer password (at
 // most a few KiB), and a Search request/response here is a handful of short
-// attribute values — while still being nowhere near large enough for a
-// concurrent-connection flood of rejected oversized headers to pressure
-// process memory.
-const maxMessageBodyLength = 1 << 20 // 1 MiB
+// attribute values — while still leaving generous headroom over that. This
+// is deliberately much smaller than an earlier 1 MiB version of this same
+// cap: with server.go's MaxConnections now bounding how many connections may
+// hold one of these buffers at once, MaxConnections*maxMessageBodyLength is
+// the explicit worst-case aggregate pre-auth memory bound, and shrinking the
+// per-connection half of that product keeps the bound small without relying
+// on MaxConnections alone — see server.go's MaxConnections doc for the
+// other half.
+const maxMessageBodyLength = 64 << 10 // 64 KiB
 
 func readMessagePacket(br *bufio.Reader) (*messagePacket, error) {
 	var err error

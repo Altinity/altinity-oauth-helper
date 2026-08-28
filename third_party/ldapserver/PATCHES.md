@@ -2,14 +2,15 @@
 
 This is a vendored, patched copy of `github.com/vjeantet/ldapserver`'s root
 package, pinned via a `replace` directive in the root `go.mod`. It exists
-solely to carry three fixes the pinned version
+solely to carry five fixes the pinned version
 (`v1.0.2-0.20260725103726-663e6b9910fb`) lacks. `LICENSE` is the unmodified
-upstream MIT license, preserved per its terms; only `packet.go` and
-`client.go` differ from upstream, as follows. Every other file (`cancel.go`,
-`constants.go`, `logger.go`, `message.go`, `responsemessage.go`, `route.go`,
-`server.go`, and the `*_test.go` files) is an unmodified copy of the pinned
-version, kept here only so this fork builds and can be diffed/re-synced as
-one complete package rather than a partial patch.
+upstream MIT license, preserved per its terms; only `packet.go`, `client.go`,
+and `server.go` differ from upstream, as follows. Every other file
+(`cancel.go`, `constants.go`, `logger.go`, `message.go`,
+`responsemessage.go`, `route.go`, and the `*_test.go` files) is an
+unmodified copy of the pinned version, kept here only so this fork builds
+and can be diffed/re-synced as one complete package rather than a partial
+patch.
 
 ## An unauthenticated declared BER length allowed a ~2 GiB pre-auth allocation
 
@@ -234,9 +235,88 @@ does cover, and which resolves this package through the root module's
   despite it — proving the shutdown-hang scenario above is fixed, not
   merely that the connection eventually errors out.
 
+## Aggregate pre-auth memory across connections was unbounded
+
+The first item above bounds how large a single connection's declared
+message-body length may be (originally 1 MiB, now 64 KiB — see the updated
+comment at `maxMessageBodyLength`'s declaration in `packet.go`), and the
+third item's `ReadTimeout` bounds how long any one connection may hold that
+buffer while stalled. Neither bounds how many connections can do this AT
+ONCE: `server.go`'s `serve()` accept loop had no cap on concurrent accepted
+connections at all, so an unauthenticated attacker opening many concurrent
+sockets — each sending only the handful of bytes needed to declare a
+maximal-length body, then nothing further — could still pin
+`N * maxMessageBodyLength` bytes of live server memory for up to
+`ReadTimeout`, with no ceiling on `N` other than available file descriptors.
+
+The fix adds `Server.MaxConnections` (see its doc comment in `server.go`):
+zero means unbounded, preserving prior behavior for any caller that never
+sets it; a positive value makes `serve()`'s accept loop reject (close
+immediately, before any per-connection buffer — bufio reader/writer, let
+alone a `readMessagePacket` body allocation — is ever created for it) any
+connection accepted once that many are already live, tracked by a
+buffered-channel semaphore (`connSlots`) released when that connection's
+`serve()` returns. `internal/ldap/server.go` in the consuming repo sets this
+to 256, documented there alongside the updated 64 KiB body cap: together
+they turn aggregate pre-auth memory into an explicit, justified arithmetic
+bound (256 * 64 KiB = 16 MiB worst case) instead of an unbounded one.
+
+See `internal/ldap/adversarial_test.go`'s
+`TestAdversarial_ConcurrentMaxLengthStalledConnectionsAreBounded`, which
+dials more at-cap-length stalled connections than `MaxConnections` against
+the real production server (with `MaxConnections` overridden small for a
+fast, deterministic test) and asserts both that connections within the cap
+behave as the single-connection oversized-length test already proved and
+that every connection beyond the cap is rejected immediately rather than
+allowed to allocate its own body buffer.
+
+## Abandon/Cancel could be starved behind saturated ordinary-work dispatch
+
+The third item above (`MaxInFlightRequestsPerClient`) bounds how many
+ordinary `ProcessRequestMessage` executions one client connection may have
+concurrently live, enforced by gating every dispatch in `serve()`'s read
+loop — including Abandon and a Cancel Extended request (RFC 3909, OID
+`1.3.6.1.1.8`) — behind the same semaphore. That is exactly backwards for
+those two operations: a client sends Abandon/Cancel precisely because it
+wants to relieve a backed-up connection, so gating them behind the very
+saturation they exist to relieve meant an already-decoded Abandon/Cancel
+request could not run until an ordinary-work slot freed. The read loop
+itself was also stuck blocked on that same semaphore while waiting to
+dispatch that already-decoded Abandon/Cancel message, so it could not get
+back to `ReadPacket` to notice a subsequent peer disconnect promptly either
+— one root cause producing both symptoms.
+
+The fix (`client.go`) adds `MaxInFlightControlOperationsPerClient`, a
+second, independent, buffered-channel semaphore
+(`controlInFlight`/`acquireControlSlot`/`releaseControlSlot`) that Abandon
+and Cancel dispatch against instead of the ordinary-work one, via the new
+`isControlOperation` check placed in `serve()`'s read loop immediately after
+the existing Unbind short-circuit and before the ordinary-work
+`acquireRequestSlot` call. This is deliberately a *separate, still-bounded*
+capacity rather than an unconditional bypass: Abandon/Cancel always get to
+run without queueing behind unrelated long-running application work, while
+remaining bounded so a flood of distinct Abandon/Cancel messages cannot
+itself become an unbounded-goroutine vector the way removing the cap
+entirely would risk. Both operations are lightweight and bounded by
+construction — a map lookup plus signaling an already-registered request's
+`Done` channel (see `route.go`'s Abandon/Cancel handling and `cancel.go`'s
+`handleCancel`) — never a call into arbitrary application handler code or a
+slow external dependency, which is what makes a dedicated capacity safe
+here in a way it would not be for ordinary Bind/Search dispatch.
+
+See `internal/ldap/adversarial_test.go`'s
+`TestAdversarial_AbandonRunsPromptlyDespiteSaturatedOrdinaryWork`,
+`TestAdversarial_CancelRunsPromptlyDespiteSaturatedOrdinaryWork`, and
+`TestAdversarial_ConnectionCloseDetectedPromptlyAfterControlOpDespiteSaturation`
+— the last of which sends a Cancel while every ordinary-work slot is held
+and then immediately closes the raw TCP connection, asserting the server
+notices and cleans up promptly rather than only after a slot eventually
+frees, proving the read-loop-stall half of this fix as well as the
+dispatch-starvation half.
+
 ## Keeping this fork in sync
 
 If the pinned `github.com/vjeantet/ldapserver` version in the root `go.mod`
 is ever bumped, re-diff this directory against the new upstream package and
-re-apply all three of the changes above (or drop this fork entirely if
+re-apply all five of the changes above (or drop this fork entirely if
 upstream has fixed them by then).

@@ -125,6 +125,18 @@ func TestGroupEntry_ProjectedAttributes(t *testing.T) {
 			requested: []string{"1.1"},
 			want:      nil,
 		},
+		"1.1 mixed with a real attribute is ignored, not a wholesale override": {
+			requested: []string{"1.1", "cn"},
+			want:      []groupAttribute{{name: "cn", values: []string{"clickhouse_ch_engineer"}}},
+		},
+		"1.1 mixed with a real attribute in reverse order is still ignored": {
+			requested: []string{"cn", "1.1"},
+			want:      []groupAttribute{{name: "cn", values: []string{"clickhouse_ch_engineer"}}},
+		},
+		"1.1 mixed with star returns full entry": {
+			requested: []string{"1.1", "*"},
+			want:      full,
+		},
 		"unknown attribute returns nothing new": {
 			requested: []string{"description"},
 			want:      []groupAttribute{},

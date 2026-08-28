@@ -17,10 +17,32 @@ type ClientCloseHandler func(conn net.Conn, data any)
 // Server is an LDAP server.
 type Server struct {
 	Listener     net.Listener
-	ReadTimeout  time.Duration  // optional read timeout
-	WriteTimeout time.Duration  // optional write timeout
-	wg           sync.WaitGroup // group of goroutines (1 by client)
-	chDone       chan bool      // Channel Done, value => shutdown
+	ReadTimeout  time.Duration // optional read timeout
+	WriteTimeout time.Duration // optional write timeout
+	// MaxConnections optionally bounds how many connections this server
+	// serves concurrently. Zero (the Go default) means unbounded, preserving
+	// prior behavior for any caller that never sets it. This is a distinct
+	// property from ReadTimeout/WriteTimeout above: those bound how long any
+	// ONE accepted connection may hold its per-message body buffer (see
+	// packet.go's maxMessageBodyLength and readBytes), but neither bounds
+	// how many connections can do that AT ONCE — an unauthenticated client
+	// need only complete the length-declaring header (a handful of bytes)
+	// to make readBytes allocate that buffer before ever blocking, so N
+	// concurrent sockets each doing that pins N*maxMessageBodyLength bytes
+	// of live server memory for up to ReadTimeout, with nothing capping N.
+	// serve() below enforces this cap by rejecting (closing immediately,
+	// before any per-connection buffer is created) any connection accepted
+	// once MaxConnections are already live — turning
+	// MaxConnections*maxMessageBodyLength into an explicit, arithmetic
+	// worst-case bound on aggregate pre-auth memory instead of an unbounded
+	// one. See PATCHES.md's fourth item.
+	MaxConnections int
+	wg             sync.WaitGroup // group of goroutines (1 by client)
+	chDone         chan bool      // Channel Done, value => shutdown
+	// connSlots is the buffered-channel semaphore enforcing MaxConnections,
+	// capacity MaxConnections, lazily created by serve() the first time it
+	// runs. nil when MaxConnections is zero (unbounded).
+	connSlots chan struct{}
 
 	// TLSConfig optionally provides a TLS configuration for use by ServeTLS.
 	TLSConfig *tls.Config
@@ -120,6 +142,10 @@ func (s *Server) serve() error {
 
 	i := 0
 
+	if s.MaxConnections > 0 {
+		s.connSlots = make(chan struct{}, s.MaxConnections)
+	}
+
 	for {
 		rw, err := s.Listener.Accept()
 		if err != nil {
@@ -136,6 +162,21 @@ func (s *Server) serve() error {
 			return err
 		}
 
+		// Enforce MaxConnections before any per-connection buffer is ever
+		// created for this socket (see the field doc above): a non-blocking
+		// acquire attempt means an already-saturated server rejects this
+		// connection immediately rather than growing an accept-side queue of
+		// its own or blocking Accept for connections that could otherwise be
+		// served once a slot frees.
+		if s.connSlots != nil {
+			select {
+			case s.connSlots <- struct{}{}:
+			default:
+				rw.Close()
+				continue
+			}
+		}
+
 		if s.ReadTimeout != 0 {
 			rw.SetReadDeadline(time.Now().Add(s.ReadTimeout))
 		}
@@ -145,6 +186,9 @@ func (s *Server) serve() error {
 
 		cli, err := s.newClient(rw)
 		if err != nil {
+			if s.connSlots != nil {
+				<-s.connSlots
+			}
 			continue
 		}
 
@@ -152,7 +196,12 @@ func (s *Server) serve() error {
 		cli.Numero = i
 		Logger.Printf("Connection client [%d] from %s accepted", cli.Numero, cli.rwc.RemoteAddr().String())
 		s.wg.Add(1)
-		go cli.serve()
+		go func(c *client) {
+			c.serve()
+			if s.connSlots != nil {
+				<-s.connSlots
+			}
+		}(cli)
 	}
 }
 

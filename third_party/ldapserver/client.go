@@ -22,24 +22,50 @@ import (
 // fix replaces in serve() below.
 const MaxInFlightRequestsPerClient = 20
 
+// MaxInFlightControlOperationsPerClient bounds concurrent Abandon/Cancel
+// dispatches per client connection, independent of
+// MaxInFlightRequestsPerClient's ordinary-work cap above — see
+// acquireControlSlot/releaseControlSlot and the dispatch site in serve()
+// below. Abandon and a Cancel Extended request (RFC 3909, OID
+// 1.3.6.1.1.8) are lightweight, bounded control-plane operations: each is
+// only ever a map lookup plus signaling an already-registered request's
+// Done channel (see route.go's Abandon/Cancel handling and cancel.go's
+// handleCancel) — neither ever calls into arbitrary application handler
+// code or blocks on a slow external call the way an ordinary Bind/Search
+// dispatch can.
+//
+// Gating them behind the *same* semaphore as ordinary work meant an
+// already-decoded Abandon/Cancel request could not execute until an
+// ordinary-work slot freed — exactly backwards, since a client sends
+// Abandon/Cancel precisely BECAUSE it wants to relieve a backed-up
+// connection, and the read loop blocking on that same semaphore also could
+// not get back to ReadPacket to notice a subsequent peer disconnect
+// promptly. A separate, still-bounded capacity here fixes both: Abandon/
+// Cancel always get to run (never queueing behind unrelated long-running
+// work), while remaining bounded so a flood of distinct Abandon/Cancel
+// messages cannot itself become an unbounded-goroutine vector. See
+// PATCHES.md's fifth item.
+const MaxInFlightControlOperationsPerClient = 20
+
 type client struct {
-	Numero        int
-	srv           *Server
-	rwc           net.Conn
-	br            *bufio.Reader
-	bw            *bufio.Writer
-	chanOut       chan *ldap.LDAPMessage
-	inFlight      chan struct{} // semaphore, capacity MaxInFlightRequestsPerClient
-	wg            sync.WaitGroup
-	closing       chan bool
-	shutdownDone  chan struct{}
-	requestList   map[int]*Message
-	mutex         sync.Mutex
-	writeDone     chan bool
-	rawData       []byte
-	data          any
-	handler       Handler
-	hasOwnHandler bool
+	Numero          int
+	srv             *Server
+	rwc             net.Conn
+	br              *bufio.Reader
+	bw              *bufio.Writer
+	chanOut         chan *ldap.LDAPMessage
+	inFlight        chan struct{} // semaphore, capacity MaxInFlightRequestsPerClient
+	controlInFlight chan struct{} // semaphore, capacity MaxInFlightControlOperationsPerClient
+	wg              sync.WaitGroup
+	closing         chan bool
+	shutdownDone    chan struct{}
+	requestList     map[int]*Message
+	mutex           sync.Mutex
+	writeDone       chan bool
+	rawData         []byte
+	data            any
+	handler         Handler
+	hasOwnHandler   bool
 }
 
 // acquireRequestSlot blocks until this client has fewer than
@@ -68,6 +94,40 @@ func (c *client) acquireRequestSlot() bool {
 // defer.
 func (c *client) releaseRequestSlot() {
 	<-c.inFlight
+}
+
+// acquireControlSlot is acquireRequestSlot's counterpart for the dedicated
+// control-operation capacity (MaxInFlightControlOperationsPerClient) — see
+// that constant's doc for why Abandon/Cancel dispatch against this separate
+// semaphore instead of the ordinary-work one above.
+func (c *client) acquireControlSlot() bool {
+	select {
+	case c.controlInFlight <- struct{}{}:
+		return true
+	case <-c.srv.chDone:
+		return false
+	}
+}
+
+// releaseControlSlot frees one control-operation slot acquired by
+// acquireControlSlot. Every acquire must have exactly one matching release.
+func (c *client) releaseControlSlot() {
+	<-c.controlInFlight
+}
+
+// isControlOperation reports whether op is an Abandon request or a Cancel
+// Extended request (RFC 3909, OID 1.3.6.1.1.8) — the two operations
+// serve()'s read loop dispatches against MaxInFlightControlOperationsPerClient
+// instead of the ordinary-work MaxInFlightRequestsPerClient semaphore. See
+// MaxInFlightControlOperationsPerClient's doc above.
+func isControlOperation(op ldap.ProtocolOp) bool {
+	switch v := op.(type) {
+	case ldap.AbandonRequest:
+		return true
+	case ldap.ExtendedRequest:
+		return v.RequestName() == NoticeOfCancel
+	}
+	return false
 }
 
 func (c *client) GetConn() net.Conn {
@@ -146,6 +206,7 @@ func (c *client) serve() {
 	// acquireRequestSlot/releaseRequestSlot above.
 	c.chanOut = make(chan *ldap.LDAPMessage)
 	c.inFlight = make(chan struct{}, MaxInFlightRequestsPerClient)
+	c.controlInFlight = make(chan struct{}, MaxInFlightControlOperationsPerClient)
 	c.writeDone = make(chan bool)
 	// for each message in c.chanOut send it to client. Once one write
 	// fails (see writeMessage's WriteTimeout enforcement), stop attempting
@@ -243,6 +304,24 @@ func (c *client) serve() {
 		// When message is an UnbindRequest, stop serving
 		if _, ok := message.ProtocolOp().(ldap.UnbindRequest); ok {
 			return
+		}
+
+		// Abandon and Cancel dispatch against their own dedicated,
+		// MaxInFlightControlOperationsPerClient-bounded capacity, entirely
+		// bypassing the ordinary-work semaphore below — see that constant's
+		// doc for why. Tracked by c.wg like every other dispatch, so
+		// close() still waits for it; acquireControlSlot also selects on
+		// server shutdown like acquireRequestSlot does.
+		if isControlOperation(message.ProtocolOp()) {
+			if !c.acquireControlSlot() {
+				return
+			}
+			c.wg.Add(1)
+			go func() {
+				defer c.releaseControlSlot()
+				c.ProcessRequestMessage(&message)
+			}()
+			continue
 		}
 
 		// Bound how many ProcessRequestMessage executions this client may

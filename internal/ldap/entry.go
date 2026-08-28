@@ -82,7 +82,12 @@ func (g GroupEntry) fixedAttributes() []groupAttribute {
 // projectedAttributes applies the standard LDAP Search attribute-selection
 // semantics to the fixed attribute set:
 //   - an empty selection or "*" returns every fixed attribute;
-//   - "1.1" returns no attributes at all;
+//   - "1.1" AS THE SOLE SELECTOR returns no attributes at all, per RFC 4511
+//     §4.5.1.8 ("If the client does not want any attributes returned, it
+//     SHOULD specify a list containing only the OID '1.1'"). "1.1" is a
+//     no-op when mixed with any other selector — it is not treated as an
+//     override that suppresses the rest of the list, matching conventional
+//     LDAP server behavior;
 //   - any other explicit selection returns only the fixed attributes whose
 //     name matches (case-insensitively) a requested name — an unknown
 //     requested name matches nothing and so exposes no new information.
@@ -97,10 +102,8 @@ func (g GroupEntry) projectedAttributes(requested []string) []groupAttribute {
 		return fixed
 	}
 
-	for _, r := range requested {
-		if r == "1.1" {
-			return nil
-		}
+	if len(requested) == 1 && requested[0] == "1.1" {
+		return nil
 	}
 
 	for _, r := range requested {

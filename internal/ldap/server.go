@@ -49,6 +49,28 @@ const (
 	ldapConnWriteTimeout = 30 * time.Second
 )
 
+// ldapMaxConnections is a hard, process-wide cap on how many LDAP
+// connections the vendored ldapserver.Server (constructed in New below)
+// accepts and serves concurrently — see third_party/ldapserver/server.go's
+// Server.MaxConnections doc. ldapConnReadTimeout above bounds how long any
+// ONE accepted connection may hold its per-message body buffer (declaring,
+// but never finishing, a message body up to
+// third_party/ldapserver/packet.go's maxMessageBodyLength cap); it does not
+// bound how many connections can do that AT ONCE. Without a connection cap,
+// an unauthenticated attacker opening many concurrent sockets — each
+// sending only the handful of bytes needed to declare a maximal-length
+// body — can still pressure aggregate process memory with no ceiling other
+// than available file descriptors, even though no single connection can
+// hold more than one buffer for longer than ldapConnReadTimeout.
+//
+// 256 is far more concurrent connections than this consumer
+// (cmd/ch-oauth-ldap fronting a single ClickHouse instance's LDAP external
+// authentication) ever legitimately opens at once, while combined with
+// maxMessageBodyLength it turns aggregate pre-auth memory into an explicit,
+// justified arithmetic bound (256 * 64 KiB = 16 MiB worst case) rather than
+// an unbounded one.
+const ldapMaxConnections = 256
+
 // Config is the immutable external configuration for one LDAP Server,
 // converted by the command from the `ldap:` YAML section. See "Configuration
 // design" in the phase-2 plan.
@@ -173,6 +195,7 @@ func New(rootCtx context.Context, cfg Config, v verifier, roles roleResolver) (*
 	ldapSrv := ldapserver.NewServerWithHandlerSource(hs)
 	ldapSrv.ReadTimeout = ldapConnReadTimeout
 	ldapSrv.WriteTimeout = ldapConnWriteTimeout
+	ldapSrv.MaxConnections = ldapMaxConnections
 
 	return &Server{ldapSrv: ldapSrv}, nil
 }

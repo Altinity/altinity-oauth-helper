@@ -115,7 +115,7 @@ func TestAdversarial_StalledPartialBodyReadTimesOutWithoutBlockingShutdown(t *te
 	addr := ln.Addr().String()
 
 	// A valid 2-byte header declaring a 64-byte body (0x30 = SEQUENCE,
-	// 0x40 = short-form length 64), well under the 1 MiB
+	// 0x40 = short-form length 64), well under the 64 KiB
 	// maxMessageBodyLength cap — this is deliberately NOT the
 	// oversized-declared-length case
 	// (TestAdversarial_OversizedDeclaredLengthRejectedWithoutBoundedAllocation
@@ -194,6 +194,19 @@ func rawSimpleBindMessage(messageID int, dn, token string) []byte {
 	env := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Message")
 	env.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "messageID"))
 	env.AppendChild(bindReq)
+	return env.Bytes()
+}
+
+// rawAbandonMessage BER-encodes one complete AbandonRequest LDAPMessage
+// envelope (RFC 4511 §4.11: `AbandonRequest ::= [APPLICATION 16] MessageID`,
+// a primitive INTEGER, not a SEQUENCE), with messageID as this envelope's
+// own message ID and targetMessageID as the operation being abandoned.
+func rawAbandonMessage(messageID, targetMessageID int) []byte {
+	abandonReq := ber.NewInteger(ber.ClassApplication, ber.TypePrimitive, ldapserver.ApplicationAbandonRequest, targetMessageID, "AbandonRequest")
+
+	env := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Message")
+	env.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "messageID"))
+	env.AppendChild(abandonReq)
 	return env.Bytes()
 }
 
@@ -946,8 +959,9 @@ func TestAdversarial_OversizedDeclaredLengthRejectedWithoutBoundedAllocation(t *
 
 	runtime.ReadMemStats(&after)
 
-	// 8 MiB is generous headroom over third_party/ldapserver's 1 MiB
-	// maxMessageBodyLength cap plus ordinary test/runtime allocation noise
+	// 8 MiB is generous headroom over third_party/ldapserver's (much
+	// smaller, as of this fix) maxMessageBodyLength cap plus ordinary
+	// test/runtime allocation noise
 	// (goroutine stacks, GC bookkeeping, the client dial itself); the
 	// vulnerable code path would have attempted make([]byte, 0x7fffffff)
 	// (~2 GiB) here — two orders of magnitude past this budget, so this
@@ -1359,5 +1373,374 @@ func TestAdversarial_FragmentedMessageBodyStillProcessedCorrectly(t *testing.T) 
 	res, err := fresh.Search(membershipSearch(protoGroupBaseDN, protoBindDN("alice"), nil))
 	if err != nil || len(res.Entries) != 1 {
 		t.Fatalf("search after fragmented-bind test: res=%+v, err=%v, want the one entry", res, err)
+	}
+}
+
+// ---- 8. aggregate cross-connection memory bound (review pass 3) -----------
+
+// TestAdversarial_ConcurrentMaxLengthStalledConnectionsAreBounded proves the
+// fix for the P1 finding that aggregate pre-auth memory across connections
+// was unbounded: third_party/ldapserver/packet.go's maxMessageBodyLength
+// bounds a single connection's declared body length, and server.go's
+// ReadTimeout (wired by New) bounds how long any ONE connection may hold
+// that buffer, but before this fix nothing bounded how many connections
+// could do this AT ONCE — server.go's serve() accept loop had no cap on
+// concurrent accepted connections. This drives exactly the attack the
+// finding described: many concurrent sockets, each sending only a 5-byte
+// header declaring a body AT the maxMessageBodyLength cap and then nothing
+// further, and asserts both that a burst within the new MaxConnections cap
+// behaves the way the existing single-connection
+// TestAdversarial_OversizedDeclaredLengthRejectedWithoutBoundedAllocation
+// proves, and that every connection beyond the cap is rejected immediately
+// — closed with no bytes ever sent back — rather than accepted and allowed
+// to allocate its own body buffer too.
+//
+// It overrides srv.ldapSrv.MaxConnections to a small value purely so this
+// test completes quickly and deterministically with a handful of real
+// sockets — it still exercises the identical mechanism New wires into
+// production (third_party/ldapserver/server.go's serve() accept loop).
+func TestAdversarial_ConcurrentMaxLengthStalledConnectionsAreBounded(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv, err := New(rootCtx, protoConfig(), newFakeVerifier(acct), newFakeRoles(acct))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const maxConnections = 4
+	srv.ldapSrv.MaxConnections = maxConnections
+	srv.ldapSrv.ReadTimeout = 5 * time.Second
+	srv.ldapSrv.WriteTimeout = 5 * time.Second
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	addr := ln.Addr().String()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		select {
+		case <-serveErr:
+		case <-time.After(3 * time.Second):
+		}
+		stopDone := make(chan struct{})
+		go func() { srv.Stop(); close(stopDone) }()
+		select {
+		case <-stopDone:
+		case <-time.After(3 * time.Second):
+		}
+	})
+
+	// 0x30 0x83 0x01 0x00 0x00: SEQUENCE, long-form length (3 length
+	// bytes), decoding to 0x010000 = 65536 — third_party/ldapserver's
+	// current maxMessageBodyLength cap exactly (AT the cap passes the
+	// packet.go "> cap" check, the same way the finding's own
+	// "30 83 10 00 00" example header was AT the pre-fix 1 MiB cap). Every
+	// dialed connection below sends only this 5-byte header, then nothing
+	// — enough, pre-fix, to make readBytes attempt a 65536-byte allocation
+	// per connection and then block forever in io.ReadFull, with no cap on
+	// how many connections could do it at once.
+	const perConnBodyBudget = 65536
+	atCapHeader := []byte{0x30, 0x83, 0x01, 0x00, 0x00}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	within := make([]net.Conn, 0, maxConnections)
+	for i := 0; i < maxConnections; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial within-cap %d: %v", i, err)
+		}
+		t.Cleanup(func() { c.Close() })
+		if _, err := c.Write(atCapHeader); err != nil {
+			t.Fatalf("write at-cap header %d: %v", i, err)
+		}
+		within = append(within, c)
+	}
+
+	// Give the server time to have read every header and allocated its
+	// per-connection body buffer before measuring — isolated from the
+	// over-cap assertion below, so a failure here specifically means "an
+	// at-cap-but-within-the-connection-limit burst costs more than
+	// expected", not "the connection limit itself doesn't work".
+	time.Sleep(200 * time.Millisecond)
+	runtime.GC()
+	var afterWithinCap runtime.MemStats
+	runtime.ReadMemStats(&afterWithinCap)
+
+	// Generous headroom over maxConnections*perConnBodyBudget for goroutine
+	// stacks, GC bookkeeping, and the dials themselves.
+	withinCapBudget := uint64(maxConnections*perConnBodyBudget) + 4<<20
+	if delta := afterWithinCap.TotalAlloc - before.TotalAlloc; delta > withinCapBudget {
+		t.Fatalf("handling %d at-cap stalled connections allocated %d bytes (budget %d)", maxConnections, delta, withinCapBudget)
+	}
+
+	// Now exceed the connection cap: every one of these must be rejected —
+	// connection closed immediately, no bytes exchanged, no body buffer
+	// allocated for it — proving the process-wide MaxConnections limit
+	// itself, distinct from the per-message cap proven above.
+	const extraOverCap = 3
+	overCap := make([]net.Conn, 0, extraOverCap)
+	for i := 0; i < extraOverCap; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial over-cap %d: %v", i, err)
+		}
+		t.Cleanup(func() { c.Close() })
+		overCap = append(overCap, c)
+
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 16)
+		n, readErr := c.Read(buf)
+		if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
+			t.Fatalf("over-cap connection %d was never rejected (read timed out) — the process-wide MaxConnections cap does not appear to be enforced", i)
+		}
+		if n != 0 {
+			t.Fatalf("over-cap connection %d: got %d bytes, want the connection closed with none", i, n)
+		}
+	}
+
+	runtime.GC()
+	var afterOverCap runtime.MemStats
+	runtime.ReadMemStats(&afterOverCap)
+
+	// If MaxConnections were not enforced, each of the extraOverCap
+	// connections would additionally have been accepted and allocated its
+	// own perConnBodyBudget-sized buffer; assert the total stayed close to
+	// the within-cap figure instead.
+	overCapBudget := withinCapBudget + 1<<20
+	if delta := afterOverCap.TotalAlloc - before.TotalAlloc; delta > overCapBudget {
+		t.Fatalf("total allocation after dialing %d over-cap connections was %d bytes (budget %d) — looks like the process-wide MaxConnections cap let them allocate their own body buffers too", extraOverCap, delta, overCapBudget)
+	}
+
+	// Free the within-cap slots, then prove a fresh connection is accepted
+	// and works correctly again once a slot is available.
+	for _, c := range within {
+		c.Close()
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	conn := dialTest(t, addr)
+	requireSuccess(t, "bind after connection-cap burst", bindAs(conn, protoBindDN("alice"), "jwt-alice"))
+	res, err := conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("alice"), nil))
+	if err != nil || len(res.Entries) != 1 {
+		t.Fatalf("search after connection-cap burst: res=%+v, err=%v, want the one entry", res, err)
+	}
+}
+
+// ---- 9. Abandon/Cancel starvation behind saturated ordinary work ----------
+
+// saturateOrdinaryWorkSlots pipelines exactly
+// ldapserver.MaxInFlightRequestsPerClient raw simple-Bind messages over
+// rawConn, all sharing fv (whose fv.block must already be a never-closed
+// channel), and blocks until the first has definitely entered the fake
+// verifier. Internal/ldap's own handleBind holds the connection's single
+// per-connection session lock for its entire duration (see
+// TestAdversarial_BoundedInFlightGoroutinesPerClient's doc), so only that
+// first dispatched Bind ever actually reaches fv.Verify; every other one
+// queues behind that same lock instead — both are still live, blocked
+// ProcessRequestMessage executions occupying one of the connection's
+// MaxInFlightRequestsPerClient slots, which is what "saturated" means here.
+// None of them ever completes on their own, because fv.block is never
+// closed — only canceling their context (directly, via Abandon, or via
+// requestList's client.close() broadcast) unblocks any of them.
+func saturateOrdinaryWorkSlots(t *testing.T, rawConn net.Conn, fv *fakeVerifier) {
+	t.Helper()
+
+	for i := 1; i <= ldapserver.MaxInFlightRequestsPerClient; i++ {
+		if _, err := rawConn.Write(rawSimpleBindMessage(i, protoBindDN("alice"), "jwt-alice")); err != nil {
+			t.Fatalf("write saturating bind %d: %v", i, err)
+		}
+	}
+	select {
+	case <-fv.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("fake verifier was never entered — saturating binds never dispatched")
+	}
+	// Give the read loop time to have read and dispatched (acquired an
+	// ordinary-work slot for) every one of the MaxInFlightRequestsPerClient
+	// pipelined Binds above, not just the first.
+	time.Sleep(200 * time.Millisecond)
+}
+
+// TestAdversarial_AbandonRunsPromptlyDespiteSaturatedOrdinaryWork proves the
+// fix documented in third_party/ldapserver/PATCHES.md's fifth item: Abandon
+// dispatches against its own dedicated capacity
+// (MaxInFlightControlOperationsPerClient), not the ordinary-work semaphore.
+// It saturates every ordinary-work slot on one connection with Binds that
+// can never complete on their own (fv.block is never closed), then sends an
+// Abandon targeting the one Bind actually blocked in the fake verifier
+// (messageID 1) and asserts the verifier's Verify call returns promptly
+// with context.Canceled — proof the Abandon actually ran, not merely that
+// the connection survived. Before the fix this would deadlock: message 21
+// (the Abandon) would itself queue behind the same exhausted
+// MaxInFlightRequestsPerClient semaphore that will never free a slot within
+// this test (fv.block stays open), so fv.returned would never fire and this
+// test would time out.
+func TestAdversarial_AbandonRunsPromptlyDespiteSaturatedOrdinaryWork(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+	fv := newFakeVerifier(acct)
+	fv.entered = make(chan struct{}, 1)
+	fv.block = make(chan struct{}) // never closed by this test
+	fv.returned = make(chan error, 1)
+
+	addr, rootCancel, _ := startTestServer(t, fv, newFakeRoles(acct))
+	// LIFO: rootCancel runs before startTestServer's own registered stop(),
+	// unblocking every still-queued Bind so Server.Stop()'s wg.Wait() does
+	// not hang on this test's own cleanup.
+	t.Cleanup(rootCancel)
+
+	rawConn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer rawConn.Close()
+
+	saturateOrdinaryWorkSlots(t, rawConn, fv)
+
+	if _, err := rawConn.Write(rawAbandonMessage(ldapserver.MaxInFlightRequestsPerClient+1, 1)); err != nil {
+		t.Fatalf("write abandon: %v", err)
+	}
+
+	select {
+	case err := <-fv.returned:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("verifier's Verify returned %v after Abandon under saturation, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Abandon never ran while ordinary-work slots were saturated — the blocked Bind's Verify call never observed cancellation")
+	}
+}
+
+// TestAdversarial_CancelRunsPromptlyDespiteSaturatedOrdinaryWork is
+// TestAdversarial_AbandonRunsPromptlyDespiteSaturatedOrdinaryWork's Cancel
+// counterpart. cancel.go's handleCancel explicitly refuses a Bind target
+// (LDAPResultCannotCancel — see
+// TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak), so this
+// does not prove the target Bind was aborted; it proves the Cancel
+// operation itself was DISPATCHED and produced its response promptly
+// despite every ordinary-work slot being saturated by Binds that (unlike
+// that other test) never get unblocked here, since fv.block stays open for
+// this entire test. Before the fix this would deadlock exactly like the
+// Abandon case: the Cancel would itself queue behind the exhausted
+// MaxInFlightRequestsPerClient semaphore, which nothing in this test would
+// ever free, so the response read below would time out.
+func TestAdversarial_CancelRunsPromptlyDespiteSaturatedOrdinaryWork(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+	fv := newFakeVerifier(acct)
+	fv.entered = make(chan struct{}, 1)
+	fv.block = make(chan struct{}) // never closed by this test
+	fv.returned = make(chan error, 1)
+
+	addr, rootCancel, _ := startTestServer(t, fv, newFakeRoles(acct))
+	t.Cleanup(rootCancel)
+
+	rawConn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer rawConn.Close()
+
+	saturateOrdinaryWorkSlots(t, rawConn, fv)
+
+	cancelMessageID := ldapserver.MaxInFlightRequestsPerClient + 1
+	extReq := ber.Encode(ber.ClassApplication, ber.TypeConstructed, 23, nil, "ExtendedRequest")
+	extReq.AppendChild(ber.NewString(ber.ClassContext, ber.TypePrimitive, 0, "1.3.6.1.1.8", "requestName"))
+	extReq.AppendChild(cancelRequestValuePacket(1))
+	env := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Message")
+	env.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, cancelMessageID, "messageID"))
+	env.AppendChild(extReq)
+	if _, err := rawConn.Write(env.Bytes()); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
+
+	// The only response that can ever arrive on this connection during this
+	// test is the Cancel's own (every Bind is permanently blocked, since
+	// fv.block never closes) — a prompt read here, despite full ordinary-
+	// work saturation, is exactly what a deadlocked-behind-the-semaphore
+	// Cancel could not produce.
+	rawConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	pkt, err := ber.ReadPacket(rawConn)
+	if err != nil {
+		t.Fatalf("read cancel response: %v (Cancel never ran while ordinary-work slots were saturated)", err)
+	}
+	if len(pkt.Children) < 2 || len(pkt.Children[1].Children) < 1 {
+		t.Fatalf("cancel response: malformed packet %+v", pkt)
+	}
+	if gotID := pkt.Children[0].Value.(int64); gotID != int64(cancelMessageID) {
+		t.Fatalf("response messageID = %d, want %d (Cancel)", gotID, cancelMessageID)
+	}
+	if gotTag := pkt.Children[1].Tag; gotTag != 24 {
+		t.Fatalf("response op tag = %d, want 24 (ExtendedResponse)", gotTag)
+	}
+	if gotCode := pkt.Children[1].Children[0].Value.(int64); gotCode != int64(ldapserver.LDAPResultCannotCancel) {
+		t.Fatalf("cancel response resultCode = %d, want %d (CannotCancel, since the target is a Bind)", gotCode, ldapserver.LDAPResultCannotCancel)
+	}
+}
+
+// TestAdversarial_ConnectionCloseDetectedPromptlyAfterControlOpDespiteSaturation
+// proves the read-loop-stall half of the same fix: before it, the read loop
+// dispatching an already-decoded Abandon/Cancel message had to acquire an
+// ordinary-work slot first, so while every slot was saturated the loop
+// could not get back to ReadPacket to notice a subsequent peer disconnect
+// either. This saturates one connection's ordinary-work slots exactly as
+// the two tests above do, sends an Abandon (now dispatched against its own
+// capacity, never blocking the read loop), immediately closes the raw
+// connection with no further reads or writes, and asserts the goroutines
+// attributable to this connection drop back near their pre-saturation
+// baseline promptly — only possible if the server actually noticed the
+// close and ran client.close()'s cleanup (which broadcasts an Abandon
+// signal to every request still registered on the connection, canceling
+// each one's context; internal/ldap's handleBind checks that context
+// immediately after acquiring the session lock and returns without ever
+// calling Verify, so the remaining queued Binds unwind in a rapid cascade).
+// Before the fix, this connection's read loop would still be stuck
+// acquiring an ordinary-work slot for message 21 — a slot nothing in this
+// test ever frees, since fv.block stays open — so none of that cleanup
+// would run within this test's short window at all.
+func TestAdversarial_ConnectionCloseDetectedPromptlyAfterControlOpDespiteSaturation(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+	fv := newFakeVerifier(acct)
+	fv.entered = make(chan struct{}, 1)
+	fv.block = make(chan struct{}) // never closed by this test
+
+	addr, rootCancel, _ := startTestServer(t, fv, newFakeRoles(acct))
+	t.Cleanup(rootCancel)
+
+	rawConn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
+	saturateOrdinaryWorkSlots(t, rawConn, fv)
+
+	if _, err := rawConn.Write(rawAbandonMessage(ldapserver.MaxInFlightRequestsPerClient+1, 1)); err != nil {
+		t.Fatalf("write abandon: %v", err)
+	}
+	if err := rawConn.Close(); err != nil {
+		t.Fatalf("close raw connection: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var attributable int
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		attributable = runtime.NumGoroutine() - before
+		if attributable <= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if attributable > 2 {
+		t.Fatalf("goroutines attributable to this connection still elevated at %d, %v after closing it post-Abandon under saturation — looks like the read loop never noticed the disconnect (still stuck acquiring an ordinary-work slot)", attributable, 3*time.Second)
 	}
 }
