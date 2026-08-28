@@ -55,6 +55,404 @@ import (
 //     malicious 6-byte header can provoke, not merely that the server
 //     survives it — see that PATCHES.md for the full vulnerability writeup.
 
+// ---- 0. no-deadline partial-body stall ------------------------------------
+
+// TestNewSetsNonzeroReadAndWriteTimeouts is a narrow unit check that New's
+// production wiring actually sets both deadline fields on the vendored
+// ldapserver.Server, rather than leaving them at their Go zero value (which
+// the dependency treats as "no deadline" — see server.go's ReadTimeout/
+// WriteTimeout doc comments). This is the one-line assertion the TCP-level
+// test below builds on: it proves the exact defect the finding raised
+// (deadlines are optional, and nothing ever set them) is fixed.
+func TestNewSetsNonzeroReadAndWriteTimeouts(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+	srv, err := New(context.Background(), protoConfig(), newFakeVerifier(acct), newFakeRoles(acct))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if srv.ldapSrv.ReadTimeout == 0 {
+		t.Fatalf("ReadTimeout = 0, want nonzero — an unauthenticated client can pin a connection's goroutine/buffer/fd forever in io.ReadFull")
+	}
+	if srv.ldapSrv.WriteTimeout == 0 {
+		t.Fatalf("WriteTimeout = 0, want nonzero — a non-reading client can pin a connection's writer goroutine forever, and block graceful shutdown")
+	}
+}
+
+// TestAdversarial_StalledPartialBodyReadTimesOutWithoutBlockingShutdown
+// proves the fix for the finding that a partial, never-completed message
+// body can pin a connection's goroutine, buffer, and file descriptor
+// indefinitely: third_party/ldapserver/packet.go's readBytes allocates the
+// declared body length up front, then blocks in io.ReadFull waiting for the
+// rest of it, and — before this fix — nothing on the production path ever
+// set a read deadline to interrupt that wait (see server.go's
+// ldapConnReadTimeout/ldapConnWriteTimeout). This drives that exact
+// scenario against the real production server over TCP: a valid header
+// declaring a body, followed by only part of that body, then silence.
+//
+// It overrides srv.ldapSrv.ReadTimeout with a short value purely so this
+// test completes quickly and deterministically — it still exercises the
+// identical mechanism New wires up in production (the vendored
+// ldapserver.Server's ReadTimeout field, read by client.serve()'s
+// SetReadDeadline call immediately before every ReadPacket), just with a
+// smaller bound than the 30s production default.
+func TestAdversarial_StalledPartialBodyReadTimesOutWithoutBlockingShutdown(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+
+	rootCtx, cancel := context.WithCancel(context.Background())
+	srv, err := New(rootCtx, protoConfig(), newFakeVerifier(acct), newFakeRoles(acct))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.ldapSrv.ReadTimeout = 300 * time.Millisecond
+	srv.ldapSrv.WriteTimeout = 5 * time.Second
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	addr := ln.Addr().String()
+
+	// A valid 2-byte header declaring a 64-byte body (0x30 = SEQUENCE,
+	// 0x40 = short-form length 64), well under the 1 MiB
+	// maxMessageBodyLength cap — this is deliberately NOT the
+	// oversized-declared-length case
+	// (TestAdversarial_OversizedDeclaredLengthRejectedWithoutBoundedAllocation
+	// above, which is rejected before any read is even attempted); it
+	// proves the distinct case where the declared length is entirely
+	// legitimate but the client just stops sending partway through the
+	// body, which readTagAndLength's cap does nothing to prevent.
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := raw.Write([]byte{0x30, 0x40}); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if _, err := raw.Write([]byte{0x02, 0x01, 0x03}); err != nil {
+		t.Fatalf("write partial body: %v", err)
+	}
+	// Deliberately never send the remaining 61 declared-but-undelivered
+	// bytes.
+
+	// Without a read deadline, the server's io.ReadFull for this body
+	// blocks forever; with one, the connection must be closed once the
+	// deadline elapses — proven the same way as the oversized-length test
+	// above: a prompt read failure, not a timeout on our own read.
+	raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 16)
+	n, readErr := raw.Read(buf)
+	if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("server never closed the stalled partial-body connection — looks like it is still blocked in io.ReadFull with no read deadline")
+	}
+	if n != 0 {
+		t.Fatalf("expected the server to close the connection without sending any bytes, got %d bytes", n)
+	}
+	raw.Close()
+
+	// The stalled connection's own goroutine, buffer, and fd must not
+	// survive graceful shutdown either — closing only the client-visible
+	// half of the connection while leaving the server-side goroutine/wg
+	// entry pinned would still fail this.
+	if err := ln.Close(); err != nil {
+		t.Fatalf("ln.Close: %v", err)
+	}
+	select {
+	case <-serveErr:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Serve never returned after closing the listener")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		srv.Stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Stop() never returned — the stalled partial-body connection blocked graceful shutdown")
+	}
+	cancel()
+}
+
+// ---- 0b. bounded per-client in-flight requests / write-deadline shutdown --
+
+// rawSimpleBindMessage BER-encodes one complete LDAPv3 simple-Bind
+// LDAPMessage envelope, built the same way
+// TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak's sendRaw
+// helper builds its raw Bind request, factored out here so the two tests
+// below can each generate volume (many copies, or many distinct message
+// IDs) without duplicating the BER construction.
+func rawSimpleBindMessage(messageID int, dn, token string) []byte {
+	bindReq := ber.Encode(ber.ClassApplication, ber.TypeConstructed, 0, nil, "BindRequest")
+	bindReq.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 3, "version"))
+	bindReq.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, dn, "name"))
+	bindReq.AppendChild(ber.NewString(ber.ClassContext, ber.TypePrimitive, 0, token, "simple"))
+
+	env := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Message")
+	env.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "messageID"))
+	env.AppendChild(bindReq)
+	return env.Bytes()
+}
+
+// TestAdversarial_BoundedInFlightGoroutinesPerClient proves the fix
+// documented in third_party/ldapserver/PATCHES.md's third item: one client
+// connection may not have more than ldapserver.MaxInFlightRequestsPerClient
+// ProcessRequestMessage executions concurrently live, however many requests
+// it pipelines. It pipelines far more raw Binds than the cap on one
+// connection, all sharing a fake verifier blocked on fv.block, and never
+// reads a single response.
+//
+// This counts live goroutines via runtime.NumGoroutine() rather than
+// counting handler entries directly (contrast the oversized-length test
+// above, which asserts against allocation, not entry): internal/ldap's own
+// handleBind holds the connection's single per-connection operation lock
+// (session.go) for its entire duration, including the blocked Verify call,
+// so only the very first dispatched Bind ever actually reaches the fake
+// verifier — every other dispatched one queues on that same lock instead.
+// Both are still live, blocked goroutines for as long as fv.block stays
+// closed-less, so the total goroutine count attributable to this
+// connection's dispatch is a faithful, mechanism-agnostic proxy for how
+// many ProcessRequestMessage executions the server actually started —
+// without needing a custom, non-serializing handler the way a test written
+// directly against third_party/ldapserver could use instead (see that
+// package's PATCHES.md for why its own regression tests live here).
+func TestAdversarial_BoundedInFlightGoroutinesPerClient(t *testing.T) {
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+	fv := newFakeVerifier(acct)
+	fv.block = make(chan struct{}) // never closed: Verify blocks on ctx.Done() alone
+
+	addr, rootCancel, stop := startTestServer(t, fv, newFakeRoles(acct))
+	// Registered AFTER startTestServer's own t.Cleanup(stop), so it runs
+	// BEFORE that cleanup (t.Cleanup is LIFO, per testing.T.Cleanup's
+	// documented order): every one of the up to `total` handlers this test
+	// dispatches derives its own per-request context from rootCtx and is
+	// blocked either directly on fv.block-or-ctx.Done() (the very first
+	// one to acquire the connection's session lock) or on that same lock
+	// (every other one) — either way, canceling rootCtx is what lets every
+	// one of them unwind (see requestContext/handleBind's
+	// `if requestCtx.Err() != nil { return }` short-circuit). Without this
+	// registered here, a Fatalf below that skips the explicit rootCancel()
+	// call at the bottom of this function would leave every one of those
+	// goroutines permanently blocked, and stop()'s Server.Stop() — which
+	// waits on exactly this connection's wg — would hang forever.
+	// context.CancelFunc is safe to call more than once, so this is
+	// redundant-safe with the explicit call on the non-failing path below.
+	t.Cleanup(rootCancel)
+
+	rawConn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer rawConn.Close()
+
+	one := rawSimpleBindMessage(1, protoBindDN("alice"), "jwt-alice")
+
+	// Let this connection's own always-present goroutines (the writer, the
+	// shutdown-listener) spin up and settle before taking the baseline, so
+	// they aren't mistaken for dispatch-attributable goroutines below.
+	time.Sleep(50 * time.Millisecond)
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
+	// `extra` is deliberately large relative to the cap (not just cap+a
+	// few): each dispatched Bind attributes at least one goroutine
+	// (client.go's ProcessRequestMessage wrapper) and in production also a
+	// second (requestContext's Message.Done bridging goroutine in
+	// server.go), so an uncapped implementation's goroutine count scales
+	// with the total pipelined, not with the cap. Making `extra` this much
+	// larger than the cap is what makes "bounded near the cap" and "scales
+	// with the pipelined total" unmistakably distinguishable, regardless of
+	// exactly how many goroutines each dispatched request attributes.
+	const extra = 100
+	total := ldapserver.MaxInFlightRequestsPerClient + extra
+	payload := bytes.Repeat(one, total)
+	if _, err := rawConn.Write(payload); err != nil {
+		t.Fatalf("write pipelined binds: %v", err)
+	}
+
+	var peak int
+	for i := 0; i < 20; i++ {
+		time.Sleep(50 * time.Millisecond)
+		if n := runtime.NumGoroutine() - before; n > peak {
+			peak = n
+		}
+	}
+
+	// Lower bound: the cap must still let this many requests actually
+	// dispatch (not over-restrict) — true regardless of how many
+	// goroutines each dispatched request attributes, since that can only
+	// add to the count, never subtract from it.
+	if peak < ldapserver.MaxInFlightRequestsPerClient {
+		t.Fatalf("goroutines attributable to this connection peaked at %d, want at least %d (MaxInFlightRequestsPerClient) — the cap should still let that many requests dispatch",
+			peak, ldapserver.MaxInFlightRequestsPerClient)
+	}
+	// Upper bound: generous enough to allow several goroutines per
+	// dispatched request plus incidental overhead, but far below what
+	// scaling with `total` (120) would produce — an unbounded
+	// implementation would peak at roughly total, or a multiple of it.
+	upperBound := 5 * ldapserver.MaxInFlightRequestsPerClient
+	if peak > upperBound {
+		t.Fatalf("goroutines attributable to this connection peaked at %d, want at most %d — the %d extra pipelined requests (total %d) should have been backpressured by MaxInFlightRequestsPerClient (%d) instead of each spawning more goroutines",
+			peak, upperBound, extra, total, ldapserver.MaxInFlightRequestsPerClient)
+	}
+
+	rootCancel()
+	stop()
+}
+
+// rawSearchMessage BER-encodes one complete LDAPv3 SearchRequest LDAPMessage
+// envelope matching handleSearch's exact required shape (base=base,
+// scope=wholeSubtree, filter=`(&(objectClass=groupOfNames)(member=memberDN))`),
+// built directly rather than through goldapclient.Conn because that client
+// runs its own background reader goroutine that continuously drains the
+// connection — incompatible with this file's non-reading-client tests,
+// which need to control precisely when (and whether) anything is read.
+func rawSearchMessage(messageID int, base, memberDN string) []byte {
+	equalityFilter := func(attr, value string) *ber.Packet {
+		f := ber.Encode(ber.ClassContext, ber.TypeConstructed, 3, nil, "equalityMatch")
+		f.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, attr, "attributeDesc"))
+		f.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, value, "assertionValue"))
+		return f
+	}
+	andFilter := ber.Encode(ber.ClassContext, ber.TypeConstructed, 0, nil, "and")
+	andFilter.AppendChild(equalityFilter("objectClass", "groupOfNames"))
+	andFilter.AppendChild(equalityFilter("member", memberDN))
+
+	searchReq := ber.Encode(ber.ClassApplication, ber.TypeConstructed, 3, nil, "SearchRequest")
+	searchReq.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, base, "baseObject"))
+	searchReq.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagEnumerated, 2, "scope")) // wholeSubtree
+	searchReq.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagEnumerated, 0, "derefAliases"))
+	searchReq.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 0, "sizeLimit"))
+	searchReq.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 0, "timeLimit"))
+	searchReq.AppendChild(ber.NewBoolean(ber.ClassUniversal, ber.TypePrimitive, ber.TagBoolean, false, "typesOnly"))
+	searchReq.AppendChild(andFilter)
+	searchReq.AppendChild(ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "attributes"))
+
+	env := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Message")
+	env.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "messageID"))
+	env.AppendChild(searchReq)
+	return env.Bytes()
+}
+
+// TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShutdown
+// proves the other half of third_party/ldapserver/PATCHES.md's third item:
+// a real non-reading client must have its connection actively closed once
+// the server's WriteTimeout elapses, and must not be able to block
+// Server.Stop() from completing.
+//
+// This drives the real production server over TCP with a single very large
+// response (one role whose mapped value is 20 MiB, producing one Search
+// entry response that large) rather than many small ones, and rather than
+// trying to shrink the connection's OS receive buffer: both alternatives
+// were tried and found unreliable in practice — shrinking the receive
+// buffer via SetReadBuffer does not reliably take effect on every platform,
+// and this environment's default buffer comfortably absorbed tens of
+// thousands of small pipelined responses without ever stalling. A single
+// write far larger than any realistic default buffer size is what reliably
+// forces the server's bw.Write/Flush call to genuinely block against an
+// unread connection, regardless of the platform's exact buffer sizing.
+func TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShutdown(t *testing.T) {
+	hugeRole := strings.Repeat("x", 20<<20) // 20 MiB — see doc comment above.
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{hugeRole})
+
+	rootCtx, cancel := context.WithCancel(context.Background())
+	srv, err := New(rootCtx, protoConfig(), newFakeVerifier(acct), newFakeRoles(acct))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// A short write deadline, overriding the production 30s value purely so
+	// this test completes quickly and deterministically — it still
+	// exercises the identical mechanism New wires up in production
+	// (third_party/ldapserver/client.go's writeMessage), just with a
+	// smaller bound.
+	srv.ldapSrv.WriteTimeout = 300 * time.Millisecond
+	srv.ldapSrv.ReadTimeout = 10 * time.Second
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	addr := ln.Addr().String()
+
+	rawConn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("raw dial: %v", err)
+	}
+	defer rawConn.Close()
+
+	// Bind first, over the same raw connection, and read its (small)
+	// response normally — the huge role only appears in the Search
+	// response below, so this does not affect the scenario this test is
+	// about.
+	if _, err := rawConn.Write(rawSimpleBindMessage(1, protoBindDN("alice"), "jwt-alice")); err != nil {
+		t.Fatalf("write bind: %v", err)
+	}
+	rawConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	bindBuf := make([]byte, 4096)
+	if _, err := rawConn.Read(bindBuf); err != nil {
+		t.Fatalf("read bind response: %v", err)
+	}
+
+	// Issue the Search that will produce the one huge entry response, then
+	// deliberately read nothing at all for well past WriteTimeout: any read
+	// here, even a small one, could drain enough of the response to mask a
+	// genuine stall.
+	if _, err := rawConn.Write(rawSearchMessage(2, protoGroupBaseDN, protoBindDN("alice"))); err != nil {
+		t.Fatalf("write search: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	// Only now drain whatever is available. A server that is still healthy
+	// (bug present) either blocks until our own read deadline below, or
+	// eventually delivers the entire ~20 MiB+ response; a server that
+	// correctly enforced WriteTimeout instead closes the connection after
+	// writing only a small fraction of it, which io.Copy surfaces as a
+	// clean EOF (nil error) well before the full size.
+	rawConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	total, copyErr := io.Copy(io.Discard, rawConn)
+	if copyErr != nil {
+		t.Fatalf("expected the server to have closed the connection cleanly (EOF) after its write deadline elapsed, got error instead: %v (bytes drained: %d)", copyErr, total)
+	}
+	const fullResponseFloor = 20 << 20 // the huge role value alone, ignoring envelope/DN overhead
+	const truncatedCeiling = 15 << 20  // generous margin above the buffer this environment was observed to actually admit (~1-2 MiB) and well below fullResponseFloor
+	if total >= truncatedCeiling {
+		t.Fatalf("drained %d bytes (>= %d) before the connection closed — expected the response to be truncated well short of the full ~%d+ byte entry, proving the server never actually stalled on the write",
+			total, truncatedCeiling, fullResponseFloor)
+	}
+
+	// The stalled connection must not prevent graceful shutdown.
+	if err := ln.Close(); err != nil {
+		t.Fatalf("ln.Close: %v", err)
+	}
+	select {
+	case <-serveErr:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Serve never returned — the stalled non-reading client appears to have blocked shutdown")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		srv.Stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Stop() never returned — the stalled non-reading client blocked graceful shutdown (the exact defect PATCHES.md's third item fixes)")
+	}
+	cancel()
+
+	// A completely independent, fresh connection against the still-running
+	// server would be the usual final proof, but the server is already
+	// stopped above (proving graceful shutdown is exactly this test's
+	// point) — there is deliberately no listener left to dial here.
+}
+
 // ---- 1. blocking-verifier cancellation: root cancellation + Stop ----------
 
 // TestAdversarial_ShutdownCancelsBlockedVerifierAndServerTerminates is the

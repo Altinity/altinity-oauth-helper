@@ -2,10 +2,10 @@
 
 This is a vendored, patched copy of `github.com/vjeantet/ldapserver`'s root
 package, pinned via a `replace` directive in the root `go.mod`. It exists
-solely to carry two fixes the pinned version
+solely to carry three fixes the pinned version
 (`v1.0.2-0.20260725103726-663e6b9910fb`) lacks. `LICENSE` is the unmodified
-upstream MIT license, preserved per its terms; only `packet.go` differs from
-upstream, as follows. Every other file (`cancel.go`, `client.go`,
+upstream MIT license, preserved per its terms; only `packet.go` and
+`client.go` differ from upstream, as follows. Every other file (`cancel.go`,
 `constants.go`, `logger.go`, `message.go`, `responsemessage.go`, `route.go`,
 `server.go`, and the `*_test.go` files) is an unmodified copy of the pinned
 version, kept here only so this fork builds and can be diffed/re-synced as
@@ -135,9 +135,108 @@ server as several small, separately-timed writes (to encourage the server
 side to observe them as separate `Read` calls) and asserts the message is
 still processed correctly end to end.
 
+## A non-reading client could pin unbounded per-connection goroutines and hang graceful shutdown
+
+`client.go`'s `serve()` spawned one `ProcessRequestMessage` goroutine per
+inbound request with no cap (the "TODO: Use a implementation to limit
+runnuning request by client" this file used to carry, literally
+unimplemented), and its single per-client writer goroutine wrote each
+response with no deadline at all (`WriteTimeout` was read once per
+read-loop iteration, which only bounds the gap between finishing one read
+and starting the next — not the actual, independent write path). A client
+that kept sending valid requests while never reading its own responses
+could therefore make the server spawn goroutines without limit, each one
+eventually blocking forever trying to send its response on the unbuffered
+`chanOut` channel once the single writer goroutine itself blocked on a
+stalled `bw.Write`/`Flush` call to that same non-reading peer — pinning
+memory, goroutines, and the connection's file descriptor indefinitely, with
+no cap on how many connections could do this concurrently.
+
+It got worse on the shutdown path specifically:
+`Server.Stop()`'s `s.wg.Wait()` waits for every accepted client's
+`close()` to return; `close()` itself waits (`c.wg.Wait()`) for every
+still-running `ProcessRequestMessage` to finish, and separately, the
+per-client shutdown-listener goroutine that `close()` also waits on
+(`<-c.shutdownDone`) sends its own Notice-of-Disconnection through that
+very same blocked `chanOut` channel before it can even set a read deadline
+to unblock the read side. A single non-reading client — accidental or
+malicious — could therefore hang graceful shutdown for the entire process
+indefinitely, not just that one connection.
+
+The fix has two parts, both in `client.go`:
+
+1. `MaxInFlightRequestsPerClient` (20, exported so the consuming repo's
+   regression tests can reference it directly rather than duplicating the
+   literal) bounds how many
+   `ProcessRequestMessage` executions one client connection may have
+   concurrently live, enforced by `acquireRequestSlot`/
+   `releaseRequestSlot` (a buffered-channel semaphore) around every
+   dispatch site in `serve()`'s read loop, including the synchronous
+   StartTLS path. `acquireRequestSlot` also selects on the server's
+   shutdown signal (`srv.chDone`), so a client stuck waiting for a slot
+   during a global shutdown returns rather than blocking it — the
+   `c.closing` channel closed by this same client's own `close()` would be
+   too late to help, since `close()` is itself waiting on this goroutine to
+   return.
+2. `writeMessage` now sets `WriteTimeout` as an actual deadline
+   immediately before its `bw.Write`/`Flush` call — not once per
+   read-loop iteration as before (that call is now removed entirely: it
+   could otherwise keep re-arming, and therefore indefinitely postponing,
+   the deadline governing an already-in-flight blocked write, purely
+   because the client kept sending more requests on the read side) — and
+   returns any error from that write. The per-client writer goroutine
+   treats a returned error as fatal: it closes the raw connection and
+   keeps draining (never writing again to) `chanOut` without blocking, so
+   every handler goroutine already blocked sending a response — and any
+   still to come, including the shutdown-listener's own
+   Notice-of-Disconnection send — is promptly unblocked instead of left
+   waiting forever. That is what bounds the graceful-shutdown hang above to
+   `WriteTimeout`, not indefinitely.
+
+Both mechanisms are needed together: the cap alone would still deadlock
+forever once full, since nothing would ever free a slot without the
+write-deadline fix unblocking the handlers holding them; the write-deadline
+fix alone would still let goroutines accumulate without limit until the
+first write happened to stall.
+
+This directory is its own Go module (see `go.mod`) with no `replace` of its
+own for `github.com/vjeantet/goldap` — it only resolves at all as part of
+the consuming repo's root module build, via that repo's `go.mod` `replace`
+directives for both `ldapserver` and `goldap`. It cannot be built or tested
+standalone, and the root module's own `go test ./...` does not descend into
+it either, since it is a separate module boundary — exactly why every
+`*_test.go` file already in this directory is an unmodified, never-actually-
+executed-by-anyone's-test-run copy of the pinned version (see the top of
+this file). Regression tests for every fix here, including this one,
+therefore live in the consuming repo's `internal/ldap/adversarial_test.go`,
+which the root gate (`go build ./... && go vet ./... && go test ./...`)
+does cover, and which resolves this package through the root module's
+`replace` directives like any real consumer would:
+
+- `TestAdversarial_StalledPartialBodyReadTimesOutWithoutBlockingShutdown`
+  (also covers this file's `PATCHES.md` first item) proves
+  `internal/ldap.New` wires a nonzero `ReadTimeout` into the production
+  server and that a stalled partial-body connection is closed and does not
+  block graceful shutdown.
+- `TestAdversarial_BoundedInFlightGoroutinesPerClient` pipelines more Binds
+  than `MaxInFlightRequestsPerClient` on one connection — all serialized
+  behind `internal/ldap`'s own per-connection Bind/Search lock, which is
+  exactly why this test counts live goroutines via `runtime.NumGoroutine()`
+  rather than counting handler entries the way a test written directly
+  against this package (with a custom, non-serializing route handler)
+  could — and asserts the attributable goroutine count stays bounded near
+  the cap rather than growing with the number of pipelined requests.
+- `TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShutdown`
+  drives a real non-reading client over TCP (a shrunk receive buffer plus a
+  volume of ordinary, fast-completing Binds whose responses are never read)
+  and asserts both that the server actively closes the connection once
+  `WriteTimeout` elapses and that `Server.Stop()` still completes promptly
+  despite it — proving the shutdown-hang scenario above is fixed, not
+  merely that the connection eventually errors out.
+
 ## Keeping this fork in sync
 
 If the pinned `github.com/vjeantet/ldapserver` version in the root `go.mod`
 is ever bumped, re-diff this directory against the new upstream package and
-re-apply both of the changes above (or drop this fork entirely if upstream
-has fixed them by then).
+re-apply all three of the changes above (or drop this fork entirely if
+upstream has fixed them by then).

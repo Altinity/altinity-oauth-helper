@@ -12,12 +12,41 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"time"
 
 	"github.com/altinity/go-mcp-oauth-sdk/oauth"
 
 	"github.com/altinity/altinity-oauth-helper/internal/verification"
 
 	ldapserver "github.com/vjeantet/ldapserver"
+)
+
+// ldapConnReadTimeout and ldapConnWriteTimeout bound how long the vendored
+// ldapserver.Server (constructed in New below) may block on a single read
+// or write to one accepted connection. Both are "optional" fields on that
+// dependency (see third_party/ldapserver/server.go's doc comments: zero
+// disables the deadline) — leaving them at their Go zero value here would
+// mean an unauthenticated client that declares a message body up to
+// third_party/ldapserver/packet.go's 1 MiB maxMessageBodyLength cap, then
+// never finishes sending it, pins that connection's goroutine, buffer, and
+// file descriptor indefinitely: client.serve() blocks forever inside
+// io.ReadFull with no deadline to interrupt it. This is the same class of
+// pre-auth resource exhaustion the sibling ch-jwt-verify command already
+// guards against on its own listener via a hardcoded 10s Read/WriteTimeout
+// on its http.Server (see cmd/ch-jwt-verify/main.go).
+//
+// 30s is generous for this consumer's Bind-then-Search exchange over an
+// already-accepted TCP connection while still bounding a stalled or
+// slow-loris-style client to a small, fixed resource cost instead of an
+// unbounded one. WriteTimeout additionally bounds a client that stops
+// reading its own responses — see third_party/ldapserver/client.go's
+// writeMessage, which enforces this deadline at the actual write/flush
+// call, and PATCHES.md's third item for the full writeup of why that,
+// combined with a bounded per-client in-flight request count, is what
+// keeps such a client from blocking graceful shutdown indefinitely too.
+const (
+	ldapConnReadTimeout  = 30 * time.Second
+	ldapConnWriteTimeout = 30 * time.Second
 )
 
 // Config is the immutable external configuration for one LDAP Server,
@@ -141,7 +170,11 @@ func New(rootCtx context.Context, cfg Config, v verifier, roles roleResolver) (*
 		roleCNPrefix: cfg.RoleCNPrefix,
 	}
 
-	return &Server{ldapSrv: ldapserver.NewServerWithHandlerSource(hs)}, nil
+	ldapSrv := ldapserver.NewServerWithHandlerSource(hs)
+	ldapSrv.ReadTimeout = ldapConnReadTimeout
+	ldapSrv.WriteTimeout = ldapConnWriteTimeout
+
+	return &Server{ldapSrv: ldapSrv}, nil
 }
 
 // Serve accepts and serves LDAP connections on listener until Stop is
