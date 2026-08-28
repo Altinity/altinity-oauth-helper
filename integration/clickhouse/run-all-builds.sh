@@ -6,6 +6,12 @@
 # behavioral expectations for, printing a final build -> result summary and
 # exiting non-zero if any build's run itself exits non-zero.
 #
+# Sequential is not a performance choice: this fixture is single-instance
+# per Docker daemon (fixed COMPOSE_PROJECT_NAME and, on the sandbox
+# fallback path, fixed fallback network names in run.sh — see
+# "Concurrency" in integration/clickhouse/README.md), so two of its runs
+# against the same daemon at once would collide.
+#
 # A build whose run.sh exits 0 is a PASS for that build even when one of
 # its scenarios logged a KNOWN LIMITATION line (an expected_fail case that
 # failed for the recorded, tracked reason) — that is run.sh working

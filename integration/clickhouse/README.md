@@ -27,6 +27,20 @@ ClickHouse-facing configuration done.
 - Network access to pull `altinity/clickhouse-server` images and the Go module
   proxy (the helper/IdP image is built from source on first run).
 
+### Concurrency: one run per Docker daemon at a time
+
+This fixture is **single-instance per Docker daemon**. `run.sh` fixes
+`COMPOSE_PROJECT_NAME="ch-phase3"`, and the sandbox-fallback path (see
+below) hand-creates globally named networks `ch-phase3-auth-net` /
+`ch-phase3-cluster-net`. Two concurrent invocations against the same Docker
+daemon would collide on those fixed project/network names and interfere
+with each other's containers, even though each run's private temp
+directory and host ports could otherwise differ. This is why
+`run-all-builds.sh` runs its builds sequentially rather than in parallel —
+it is not a performance choice, it is a correctness requirement of this
+fixture. If this suite ever runs in shared/concurrent CI, the project name
+and the fallback network names must become run-specific first.
+
 ## Topology
 
 Four services, two networks:

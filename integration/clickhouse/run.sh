@@ -47,9 +47,11 @@ export COMPOSE_DOCKER_CLI_BUILD=0
 COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 # A fixed, distinctive project name (rather than the compose-default
 # directory-derived "clickhouse") so this fixture's containers/networks
-# never collide by name with unrelated Docker resources on a shared host,
-# and so `docker compose -p ... down -v --remove-orphans` only ever tears
-# down what this run created.
+# never collide by name with unrelated Docker resources on a shared host.
+# `docker compose -p ... down -v --remove-orphans` tears down the
+# "ch-phase3" project — that name being FIXED (not per-run) is exactly why
+# only one run of this fixture is supported per Docker daemon at a time;
+# see "Concurrency" in integration/clickhouse/README.md.
 COMPOSE_PROJECT_NAME="ch-phase3"
 
 # The cleanup trap is installed HERE — before RUN_TMP_DIR, ENV_FILE, or
