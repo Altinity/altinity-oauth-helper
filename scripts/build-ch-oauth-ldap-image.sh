@@ -47,6 +47,25 @@
 #     show HEAD:scripts/build-ch-oauth-ldap-image.sh` for exactly the same
 #     reason the source tree is exported rather than trusted from disk.
 #
+#     Two things the re-exec'd child must not get wrong, both fixed here:
+#     (1) REPO is computed from this script's OWN location (SCRIPT_DIR via
+#     BASH_SOURCE[0]) -- in the re-exec'd child, BASH_SOURCE[0] is the temp
+#     copy under $TMPDIR, so a naive re-derivation would resolve REPO to
+#     $TMPDIR/.. instead of the real checkout. REPO is exported by the
+#     parent (a location, not logic, so exporting it does not reopen the
+#     tamper gap the re-exec closes) and the child re-validates it against
+#     `git -C "$REPO" rev-parse --show-toplevel` before trusting it, so an
+#     accidentally wrong/stale REPO value crossing the exec boundary is
+#     caught rather than silently building the wrong tree. This is a
+#     correctness/accident check, not a security boundary: a parent whose
+#     own on-disk bytes are already compromised can skip the re-exec, the
+#     export, or both -- there is no defense against that here. (2) the
+#     parent's EXIT trap does not survive `exec` (the parent process is
+#     overlaid, never runs its own trap), so the temp copy's path is
+#     exported too and a single cleanup() (installed once, at the very top
+#     of this script, before anything that can fail) removes it in whichever
+#     process actually exits.
+#
 #     Before doing any build work, the script also refuses to publish a
 #     `<prefix>-<sha>` tag (or any of its per-arch sub-tags) that already
 #     exists in the registry — there is no force override. Republishing the
@@ -75,12 +94,65 @@
 
 set -euo pipefail
 
+# --- cleanup, installed FIRST, before anything else can fail ---------------
+# A single EXIT/INT/TERM trap for every piece of private run state this
+# script (or its self-re-exec'd child below) creates: RUN_TMP_DIR (the
+# per-run build-context directory, assigned much later) and
+# _CH_OAUTH_LDAP_IMAGE_SELF_COPY (the temp copy of this script's own HEAD
+# bytes the self re-exec section creates, inherited by the child via the
+# environment). Both are empty here; cleanup() tolerates that. Installed
+# before the Dockerfile precheck, the self re-exec's own git/mkdir calls, or
+# any other early exit, so a failure at any of those points still removes
+# whatever this run has already created. Bash has exactly one EXIT trap --
+# combine both cleanup responsibilities into this one function rather than
+# a second `trap` call later that would silently replace this one.
+RUN_TMP_DIR=""
+_CH_OAUTH_LDAP_IMAGE_SELF_COPY="${_CH_OAUTH_LDAP_IMAGE_SELF_COPY:-}"
+
+cleanup() {
+    local rc=$?
+    set +e
+    if [ -n "${_CH_OAUTH_LDAP_IMAGE_SELF_COPY:-}" ]; then
+        rm -f "$_CH_OAUTH_LDAP_IMAGE_SELF_COPY"
+    fi
+    if [ -n "${RUN_TMP_DIR:-}" ]; then
+        rm -rf "$RUN_TMP_DIR"
+    fi
+    exit "$rc"
+}
+trap cleanup EXIT INT TERM
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# Exported so the self re-exec's child (below) inherits the REPO the PARENT
+# computed from its own, real, on-disk location -- never re-derived from
+# the child's own BASH_SOURCE[0], which points at a throwaway temp copy
+# under $TMPDIR and would resolve REPO to $TMPDIR/.. instead of the real
+# checkout.
+export REPO
 REGISTRY="${REGISTRY:-ghcr.io}"
 IMAGE="${IMAGE:-altinity/ch-oauth-ldap}"
 ARCHES="${ARCHES:-amd64 arm64}"
 TAG_PREFIX="${1:-ldap}"
+
+# When $_CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED is already set, THIS process is
+# the self-re-exec'd child (see the section below) -- re-validate the
+# inherited REPO against its own git toplevel before trusting it, so an
+# accidentally wrong or stale REPO value crossing the exec boundary (a
+# tampered/confused parent, a stray exported REPO from an unrelated shell)
+# is caught here rather than silently building the wrong tree. This is a
+# correctness/accident check, not a security boundary: a parent whose own
+# on-disk bytes are already compromised can skip the re-exec, the REPO
+# export, or both -- there is no defense against that case, here or
+# anywhere else in this script.
+if [[ -n "${_CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED:-}" ]]; then
+    _REPO_TOPLEVEL="$(cd "$REPO" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -z "$_REPO_TOPLEVEL" || "$_REPO_TOPLEVEL" != "$REPO" ]]; then
+        echo "REPO ($REPO) does not match its own git toplevel (${_REPO_TOPLEVEL:-<none>}) after the self re-exec -- refusing to continue" >&2
+        exit 1
+    fi
+    unset _REPO_TOPLEVEL
+fi
 
 # The pinned base image the Dockerfile builds FROM (alpine:3.24 — see
 # Dockerfile.ch-oauth-ldap). Pulled explicitly, per architecture, before
@@ -147,7 +219,17 @@ if [[ -z "${_CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED:-}" ]]; then
             echo "failed to create a unique self-verification file under $TMPDIR after 10 attempts" >&2
             exit 1
         fi
-        trap 'rm -f "$_SELF_HEAD_COPY"' EXIT INT TERM
+        # Assign into the already-trapped _CH_OAUTH_LDAP_IMAGE_SELF_COPY
+        # (rather than installing a second, competing trap here) so the
+        # single cleanup() installed at the very top of this script also
+        # covers this file if anything between here and `exec` fails.
+        # Exporting it is what lets the re-exec'd child -- a brand-new bash
+        # process that reruns this whole script from the top -- learn the
+        # path and remove it itself once the parent's own EXIT trap is
+        # destroyed by `exec` (exec overlays the process; the parent never
+        # runs its trap).
+        _CH_OAUTH_LDAP_IMAGE_SELF_COPY="$_SELF_HEAD_COPY"
+        export _CH_OAUTH_LDAP_IMAGE_SELF_COPY
         git show "HEAD:$_SELF_REL_PATH" >"$_SELF_HEAD_COPY"
         chmod 0700 "$_SELF_HEAD_COPY"
         export _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED=1
@@ -213,23 +295,12 @@ if [[ "${#EXISTING_TAGS[@]}" -gt 0 ]]; then
     exit 1
 fi
 
-# RUN_TMP_DIR is declared, and the cleanup trap installed, before any other
-# per-run state exists — see integration/clickhouse/run.sh's identical
-# ordering rationale: this closes the "SIGINT before the trap exists at
-# all" window outright, and cleanup() below tolerates running with
-# RUN_TMP_DIR still unset (the guard immediately below).
-RUN_TMP_DIR=""
-
-cleanup() {
-    local rc=$?
-    set +e
-    if [ -n "${RUN_TMP_DIR:-}" ]; then
-        rm -rf "$RUN_TMP_DIR"
-    fi
-    exit "$rc"
-}
-trap cleanup EXIT INT TERM
-
+# RUN_TMP_DIR and the single cleanup() EXIT/INT/TERM trap covering it (and
+# the self re-exec's temp copy, if this run went through one) are already
+# installed at the very top of this script — see the comment there. Nothing
+# to (re-)install here; this comment block only covers RUN_TMP_DIR's own
+# candidate-assignment ordering below.
+#
 # RUN_TMP_DIR is deliberately NOT assigned from a directory-creating
 # mktemp invocation run via command substitution: mktemp runs as a
 # separate process, so there is an unavoidable gap between the moment its

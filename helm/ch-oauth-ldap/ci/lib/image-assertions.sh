@@ -83,6 +83,19 @@
 #       input is `git archive HEAD`'s export, not the working tree: the
 #       tampered marker must be absent and the committed HEAD marker
 #       present.
+#     - a REALISTIC RE-EXEC BEHAVIORAL proof (fix for the self re-exec's own
+#       REPO-recomputation bug): the real, unmodified script run from a
+#       throwaway checkout's own root, invoked as `bash
+#       scripts/build-ch-oauth-ldap-image.sh` with NO `REPO` set in the
+#       environment -- the realistic invocation shape, unlike every other
+#       test above which sets `REPO=` explicitly and so cannot see this bug
+#       -- across three scenarios (tag-already-published refusal, a full
+#       stubbed-docker success, and a stubbed `docker pull` failure
+#       mid-build). Proves REPO survives the self re-exec (the run reaches
+#       real `docker` calls rather than failing the Dockerfile precheck
+#       against a `$TMPDIR/..`-derived wrong REPO) and that the self
+#       re-exec's own temp copy is removed under every one of those exit
+#       paths, never left behind under $TMPDIR.
 #     - a SELF-TAMPER BEHAVIORAL proof (review pass 3 Finding 2): the exact
 #       same threat, applied to the script's OWN on-disk bytes rather than a
 #       .go file -- a throwaway repo commits the REAL script content
@@ -1028,6 +1041,216 @@ DOCKER_STUB
     fi
 }
 
+# _ia_script_realistic_reexec_behavioral SCRIPT
+# Behavioral proof that the realistic, no-`REPO`-env invocation of the real
+# script -- cwd is a checkout root, invoked as `bash
+# scripts/build-ch-oauth-ldap-image.sh`, exactly how a developer or CI
+# actually runs it -- survives the self re-exec added alongside the
+# self-tamper fix above. The self-tamper proof above always sets `REPO=`
+# explicitly, which masks a real defect: without an exported REPO, the
+# re-exec'd child re-derives REPO from ITS OWN location (a temp copy under
+# $TMPDIR), not the real checkout, and would fail the Dockerfile precheck
+# with a wrong-REPO message before ever reaching a single `docker` call.
+#
+# Three scenarios, run from a single throwaway repo that commits the REAL
+# script content (copied from SCRIPT, never a hand-duplicated copy), each
+# under its own isolated $TMPDIR with a PATH-stubbed `docker` and no `REPO`
+# in the environment:
+#   refusal -- stubbed `docker manifest inspect` reports the tag as already
+#     published; the script must refuse via the tag-republish guard.
+#   success -- stubbed `docker` answers every preflight/build/push call
+#     (single arch, so no manifest-assembly step); the real `go build`
+#     compiles a trivial package; the script must exit 0.
+#   failure -- stubbed `docker manifest inspect` reports "not found" (so the
+#     script proceeds into build_one and a real `go build` runs), then
+#     stubbed `docker pull` fails outright, aborting the script under
+#     `set -e` well after the self re-exec and after RUN_TMP_DIR exists.
+# Every scenario asserts: (a) the run reached at least the shared-tag
+# `docker manifest inspect` call (proof REPO survived the self re-exec far
+# enough to pass the Dockerfile precheck, `cd "$REPO"`, the dirty-tree
+# guard, and SHA/TAG computation -- not just that some docker call
+# happened, but that it is not the pre-fix "not found at $TMPDIR/.." wrong
+# REPO refusal), (b) the Dockerfile-precheck's own wrong-REPO refusal text
+# is absent, and (c) no `ch-oauth-ldap-image-self.*` temp copy remains under
+# that scenario's own $TMPDIR after the run exits, on every exit path
+# (success, refusal, and mid-run failure alike).
+_ia_script_realistic_reexec_behavioral() {
+    local script="$1"
+    _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
+
+    if ! command -v git >/dev/null 2>&1; then
+        fail "realistic re-exec proof: git not on PATH"
+        return
+    fi
+
+    local base="$RUN_TMP_DIR/realistic-reexec"
+    local repo="$base/repo"
+    command mkdir -p "$repo/scripts" "$repo/cmd/ch-oauth-ldap"
+
+    git -C "$repo" init -q
+    git -C "$repo" config user.email gate@example.invalid
+    git -C "$repo" config user.name gate
+    printf 'FROM scratch\n' >"$repo/Dockerfile.ch-oauth-ldap"
+    printf 'module example.com/ia-realistic-reexec\n\ngo 1.22\n' >"$repo/go.mod"
+    printf 'package main\n\nfunc main() {}\n' >"$repo/cmd/ch-oauth-ldap/main.go"
+    command cp "$script" "$repo/scripts/build-ch-oauth-ldap-image.sh"
+    command chmod +x "$repo/scripts/build-ch-oauth-ldap-image.sh"
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m init
+
+    local wrong_repo_marker="does not look like an altinity-oauth-helper checkout"
+    local refusal_marker="refusing to publish"
+
+    # --- scenario: refusal (tag already exists) -----------------------------
+    local rdir="$base/refusal"
+    command mkdir -p "$rdir/stub" "$rdir/tmp"
+    cat >"$rdir/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+echo "docker $*" >>"$IA_DOCKER_LOG"
+exit 0
+DOCKER_STUB
+    command chmod +x "$rdir/stub/docker"
+    ( cd "$repo" && env -u REPO \
+        TMPDIR="$rdir/tmp" \
+        PATH="$rdir/stub:$PATH" \
+        IA_DOCKER_LOG="$rdir/docker.log" \
+        bash scripts/build-ch-oauth-ldap-image.sh \
+        >"$rdir/out" 2>"$rdir/err" )
+    local refusal_status=$?
+
+    if [ "$refusal_status" -ne 0 ] && command grep -qF "$refusal_marker" "$rdir/err"; then
+        pass "realistic re-exec proof (refusal): no-REPO-env, relative invocation is refused via the tag-republish guard (exit $refusal_status), not some other error"
+    else
+        fail "realistic re-exec proof (refusal): expected a tag-republish refusal (exit nonzero, '$refusal_marker' in stderr), got exit $refusal_status: $(command tail -n5 "$rdir/err")"
+    fi
+    if command grep -qF "$wrong_repo_marker" "$rdir/err"; then
+        fail "realistic re-exec proof (refusal): script failed the Dockerfile precheck with a wrong-REPO message -- REPO did NOT survive the self re-exec: $(command tail -n5 "$rdir/err")"
+    else
+        pass "realistic re-exec proof (refusal): no wrong-REPO Dockerfile-precheck failure"
+    fi
+    if [ -s "$rdir/docker.log" ] && command grep -qF 'manifest inspect' "$rdir/docker.log"; then
+        pass "realistic re-exec proof (refusal): script reached 'docker manifest inspect' -- REPO survived the self re-exec past the Dockerfile precheck, cd, and dirty-tree guard"
+    else
+        fail "realistic re-exec proof (refusal): script never reached 'docker manifest inspect' -- see $rdir/err: $(command tail -n5 "$rdir/err")"
+    fi
+    if command find "$rdir/tmp" -maxdepth 1 -name 'ch-oauth-ldap-image-self.*' 2>/dev/null | command grep -q .; then
+        fail "realistic re-exec proof (refusal): a ch-oauth-ldap-image-self.* temp copy leaked under $rdir/tmp"
+    else
+        pass "realistic re-exec proof (refusal): no ch-oauth-ldap-image-self.* temp copy left under $rdir/tmp"
+    fi
+
+    # --- scenario: success (single arch, everything stubbed to succeed) -----
+    local sdir="$base/success"
+    command mkdir -p "$sdir/stub" "$sdir/tmp"
+    cat >"$sdir/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+echo "docker $*" >>"$IA_DOCKER_LOG"
+case "$1" in
+    manifest)
+        if [ "$2" = "inspect" ]; then
+            exit 1
+        fi
+        exit 0
+        ;;
+    image)
+        if [ "$2" = "inspect" ]; then
+            echo "$IA_STUB_ARCH"
+            exit 0
+        fi
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+DOCKER_STUB
+    command chmod +x "$sdir/stub/docker"
+    ( cd "$repo" && env -u REPO \
+        ARCHES="amd64" \
+        TMPDIR="$sdir/tmp" \
+        PATH="$sdir/stub:$PATH" \
+        IA_DOCKER_LOG="$sdir/docker.log" \
+        IA_STUB_ARCH="amd64" \
+        bash scripts/build-ch-oauth-ldap-image.sh \
+        >"$sdir/out" 2>"$sdir/err" )
+    local success_status=$?
+
+    if [ "$success_status" -eq 0 ]; then
+        pass "realistic re-exec proof (success): no-REPO-env, relative invocation completes (exit 0) end to end with a stubbed docker"
+    else
+        fail "realistic re-exec proof (success): expected exit 0, got $success_status: $(command tail -n5 "$sdir/err")"
+    fi
+    if command grep -qF "$wrong_repo_marker" "$sdir/err"; then
+        fail "realistic re-exec proof (success): script failed the Dockerfile precheck with a wrong-REPO message -- REPO did NOT survive the self re-exec: $(command tail -n5 "$sdir/err")"
+    fi
+    if [ -s "$sdir/docker.log" ] && command grep -qF 'push' "$sdir/docker.log"; then
+        pass "realistic re-exec proof (success): script reached 'docker push' -- REPO survived the self re-exec through the full build_one path"
+    else
+        fail "realistic re-exec proof (success): script never reached 'docker push' -- see $sdir/err: $(command tail -n5 "$sdir/err")"
+    fi
+    if command find "$sdir/tmp" -maxdepth 1 -name 'ch-oauth-ldap-image-self.*' 2>/dev/null | command grep -q .; then
+        fail "realistic re-exec proof (success): a ch-oauth-ldap-image-self.* temp copy leaked under $sdir/tmp"
+    else
+        pass "realistic re-exec proof (success): no ch-oauth-ldap-image-self.* temp copy left under $sdir/tmp"
+    fi
+    if command find "$sdir/tmp" -maxdepth 1 -name 'ch-oauth-ldap-image.*' 2>/dev/null | command grep -q .; then
+        fail "realistic re-exec proof (success): a ch-oauth-ldap-image.* run directory leaked under $sdir/tmp"
+    else
+        pass "realistic re-exec proof (success): no ch-oauth-ldap-image.* run directory left under $sdir/tmp"
+    fi
+
+    # --- scenario: failure (docker pull fails mid-build) ---------------------
+    local fdir="$base/failure"
+    command mkdir -p "$fdir/stub" "$fdir/tmp"
+    cat >"$fdir/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+echo "docker $*" >>"$IA_DOCKER_LOG"
+case "$1" in
+    manifest)
+        if [ "$2" = "inspect" ]; then
+            exit 1
+        fi
+        exit 0
+        ;;
+    pull)
+        exit 1
+        ;;
+    *) exit 0 ;;
+esac
+DOCKER_STUB
+    command chmod +x "$fdir/stub/docker"
+    ( cd "$repo" && env -u REPO \
+        ARCHES="amd64" \
+        TMPDIR="$fdir/tmp" \
+        PATH="$fdir/stub:$PATH" \
+        IA_DOCKER_LOG="$fdir/docker.log" \
+        bash scripts/build-ch-oauth-ldap-image.sh \
+        >"$fdir/out" 2>"$fdir/err" )
+    local failure_status=$?
+
+    if [ "$failure_status" -ne 0 ] && ! command grep -qF "$refusal_marker" "$fdir/err"; then
+        pass "realistic re-exec proof (failure): a real mid-build docker failure (docker pull) aborts the script (exit $failure_status), distinct from the tag-republish refusal"
+    else
+        fail "realistic re-exec proof (failure): expected a non-refusal nonzero exit from the stubbed 'docker pull' failure, got exit $failure_status: $(command tail -n5 "$fdir/err")"
+    fi
+    if command grep -qF "$wrong_repo_marker" "$fdir/err"; then
+        fail "realistic re-exec proof (failure): script failed the Dockerfile precheck with a wrong-REPO message -- REPO did NOT survive the self re-exec: $(command tail -n5 "$fdir/err")"
+    fi
+    if [ -s "$fdir/docker.log" ] && command grep -qF 'pull' "$fdir/docker.log"; then
+        pass "realistic re-exec proof (failure): script reached 'docker pull' before the stubbed failure -- REPO survived the self re-exec into build_one (go build ran for real)"
+    else
+        fail "realistic re-exec proof (failure): script never reached 'docker pull' -- see $fdir/err: $(command tail -n5 "$fdir/err")"
+    fi
+    if command find "$fdir/tmp" -maxdepth 1 -name 'ch-oauth-ldap-image-self.*' 2>/dev/null | command grep -q .; then
+        fail "realistic re-exec proof (failure): a ch-oauth-ldap-image-self.* temp copy leaked under $fdir/tmp after a mid-build failure"
+    else
+        pass "realistic re-exec proof (failure): no ch-oauth-ldap-image-self.* temp copy left under $fdir/tmp after a mid-build failure"
+    fi
+    if command find "$fdir/tmp" -maxdepth 1 -name 'ch-oauth-ldap-image.*' 2>/dev/null | command grep -q .; then
+        fail "realistic re-exec proof (failure): a ch-oauth-ldap-image.* run directory leaked under $fdir/tmp after a mid-build failure"
+    else
+        pass "realistic re-exec proof (failure): no ch-oauth-ldap-image.* run directory left under $fdir/tmp after a mid-build failure"
+    fi
+}
+
 # =============================================================================
 # Section 51 (+ A7) -- .github/workflows/build-ch-oauth-ldap.yml
 # =============================================================================
@@ -1173,6 +1396,7 @@ run_image_assertions() {
     _ia_script_dirty_tree_guard "$_IA_SCRIPT"
     _ia_script_dirty_tree_guard_bypasses "$_IA_SCRIPT"
     _ia_script_self_tamper_behavioral "$_IA_SCRIPT"
+    _ia_script_realistic_reexec_behavioral "$_IA_SCRIPT"
     _ia_script_head_export_behavioral "$_IA_SCRIPT"
     _ia_workflow_assertions
 
