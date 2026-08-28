@@ -46,10 +46,11 @@ import (
 //     ClickHouse LDAP fixture the manual integration suite runs against.
 //
 // TestDocsContract_MarkedFencesAreExactContiguousExcerpts is the general
-// proof (every marked fence is a verbatim contiguous substring of its named
-// source); TestDocsContract_ClickHouseXMLFencesMatchFixtureElement is the
-// stronger, element-scoped proof §21.4 specifically calls for on top of
-// that (EVERY docsContractMarkdownFiles entry's <clickhouse>...</clickhouse>
+// proof (every marked fence names an allowlisted source — see
+// isAllowedDocsContractSource below — and is a verbatim contiguous
+// substring of it); TestDocsContract_ClickHouseXMLFencesMatchFixtureElement
+// is the stronger, element-scoped proof §21.4 specifically calls for on top
+// of that (EVERY docsContractMarkdownFiles entry's <clickhouse>...</clickhouse>
 // fence must equal exactly the fixture's own <clickhouse>...</clickhouse>
 // element — not merely be found somewhere inside the whole fixture file,
 // which also carries a long XML comment header this element-level
@@ -63,6 +64,35 @@ import (
 var docsContractMarkdownFiles = []string{
 	"docs/ch-oauth-ldap-operator-guide.md",
 	"README.md",
+}
+
+// docsContractSourceFiles is the fixed set of files a config-source marker
+// is allowed to name, resolved once relative to the module root so every
+// test below reads the same real bytes docs are claimed to be copied from.
+// isAllowedDocsContractSource is the actual enforcement of this set: without
+// it, a marker naming any readable in-repo path — including one of
+// docsContractMarkdownFiles itself — would pass
+// TestDocsContract_MarkedFencesAreExactContiguousExcerpts vacuously, since a
+// fence's own content trivially substring-matches the very file it was
+// pasted into (strings.Contains(src, f.content) with src == f.content's own
+// document). Both entries are cited elsewhere in this file by name
+// (cmd/ch-oauth-ldap/testdata/operator-guide.yaml and
+// clickhouseFixtureRelPath) rather than duplicated as literals.
+var docsContractSourceFiles = []string{
+	"cmd/ch-oauth-ldap/testdata/operator-guide.yaml",
+	clickhouseFixtureRelPath,
+}
+
+// isAllowedDocsContractSource reports whether sourcePath is one of the
+// fixed docsContractSourceFiles entries — the only files a config-source
+// marker may legitimately name.
+func isAllowedDocsContractSource(sourcePath string) bool {
+	for _, allowed := range docsContractSourceFiles {
+		if sourcePath == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 // configSourceMarkerRE matches a config-source marker line exactly (its own
@@ -221,6 +251,11 @@ func TestDocsContract_MarkedFencesAreExactContiguousExcerpts(t *testing.T) {
 	sourceCache := make(map[string]string)
 	var bad []string
 	for _, f := range marked {
+		if !isAllowedDocsContractSource(f.sourcePath) {
+			bad = append(bad, f.mdFile+":"+strconv.Itoa(f.mdLine)+": config-source names "+f.sourcePath+
+				", which is not in the fixed allowlist ("+strings.Join(docsContractSourceFiles, ", ")+")")
+			continue
+		}
 		src, ok := sourceCache[f.sourcePath]
 		if !ok {
 			data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.sourcePath)))
@@ -447,7 +482,11 @@ func TestDocsContract_YAMLProofTestStillExists(t *testing.T) {
 // against a gutted or misfiled guide: it requires at least one
 // config-source marker per expected source file, so removing all fences
 // derived from one of them (rather than genuinely updating the guide)
-// fails loudly instead of silently shrinking documentation coverage.
+// fails loudly instead of silently shrinking documentation coverage. The
+// expected set is docsContractSourceFiles itself — the same fixed allowlist
+// isAllowedDocsContractSource enforces — so this stays a floor on top of
+// that ceiling rather than a second, independently-maintained list that
+// could quietly drift from it.
 func TestDocsContract_OperatorGuideCitesEachExpectedSource(t *testing.T) {
 	marked, _ := allMarkedAndUnmarkedFences(t)
 	cited := make(map[string]bool, len(marked))
@@ -455,17 +494,89 @@ func TestDocsContract_OperatorGuideCitesEachExpectedSource(t *testing.T) {
 		cited[f.sourcePath] = true
 	}
 
-	expected := []string{
-		"cmd/ch-oauth-ldap/testdata/operator-guide.yaml",
-		clickhouseFixtureRelPath,
-	}
 	var missing []string
-	for _, src := range expected {
+	for _, src := range docsContractSourceFiles {
 		if !cited[src] {
 			missing = append(missing, src)
 		}
 	}
 	if len(missing) > 0 {
 		t.Fatalf("no config-source-marked fence cites the following expected source file(s): %s", strings.Join(missing, ", "))
+	}
+}
+
+// TestIsAllowedDocsContractSource_RejectsArbitraryAndSelfReferentialPaths is
+// the sabotage case for the docs-contract allowlist itself. Before this
+// test (and isAllowedDocsContractSource) existed,
+// TestDocsContract_MarkedFencesAreExactContiguousExcerpts validated a
+// marker-supplied sourcePath against nothing but "is it readable" — so a
+// marker naming one of docsContractMarkdownFiles itself (e.g.
+// "<!-- config-source: README.md -->" above a fence pasted from README.md
+// verbatim) would pass every check in this file, because
+// strings.Contains(src, f.content) is trivially true when src and f.content
+// come from the same document. This test proves the allowlist actually
+// constrains what a marker may name, in both directions: every real source
+// this contract relies on stays allowed, and every path that would make the
+// contract vacuous — the two docs files themselves, an arbitrary in-repo
+// file, and the empty string — is rejected.
+func TestIsAllowedDocsContractSource_RejectsArbitraryAndSelfReferentialPaths(t *testing.T) {
+	for _, allowed := range docsContractSourceFiles {
+		if !isAllowedDocsContractSource(allowed) {
+			t.Errorf("isAllowedDocsContractSource(%q) = false, want true (listed in docsContractSourceFiles)", allowed)
+		}
+	}
+
+	var rejected []string
+	rejected = append(rejected, docsContractMarkdownFiles...) // the self-referential case
+	rejected = append(rejected,
+		"go.mod",
+		"cmd/ch-oauth-ldap/main.go",
+		"cmd/ch-oauth-ldap/testdata/operator-guide.yaml/../../../go.mod",
+		"",
+	)
+	for _, path := range rejected {
+		if isAllowedDocsContractSource(path) {
+			t.Errorf("isAllowedDocsContractSource(%q) = true, want false (not a member of the fixed docsContractSourceFiles allowlist)", path)
+		}
+	}
+}
+
+// TestDocsContract_MarkedFencesRejectSelfReferentialSource is the
+// end-to-end version of the sabotage case above: it drives an actual
+// self-referential config-source marker through scanMarkdownFences (the
+// same parser TestDocsContract_MarkedFencesAreExactContiguousExcerpts uses)
+// against a synthetic markdown file, then confirms the allowlist check that
+// test performs would reject the resulting sourcePath — i.e. the fix is
+// wired into the real fence-scanning path, not just proven against the
+// allowlist function in isolation.
+func TestDocsContract_MarkedFencesRejectSelfReferentialSource(t *testing.T) {
+	dir := t.TempDir()
+	const body = "oauth:\n  clientID: example\n"
+	doc := "# Self-referential fence\n\n" +
+		"<!-- config-source: self.md -->\n" +
+		"```yaml\n" + body + "```\n"
+	if err := os.WriteFile(filepath.Join(dir, "self.md"), []byte(doc), 0o644); err != nil {
+		t.Fatalf("write synthetic doc: %v", err)
+	}
+
+	marked, _, err := scanMarkdownFences(dir, "self.md")
+	if err != nil {
+		t.Fatalf("scanMarkdownFences: %v", err)
+	}
+	if len(marked) != 1 {
+		t.Fatalf("got %d marked fence(s), want 1", len(marked))
+	}
+	f := marked[0]
+	if f.sourcePath != "self.md" {
+		t.Fatalf("sourcePath = %q, want %q", f.sourcePath, "self.md")
+	}
+	// The fence body is, by construction, a contiguous substring of the very
+	// document it was pasted into — the vacuous case the allowlist exists to
+	// catch, since the general contiguous-excerpt check alone would pass it.
+	if !strings.Contains(doc, f.content) {
+		t.Fatalf("test setup invariant broken: fence content is not a substring of its own document")
+	}
+	if isAllowedDocsContractSource(f.sourcePath) {
+		t.Fatalf("isAllowedDocsContractSource(%q) = true, want false — a self-referential config-source marker must be rejected, not silently accepted as a vacuous match", f.sourcePath)
 	}
 }
