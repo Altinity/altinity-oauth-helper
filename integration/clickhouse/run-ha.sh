@@ -71,7 +71,7 @@ source "$SCRIPT_DIR/lib/leakscan.sh"
 # trivially "clean" scan over a narrower corpus.
 LEAKSCAN_COMPOSE_SERVICES=(ch-oauth-ldap ch-oauth-ldap-a ch-oauth-ldap-b clickhouse-origin clickhouse-remote)
 LEAKSCAN_NODES=(clickhouse-origin clickhouse-remote)
-LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS=(session-probe.log)
+LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS=(session-probe.log compose-ch-oauth-ldap-a-prekill.log)
 
 # shellcheck source=lib/expectations.sh
 source "$SCRIPT_DIR/lib/expectations.sh"
@@ -633,7 +633,22 @@ probe_launch() {
 
 probe_kill_current() {
     compose exec -T synthetic-idp sh -c "[ -f $HA_PROBE_PID_PATH ] && kill -TERM \"\$(cat $HA_PROBE_PID_PATH)\" 2>/dev/null; exit 0" >/dev/null 2>&1 || true
-    sleep 1
+    # Poll for HA_PROBE_RC_PATH — written by probe_launch's own wrapper
+    # only once the killed instance has actually exited and the wrapper's
+    # `wait` has returned — rather than a fixed `sleep 1`, which was
+    # either an arbitrary race under load (too short: the very next
+    # probe_launch could start before this instance's PID/rc files are
+    # cleaned up) or needless dead time on a fast host (too long).
+    # Bounded so a SIGTERM that never actually stopped the process is a
+    # loud, real failure rather than a silently-accepted timeout.
+    local deadline=10 start=$SECONDS
+    while [ $((SECONDS - start)) -lt "$deadline" ]; do
+        if compose exec -T synthetic-idp sh -c "[ -f $HA_PROBE_RC_PATH ]" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    die "HA: probe_kill_current: the just-killed session-probe instance never wrote $HA_PROBE_RC_PATH within ${deadline}s — SIGTERM may not have actually stopped it"
 }
 
 fetch_probe_log() {
@@ -642,20 +657,65 @@ fetch_probe_log() {
 
 # wait_probe_lands BASE_A_SUCC BASE_B_SUCC — polls the two helpers' Bind
 # success counts (bounded) and reports which one increased first; prints
-# "a"/"b" and returns 0, or returns 1 on timeout.
+# "a"/"b" and returns 0 on success, returns 1 on a genuine timeout (no
+# increase observed within the deadline — the ordinary "never landed"
+# case), or returns 2 if an underlying `compose logs` call itself failed
+# (a real infrastructure failure that must never be silently folded into
+# "never landed" — see this function's own caller below for why the
+# distinction matters).
+#
+# Deliberately does NOT call capture_bind_counts_into here, even though
+# that is this file's usual way to derive a Bind count: capture_bind_counts
+# (run-ha.sh) itself `die`s on a `compose logs` failure, and `die` is
+# `exit 1` — since this whole function runs inside the caller's
+# `$(wait_probe_lands ...)` command substitution, that die() would only
+# terminate the SUBSHELL that substitution spawns, with the exact same
+# exit code (1) a genuine timeout already returns. The caller would then
+# have no way to tell "the probe never Bound within the bound" (expected,
+# retry-worthy) apart from "a compose/Docker command actually failed"
+# (an infrastructure problem retrying won't fix) — both would print the
+# identical, misleading "never Bound to either helper within the bound"
+# die() message. Inlining the compose-logs-and-count logic here, with its
+# own local rc check, is what makes rc=2 actually reach the caller instead
+# of being swallowed by the subshell boundary.
 wait_probe_lands() {
-    local base_a="$1" base_b="$2" deadline=15 start=$SECONDS cur_a cur_b
+    local base_a="$1" base_b="$2" deadline=15 start=$SECONDS
+    local logf succ rc
     while [ $((SECONDS - start)) -lt "$deadline" ]; do
-        capture_bind_counts_into ch-oauth-ldap-a cur_a _
-        if [ "$cur_a" -gt "$base_a" ]; then
+        logf="$(mktemp "$RUN_TMP_DIR/wait-probe-lands.XXXXXX.log")"
+        set +e
+        compose logs --no-color ch-oauth-ldap-a >"$logf" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            log "wait_probe_lands: 'compose logs ch-oauth-ldap-a' failed (rc=$rc) — an infrastructure failure, not a genuine session-probe timeout"
+            rm -f "$logf"
+            return 2
+        fi
+        succ="$(ha_strip_ansi <"$logf" | { grep -c -F 'ldap bind succeeded' || true; })"
+        rm -f "$logf"
+        if [ "$succ" -gt "$base_a" ]; then
             printf 'a'
             return 0
         fi
-        capture_bind_counts_into ch-oauth-ldap-b cur_b _
-        if [ "$cur_b" -gt "$base_b" ]; then
+
+        logf="$(mktemp "$RUN_TMP_DIR/wait-probe-lands.XXXXXX.log")"
+        set +e
+        compose logs --no-color ch-oauth-ldap-b >"$logf" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            log "wait_probe_lands: 'compose logs ch-oauth-ldap-b' failed (rc=$rc) — an infrastructure failure, not a genuine session-probe timeout"
+            rm -f "$logf"
+            return 2
+        fi
+        succ="$(ha_strip_ansi <"$logf" | { grep -c -F 'ldap bind succeeded' || true; })"
+        rm -f "$logf"
+        if [ "$succ" -gt "$base_b" ]; then
             printf 'b'
             return 0
         fi
+
         sleep 1
     done
     return 1
@@ -681,6 +741,19 @@ portable_epoch_from_rfc3339() {
 # strictly increases between polls (consecutive-in-practice at this
 # probe's fixed 2s interval) AND that newest marker's own printed timestamp
 # is within 4 real seconds of now, prints K and returns 0.
+#
+# "now" is read via `compose exec ... date -u +%s` — INSIDE the same
+# synthetic-idp container the probe itself runs in — rather than the host's
+# own `date`, specifically to avoid comparing the probe's container-clock
+# timestamp against a host clock that is a DIFFERENT clock: Docker Desktop's
+# VM clock (macOS/Windows) is documented to drift from the host, especially
+# across a host sleep/resume, and a CI runner's container clock need not be
+# NTP-synced identically to its own host either. Reading "now" from inside
+# the same container the probe's timestamp came from reduces this
+# comparison to that one clock's own sub-second scheduling jitter (the
+# `compose exec` round-trip itself), not host-vs-container drift, so the
+# existing tight ±(4s/-2s) window stays meaningful instead of silently
+# absorbing clock skew as if it were probe staleness.
 wait_for_two_fresh_heartbeats() {
     local deadline=20 start=$SECONDS content last_line n ts now epoch elapsed prev_n=""
     while [ $((SECONDS - start)) -lt "$deadline" ]; do
@@ -690,7 +763,7 @@ wait_for_two_fresh_heartbeats() {
             n="$(printf '%s\n' "$last_line" | sed -n 's/.*heartbeat n=\([0-9]*\).*/\1/p')"
             ts="$(printf '%s\n' "$last_line" | awk '{print $1}')"
             if [ -n "$n" ] && [ -n "$prev_n" ] && [ "$n" -gt "$prev_n" ]; then
-                now="$(date -u +%s)"
+                now="$(compose exec -T synthetic-idp date -u +%s 2>/dev/null || date -u +%s)"
                 if epoch="$(portable_epoch_from_rfc3339 "$ts")"; then
                     elapsed=$((now - epoch))
                     if [ "$elapsed" -le 4 ] && [ "$elapsed" -ge -2 ]; then
@@ -714,7 +787,11 @@ while [ "$ha_probe_bound" != "a" ] && [ "$ha_probe_attempts" -lt 8 ]; do
     capture_bind_counts_into ch-oauth-ldap-a ha_probe_base_a _
     capture_bind_counts_into ch-oauth-ldap-b ha_probe_base_b _
     probe_launch
-    if ! ha_probe_bound="$(wait_probe_lands "$ha_probe_base_a" "$ha_probe_base_b")"; then
+    ha_wait_probe_rc=0
+    ha_probe_bound="$(wait_probe_lands "$ha_probe_base_a" "$ha_probe_base_b")" || ha_wait_probe_rc=$?
+    if [ "$ha_wait_probe_rc" -eq 2 ]; then
+        die "HA: session-probe attempt $ha_probe_attempts aborted by an infrastructure failure (a 'compose logs' call itself failed — see the wait_probe_lands log line just above), not a genuine Bind timeout — see synthetic-idp's $HA_PROBE_LOG_PATH"
+    elif [ "$ha_wait_probe_rc" -ne 0 ]; then
         die "HA: session-probe attempt $ha_probe_attempts never Bound to either helper within the bound — see synthetic-idp's $HA_PROBE_LOG_PATH"
     fi
     log "HA: session-probe attempt $ha_probe_attempts bound to helper '$ha_probe_bound'"
@@ -730,11 +807,35 @@ HA_HEARTBEAT_N="$(wait_for_two_fresh_heartbeats)" \
 log "HA: A-bound session-probe confirmed live — heartbeat n=$HA_HEARTBEAT_N, freshness bound satisfied"
 
 # ── §18.4: kill A ──────────────────────────────────────────────────────────
+# HA_LEAKSCAN_DIR is created here (well before §18.6's leak scan actually
+# runs) specifically so the pre-kill compose-log capture just below has
+# somewhere durable to land: the original A's log (which served this run's
+# dual-auth Binds and the probe's Bind/heartbeats) only exists between the
+# `docker kill` below and the `docker rm -f` in §18.5 — once §18.5 removes
+# the container, `compose logs ch-oauth-ldap-a` can only ever show the
+# RECREATED container's log, never the original's. Collecting into this
+# same directory later (§18.6) is safe: leakscan_collect_artifacts only
+# requires the directory to already exist, not to be empty.
+HA_LEAKSCAN_DIR="$(mktemp -d "$RUN_TMP_DIR/ha-leakscan.XXXXXX")"
+chmod 700 "$HA_LEAKSCAN_DIR"
+
 capture_bind_counts_into ch-oauth-ldap-b HA_B_BASELINE_BEFORE_KILL _
 HA_HELPER_A_CNAME="$(container_name_for ch-oauth-ldap-a)"
 [ -n "$HA_HELPER_A_CNAME" ] || die "HA: could not resolve helper A's container name before killing it"
 log "HA: abruptly killing helper A ($HA_HELPER_A_CNAME)"
 docker kill "$HA_HELPER_A_CNAME" >/dev/null
+
+# Capture the ORIGINAL A's log now, while the killed-but-not-yet-removed
+# container still exists — see the comment on HA_LEAKSCAN_DIR above. This
+# artifact is what makes the leak scan actually cover the dual-auth Binds
+# and the probe's Bind/heartbeats that only the original A ever served.
+HA_PREKILL_A_LOG="$HA_LEAKSCAN_DIR/compose-ch-oauth-ldap-a-prekill.log"
+compose logs --no-color ch-oauth-ldap-a >"$HA_PREKILL_A_LOG" 2>&1 \
+    || die "HA leak scan: 'compose logs ch-oauth-ldap-a' (pre-kill capture) failed — cannot build a trustworthy artifact corpus"
+[ -s "$HA_PREKILL_A_LOG" ] \
+    || die "HA leak scan: pre-kill capture of helper A's log ('$HA_PREKILL_A_LOG') is EMPTY — a scan that never covers the original A's log proves nothing about it"
+chmod 600 "$HA_PREKILL_A_LOG"
+log "HA leak scan: captured helper A's pre-kill log ($(wc -c <"$HA_PREKILL_A_LOG") bytes) before it is removed in §18.5"
 
 wait_probe_exit_rc() {
     local deadline=20 start=$SECONDS rc
@@ -855,9 +956,10 @@ haproxy_wait_status ch-oauth-ldap-b UP 10 >/dev/null \
 log "HA: helper B remains healthy and UP after helper A's recreation"
 
 # ── §18.6: HA leak scan ────────────────────────────────────────────────────
+# HA_LEAKSCAN_DIR was already created back in §18.4, before killing helper
+# A, so the pre-kill capture of A's log had somewhere durable to land — see
+# the comment there. It already holds compose-ch-oauth-ldap-a-prekill.log.
 log "HA leak scan: starting"
-HA_LEAKSCAN_DIR="$(mktemp -d "$RUN_TMP_DIR/ha-leakscan.XXXXXX")"
-chmod 700 "$HA_LEAKSCAN_DIR"
 
 leakscan_self_test "${OAUTH_RETAINED_TOKEN_NAMES[0]}"
 

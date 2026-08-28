@@ -90,6 +90,44 @@ func TestReadFilter_NestingWithinLimitSucceeds(t *testing.T) {
 	}
 }
 
+func TestReadFilter_NestingExactlyAtLimitSucceeds(t *testing.T) {
+	// Nesting depth exactly equal to maxFilterNestingDepth still parses:
+	// the guard's check (bytes.filterDepth >= maxFilterNestingDepth) runs
+	// BEFORE each level recurses, so maxFilterNestingDepth nested AND
+	// wrappers only ever present the check with filterDepth values
+	// 0..maxFilterNestingDepth-1 — it never actually reaches
+	// maxFilterNestingDepth itself, since there is no (maxFilterNestingDepth
+	// +1)-th wrapper to trigger that check for this depth. This is PATCHES.md's
+	// literal "nesting exactly at the limit still parses" claim, pinned
+	// directly rather than only via the maxFilterNestingDepth-1 case above
+	// (which is one level shallower and so doesn't by itself prove the
+	// limit value itself still succeeds).
+	raw := nestedANDFilterBytes(maxFilterNestingDepth)
+	filter, err := readFilterFromBytes(t, raw)
+	if err != nil {
+		t.Fatalf("readFilter with depth %d (== maxFilterNestingDepth) failed: %v", maxFilterNestingDepth, err)
+	}
+	if _, ok := filter.(FilterAnd); !ok {
+		t.Fatalf("readFilter returned %T, want FilterAnd", filter)
+	}
+}
+
+func TestReadFilter_NestingOneOverLimitIsRejected(t *testing.T) {
+	// One level deeper than TestReadFilter_NestingExactlyAtLimitSucceeds:
+	// the (maxFilterNestingDepth+1)-th AND wrapper is the first one whose
+	// own check actually observes bytes.filterDepth == maxFilterNestingDepth,
+	// so this is the shallowest depth the guard rejects — the precise
+	// failing-side boundary, distinct from
+	// TestReadFilter_ExceedingNestingLimitIsRejectedWithoutUnboundedGrowth's
+	// depth=2000 case below (which exists to prove the error chain's
+	// growth stays BOUNDED for a deep input, not to pin the exact
+	// boundary depth).
+	raw := nestedANDFilterBytes(maxFilterNestingDepth + 1)
+	if _, err := readFilterFromBytes(t, raw); err == nil {
+		t.Fatalf("readFilter with depth %d (== maxFilterNestingDepth+1) succeeded, want a nesting-limit rejection", maxFilterNestingDepth+1)
+	}
+}
+
 func TestReadFilter_ExceedingNestingLimitIsRejectedWithoutUnboundedGrowth(t *testing.T) {
 	// depth is deliberately far beyond maxFilterNestingDepth. Before the
 	// fix this recursed all the way to the leaf and then re-wrapped the
@@ -128,13 +166,17 @@ func TestReadFilter_NestingLimitAppliesToOrAndNot(t *testing.T) {
 	// spot-check OR here without duplicating the AND case's full
 	// construction — nestedANDFilterBytes only builds AND wrappers, so for
 	// OR/NOT this test constructs one single OR/NOT wrapper directly
-	// around an already-over-the-limit AND chain and confirms the failure
-	// still surfaces (proving the depth these outer wrappers see already
-	// accounts for their own +1, not just the inner AND chain's).
-	inner := nestedANDFilterBytes(maxFilterNestingDepth) // already at the limit on its own
+	// around an inner AND chain that is itself exactly at the limit (see
+	// TestReadFilter_NestingExactlyAtLimitSucceeds: maxFilterNestingDepth
+	// levels of AND still succeed ON THEIR OWN) and confirms that adding
+	// this one further OR level — pushing the total to
+	// maxFilterNestingDepth+1 — is what tips it into rejection (proving
+	// the depth this outer wrapper sees already accounts for its own +1,
+	// not just the inner AND chain's).
+	inner := nestedANDFilterBytes(maxFilterNestingDepth) // succeeds on its own; see TestReadFilter_NestingExactlyAtLimitSucceeds
 
 	or := append([]byte{0xa1, byte(len(inner))}, inner...) // OR ::= [1] SET SIZE(1..MAX) OF Filter
 	if _, err := readFilterFromBytes(t, or); err == nil {
-		t.Fatalf("readFilter(OR wrapping an already-at-limit AND chain) succeeded, want rejection")
+		t.Fatalf("readFilter(OR wrapping an inner AND chain that is exactly at maxFilterNestingDepth on its own) succeeded, want rejection")
 	}
 }

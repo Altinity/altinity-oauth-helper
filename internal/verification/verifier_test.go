@@ -174,6 +174,14 @@ func baseConfig(p *testIdP) Config {
 	}
 }
 
+// This file's top-level t.Parallel() calls (here and throughout) are safe
+// next to redaction_matrix_test.go's serialized, non-parallel global-logger
+// captures in the same package: Go's testing package only starts a
+// parallel top-level test's body after every top-level test that never
+// called t.Parallel() has already run to completion (see
+// redaction_matrix_test.go's own header for the full rule this leans on),
+// so none of this file's parallel tests can ever interleave with that
+// file's process-global logger swap.
 func TestNewRejectsEmptyAudiences(t *testing.T) {
 	t.Parallel()
 	_, err := New(Config{})

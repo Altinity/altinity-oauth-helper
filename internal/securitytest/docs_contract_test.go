@@ -47,12 +47,15 @@ import (
 //
 // TestDocsContract_MarkedFencesAreExactContiguousExcerpts is the general
 // proof (every marked fence is a verbatim contiguous substring of its named
-// source); TestDocsContract_ReadmeClickHouseXMLMatchesFixtureElement is the
+// source); TestDocsContract_ClickHouseXMLFencesMatchFixtureElement is the
 // stronger, element-scoped proof §21.4 specifically calls for on top of
-// that (the README's <clickhouse>...</clickhouse> fence must equal exactly
-// the fixture's own <clickhouse>...</clickhouse> element — not merely be
-// found somewhere inside the whole fixture file, which also carries a long
-// XML comment header this element-level comparison deliberately excludes).
+// that (EVERY docsContractMarkdownFiles entry's <clickhouse>...</clickhouse>
+// fence must equal exactly the fixture's own <clickhouse>...</clickhouse>
+// element — not merely be found somewhere inside the whole fixture file,
+// which also carries a long XML comment header this element-level
+// comparison deliberately excludes — so README.md and
+// docs/ch-oauth-ldap-operator-guide.md get the identical guarantee, not
+// just one of them).
 
 // docsContractMarkdownFiles is every markdown file this contract enforces
 // config-source fences and the required/forbidden HA-and-trust-boundary
@@ -265,34 +268,22 @@ func extractElement(src, tag string) (string, bool) {
 	return src[startIdx:endIdx], true
 }
 
-// TestDocsContract_ReadmeClickHouseXMLMatchesFixtureElement is the
+// TestDocsContract_ClickHouseXMLFencesMatchFixtureElement is the
 // element-scoped strengthening of the general contiguous-excerpt check,
-// specific to the root README's <clickhouse> fence (plan §21.4): the fence
-// must equal EXACTLY the fixture's own <clickhouse>...</clickhouse>
-// element, not merely be found somewhere inside the whole fixture file
-// (which also has a long comment header preceding that element — comparing
-// against the whole file would let the fence drift from the actual
-// <clickhouse> content as long as it stayed a substring of the header too).
-func TestDocsContract_ReadmeClickHouseXMLMatchesFixtureElement(t *testing.T) {
+// applied to EVERY docsContractMarkdownFiles entry's <clickhouse> fence
+// (plan §21.4) — originally README-only, now also covering
+// docs/ch-oauth-ldap-operator-guide.md's own §1 fence so both of this
+// repo's operator-facing documents get the same strict guarantee, not just
+// one of them: each fence must equal EXACTLY the fixture's own
+// <clickhouse>...</clickhouse> element, not merely be found somewhere
+// inside the whole fixture file (which also has a long comment header
+// preceding that element — comparing against the whole file would let a
+// fence drift from the actual <clickhouse> content as long as it stayed a
+// substring of the header too).
+func TestDocsContract_ClickHouseXMLFencesMatchFixtureElement(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
 		t.Fatalf("securitytest: locate module root: %v", err)
-	}
-	marked, _, err := scanMarkdownFences(root, "README.md")
-	if err != nil {
-		t.Fatalf("securitytest: scan README.md: %v", err)
-	}
-
-	var clickhouseFence *markedFence
-	for i := range marked {
-		f := &marked[i]
-		if f.sourcePath == clickhouseFixtureRelPath && strings.HasPrefix(strings.TrimSpace(f.content), "<clickhouse>") {
-			clickhouseFence = f
-			break
-		}
-	}
-	if clickhouseFence == nil {
-		t.Fatalf("README.md has no config-source-marked <clickhouse> fence pointing at %s", clickhouseFixtureRelPath)
 	}
 
 	fixtureData, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(clickhouseFixtureRelPath)))
@@ -303,12 +294,31 @@ func TestDocsContract_ReadmeClickHouseXMLMatchesFixtureElement(t *testing.T) {
 	if !ok {
 		t.Fatalf("securitytest: could not locate a <clickhouse>...</clickhouse> element in %s", clickhouseFixtureRelPath)
 	}
-
-	fenceContent := strings.TrimSpace(clickhouseFence.content)
 	fixtureElement = strings.TrimSpace(fixtureElement)
-	if fenceContent != fixtureElement {
-		t.Fatalf("README.md's <clickhouse> fence does not equal the fixture's contiguous <clickhouse>...</clickhouse> element.\n--- README fence ---\n%s\n--- fixture element ---\n%s",
-			fenceContent, fixtureElement)
+
+	for _, mdFile := range docsContractMarkdownFiles {
+		marked, _, err := scanMarkdownFences(root, mdFile)
+		if err != nil {
+			t.Fatalf("securitytest: scan %s: %v", mdFile, err)
+		}
+
+		var clickhouseFence *markedFence
+		for i := range marked {
+			f := &marked[i]
+			if f.sourcePath == clickhouseFixtureRelPath && strings.HasPrefix(strings.TrimSpace(f.content), "<clickhouse>") {
+				clickhouseFence = f
+				break
+			}
+		}
+		if clickhouseFence == nil {
+			t.Fatalf("%s has no config-source-marked <clickhouse> fence pointing at %s", mdFile, clickhouseFixtureRelPath)
+		}
+
+		fenceContent := strings.TrimSpace(clickhouseFence.content)
+		if fenceContent != fixtureElement {
+			t.Fatalf("%s's <clickhouse> fence does not equal the fixture's contiguous <clickhouse>...</clickhouse> element.\n--- %s fence ---\n%s\n--- fixture element ---\n%s",
+				mdFile, mdFile, fenceContent, fixtureElement)
+		}
 	}
 }
 

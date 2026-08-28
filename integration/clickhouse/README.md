@@ -14,9 +14,14 @@ ClickHouse-facing configuration done.
 
 - Docker with Compose v2 (`docker compose`) or the standalone `docker-compose`
   binary — `lib/common.sh` auto-detects whichever is available. The HA
-  harness (`run-ha.sh`, below) additionally uses a second, standalone
-  `docker-compose` file (`compose-ha.yml`) layered on top of the same
-  four-service base — no extra tooling beyond the same Compose binary.
+  harness (`run-ha.sh`, below) additionally uses a second compose file
+  (`compose-ha.yml`) — no extra tooling beyond the same Compose binary.
+  `compose-ha.yml` is self-contained, not a Compose multi-file
+  (`-f compose.yml -f compose-ha.yml`) override layered on top of
+  `compose.yml`: `run-ha.sh` passes it as the ONLY compose file
+  (`COMPOSE_FILE=compose-ha.yml`), and it redefines all six of its own
+  services (mirroring `compose.yml`'s two ClickHouse nodes' definitions
+  rather than referencing or extending them).
 - `curl` on the host. **No host `clickhouse-client` is needed** — all
   administrative SQL runs inside the containers via `compose exec`.
 - `$TMPDIR`, if set, must point at a writable directory that is **not** `/tmp`
@@ -124,7 +129,7 @@ between G (`60-*.sh`) and H (`70-*.sh`) without renumbering either.
 | E — invalid/expired | `40-invalid-expired.sh` | Malformed and correctly-signed-but-expired tokens are rejected. |
 | F — role refresh | `50-role-refresh.sh` | A new token with different groups, on a new authentication, yields the new role set with nothing stale. |
 | G — local precedence | `60-local-precedence.sh` | A locally defined user (`admin@example.com`, not the helper-denied literal `admin`) wins over LDAP: her real password works, a valid external JWT does not. |
-| G' — Search-limit compatibility (phase 5) | `65-ldap-search-limits.sh` | A token mapping 257 roles against the fixture's `<search_limit>256</search_limit>`: the helper's own telemetry confirms `size_limit=256 entries=256 result=4` (sizeLimitExceeded), and ClickHouse's measured, per-build reaction to that non-success Search is enforced via `lib/expectations.sh`'s `search_limit_overflow_expectation_for` — see `docs/ch-oauth-ldap-operator-guide.md` §6 for what was actually measured. The 257 grant-less, origin-only roles this scenario creates are dropped before scenario H runs, regardless of outcome. |
+| G' — Search-limit compatibility (phase 5) | `65-ldap-search-limits.sh` | A token mapping 257 roles against the fixture's `<search_limit>256</search_limit>`: the helper's own telemetry confirms `size_limit=256 entries=256 result=4` (sizeLimitExceeded), and ClickHouse's measured, per-build reaction to that non-success Search is enforced via `lib/expectations.sh`'s `search_limit_overflow_expectation_for`/`search_limit_overflow_wire_tuple` — see `docs/ch-oauth-ldap-operator-guide.md` §6 for what was actually measured. **Unlike the H/H' table below, these two functions only have recorded expectations for 24.8 and 25.8** — either `die`s (fail-closed, not silently inherited) for any other build prefix, including 25.3 and 26.3, so G' does not run end-to-end against those lines; measure and add an entry before running it there. The 257 grant-less, origin-only roles this scenario creates are dropped before scenario H runs, regardless of outcome. |
 | H — distributed propagation (base-table oracle) | `70-distributed-propagation.sh` | With `push_external_roles_in_interserver_queries=0` the remote read is denied; with `=1` it succeeds and remote `system.query_log` shows `user = initial_user = alice@example.com`; the helper saw exactly `2 + OAUTH_RETRY_EXTRA_ATTEMPTS` new Binds — 2 in the common case, plus one per transient-transport retry the scenario itself made (remote never independently re-authenticated). Outcome is per build — see below. |
 | H' — view canary (expected fail) | `75-distributed-propagation-view.sh` | The same propagation through a **normal VIEW** on the remote side. Currently fails on every ClickHouse line tested (ClickHouse #116840); kept as an expected-fail canary so it flips loudly when upstream fixes it. |
 | I — JWT leak scan | `80-leak-scan.sh` | Scanner self-test (plant a real token, require detection), then every retained token (including G''s) is asserted absent from all three services' logs, both nodes' on-disk server logs, the runner transcript, and captured HTTP error bodies. |
@@ -173,14 +178,24 @@ recorded expectation also dies loudly; add an explicit entry before running
 against a new line. `run-all-builds.sh`'s `BUILDS` list must stay in sync with
 the prefixes `expectation_for` recognizes.
 
+The same fail-closed discipline applies separately to scenario G', via two
+different functions in the same file: `search_limit_overflow_expectation_for`
+and `search_limit_overflow_wire_tuple`. Each `die`s outright for any build
+prefix without its own recorded entry — today that means only 24.8 and 25.8
+are covered, not the full 24.8/25.3/25.8/26.3 line the H/H' table above
+covers, so G' does not currently run end-to-end against 25.3 or 26.3. Add a
+measured entry to *both* functions (never just one) before running G' against
+a new build prefix.
+
 ## HA (phase 5)
 
 ```bash
 ./integration/clickhouse/run-ha.sh
 ```
 
-A separate, manual, local gate (own `COMPOSE_PROJECT_NAME`,
-`compose-ha.yml` layered on the same base fixture, own
+A separate, manual, local gate (own `COMPOSE_PROJECT_NAME`, a
+self-contained `compose-ha.yml` — not a Compose override layered on
+`compose.yml`, see the Prerequisites section above — own
 `ch-phase5-ha-*-net` networks) that runs `ch-oauth-ldap` as two independent
 replicas behind an HAProxy TCP frontend (`ha/haproxy.cfg`) and proves, via a
 persistent same-socket session probe (`ha/session-probe/`) and mechanical

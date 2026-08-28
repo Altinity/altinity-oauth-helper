@@ -441,7 +441,14 @@ with a newline so the decoded payload is byte-identical to the former
             actionable here, not a new restriction — behavior-neutral. The
             chart gate's embedded-assertions Go verifier asserts this value
             equals 256 AND equals the value parsed from that same real
-            fixture, so the three copies cannot silently diverge.
+            fixture, so the three copies cannot silently diverge. This
+            search_limit/structure cross-check is the ONLY thing kept
+            byte-identical against that fixture — host/bind_dn above and
+            role_mapping's base_dn/prefix below are templated from
+            .Values.ldap.* and are instead cross-checked against this
+            render's OWN config.yaml values (see
+            helm/ch-oauth-ldap/ci/lib/embedded-assertions.sh), not against
+            the fixture's literal text.
             */}}
             <search_limit>256</search_limit>
         </oauth_helper>

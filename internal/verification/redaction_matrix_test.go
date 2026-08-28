@@ -18,10 +18,13 @@ package verification
 //
 //   - every test/subtest in this file that calls captureLog must NOT call
 //     t.Parallel(), neither on itself nor on any t.Run group containing it;
-//   - a test in this file that only asserts on the returned error (no log
-//     capture) remains free to call t.Parallel() as usual — see
-//     TestRedactionMatrix_RejectionCases' per-case t.Parallel() calls below
-//     for exactly that split;
+//   - in practice, every top-level test in THIS file calls captureLog (both
+//     TestRedactionMatrix_RejectionCases and
+//     TestJWKSRotation_PreBumpCharacterization do), so neither one — nor
+//     either one's t.Run subtests — ever calls t.Parallel() here; a test
+//     that only asserted on the returned error, with no log capture at
+//     all, would be free to call t.Parallel() as usual, but that
+//     hypothetical case has no example in this file today;
 //   - this relies on the same repo-wide convention documented at
 //     cmd/ch-jwt-verify/verify_test.go's
 //     TestVerifyRejectionLogRedactsCredentialShapedRequestedUsername: Go

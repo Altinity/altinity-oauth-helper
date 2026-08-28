@@ -90,8 +90,9 @@
 #      is a single in-process bash statement, so cleanup() knows the path
 #      no matter when a signal lands relative to the external `mkdir` call.
 #
-# This does NOT bring up the real four-service fixture — that remains
-# run.sh's job (see integration/clickhouse/README.md: "manual, local
+# This does NOT bring up any real fixture — the real four-service fixture
+# remains run.sh's job, and the real six-service HA fixture remains
+# run-ha.sh's job (see integration/clickhouse/README.md: "manual, local
 # gate"). It DOES source the real lib/*.sh files, so it needs the same
 # `docker`/`docker-compose` CLI *presence* on PATH that lib/common.sh's own
 # sourcing-time detect_compose_cmd already requires (no daemon needed —
@@ -1257,32 +1258,72 @@ test_leakscan_completeness_normal_defaults_missing_file_dies() {
 }
 test_leakscan_completeness_normal_defaults_missing_file_dies
 
+# extract_run_ha_array NAME — extracts the space-separated array literal
+# run-ha.sh assigns to bash array variable NAME (e.g.
+# "LEAKSCAN_COMPOSE_SERVICES=(a b c)"), one element per line on stdout, by
+# reading run-ha.sh's own source text — never by hand-copying a duplicate
+# literal into this test file, which is exactly what silently drifted out
+# of sync once already (see P2-1: run-ha.sh's LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS
+# gained compose-ch-oauth-ldap-a-prekill.log and this file's own copy here
+# needed an entirely separate, easy-to-forget edit to keep up). Only
+# handles the single-line `NAME=(word word ...)` shape these three arrays
+# actually use in run-ha.sh today — not general bash array syntax.
+extract_run_ha_array() {
+    local name="$1" line
+    line="$(command grep -E "^${name}=\(" "$SCRIPT_DIR/run-ha.sh" | head -n1)"
+    if [ -z "$line" ]; then
+        printf 'FAIL: extract_run_ha_array: no %s=(...) assignment found in run-ha.sh\n' "$name" >&2
+        return 1
+    fi
+    line="${line#*(}"
+    line="${line%)*}"
+    # shellcheck disable=SC2086 -- deliberate word-splitting of a
+    # space-separated bash array literal, not a path/credential value.
+    printf '%s\n' $line
+}
+
 # build_ha_leakscan_corpus DIR — writes every file the HA-shaped arrays
 # below (run_ha_leakscan_completeness) require, all non-empty. The
 # "compose-ch-oauth-ldap.log" entry stands for the HAProxy frontend, which
 # the plan's HA topology keeps under the same "ch-oauth-ldap" compose
 # service name the normal fixture uses for the single helper (see §17.2).
+# The service/node/extra-artifact file lists are derived from run-ha.sh's
+# own arrays via extract_run_ha_array (see that function's own header),
+# never hand-copied, so this corpus builder can never drift from what
+# run-ha.sh itself actually requires.
 build_ha_leakscan_corpus() {
-    local dir="$1" f
-    for f in compose-ch-oauth-ldap.log compose-ch-oauth-ldap-a.log compose-ch-oauth-ldap-b.log \
-        compose-clickhouse-origin.log compose-clickhouse-remote.log \
-        clickhouse-origin-clickhouse-server.log clickhouse-remote-clickhouse-server.log \
-        clickhouse-origin-clickhouse-server.err.log clickhouse-remote-clickhouse-server.err.log \
-        run-transcript.log session-probe.log auth-failure-01.txt; do
+    local dir="$1" f svc node extra
+    while IFS= read -r svc; do
+        printf 'synthetic artifact content\n' >"$dir/compose-${svc}.log"
+    done < <(extract_run_ha_array LEAKSCAN_COMPOSE_SERVICES)
+    while IFS= read -r node; do
+        printf 'synthetic artifact content\n' >"$dir/${node}-clickhouse-server.log"
+        printf 'synthetic artifact content\n' >"$dir/${node}-clickhouse-server.err.log"
+    done < <(extract_run_ha_array LEAKSCAN_NODES)
+    while IFS= read -r extra; do
+        [ -n "$extra" ] || continue
+        printf 'synthetic artifact content\n' >"$dir/$extra"
+    done < <(extract_run_ha_array LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS)
+    for f in run-transcript.log auth-failure-01.txt; do
         printf 'synthetic artifact content\n' >"$dir/$f"
     done
 }
 
 # run_ha_leakscan_completeness DIR — runs leakscan_require_artifacts_complete
-# against DIR with the plan's HA-shaped arrays, in a subshell so the array
-# reassignment never escapes into this test file's own shell. Sets
-# CAPTURE_OUT/CAPTURE_RC.
+# against DIR with run-ha.sh's OWN HA-shaped arrays (extracted via
+# extract_run_ha_array, never a hand-copied duplicate — see that function's
+# header), in a subshell so the array reassignment never escapes into this
+# test file's own shell. Sets CAPTURE_OUT/CAPTURE_RC.
 run_ha_leakscan_completeness() {
     local dir="$1"
+    local -a ha_services ha_nodes ha_extras
+    mapfile -t ha_services < <(extract_run_ha_array LEAKSCAN_COMPOSE_SERVICES)
+    mapfile -t ha_nodes < <(extract_run_ha_array LEAKSCAN_NODES)
+    mapfile -t ha_extras < <(extract_run_ha_array LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS)
     CAPTURE_OUT="$(
-        LEAKSCAN_COMPOSE_SERVICES=(ch-oauth-ldap ch-oauth-ldap-a ch-oauth-ldap-b clickhouse-origin clickhouse-remote)
-        LEAKSCAN_NODES=(clickhouse-origin clickhouse-remote)
-        LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS=(session-probe.log)
+        LEAKSCAN_COMPOSE_SERVICES=("${ha_services[@]}")
+        LEAKSCAN_NODES=("${ha_nodes[@]}")
+        LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS=("${ha_extras[@]}")
         leakscan_require_artifacts_complete "$dir" 2>&1
     )"
     CAPTURE_RC=$?
@@ -1299,8 +1340,8 @@ test_leakscan_completeness_ha_shaped_happy_path() {
         return
     fi
     case "$CAPTURE_OUT" in
-        *"9 required"*"1 extra"*) pass "leakscan completeness: HA-shaped arrays accept a complete corpus" ;;
-        *) fail "leakscan completeness: HA-shaped arrays accept a complete corpus" "expected a 9-required/1-extra corpus size in the log: $CAPTURE_OUT" ;;
+        *"10 required"*"2 extra"*) pass "leakscan completeness: HA-shaped arrays accept a complete corpus" ;;
+        *) fail "leakscan completeness: HA-shaped arrays accept a complete corpus" "expected a 10-required/2-extra corpus size in the log: $CAPTURE_OUT" ;;
     esac
 }
 test_leakscan_completeness_ha_shaped_happy_path
@@ -1331,7 +1372,7 @@ assert_ha_leakscan_fails() {
     esac
 }
 
-for _ha_neg_file in compose-ch-oauth-ldap-a.log compose-ch-oauth-ldap-b.log compose-ch-oauth-ldap.log session-probe.log; do
+for _ha_neg_file in compose-ch-oauth-ldap-a.log compose-ch-oauth-ldap-b.log compose-ch-oauth-ldap.log session-probe.log compose-ch-oauth-ldap-a-prekill.log; do
     assert_ha_leakscan_fails "$_ha_neg_file" missing
     assert_ha_leakscan_fails "$_ha_neg_file" empty
 done
@@ -1385,10 +1426,14 @@ test_leakscan_sh_sourcing_guard_preserves_reassignment
 # and variable already defined above (SCRIPT_DIR, RUN_TMP_DIR, pass/fail/
 # run_and_capture, the sourced lib/*.sh functions), exactly like a
 # scenarios/*.sh file sees run.sh's; a case file signals its own failures
-# via fail(), which is already reflected in $FAILURES below. Unlike
-# scenarios/*.sh, an empty cases/ directory is the expected steady state
-# until a case-adding sub-task lands, so nullglob makes a zero-file glob a
-# normal, explicitly-logged outcome rather than an error.
+# via fail(), which is already reflected in $FAILURES below.
+# tests/cases/ha-fallback-parity.sh (T12b) is the first real case file, so
+# this directory is no longer the empty steady state this hook originally
+# shipped for — but unlike scenarios/*.sh (which run.sh always expects to
+# be non-empty), an empty cases/ directory is still a legitimate state this
+# hook must tolerate (e.g. a future removal, or a stripped-down checkout),
+# so nullglob keeps a zero-file glob a normal, explicitly-logged outcome
+# rather than an error.
 shopt -s nullglob
 case_files=("$SCRIPT_DIR"/tests/cases/*.sh)
 shopt -u nullglob

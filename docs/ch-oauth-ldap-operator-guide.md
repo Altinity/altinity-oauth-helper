@@ -70,10 +70,21 @@ in §7 below — TLS is not implemented.
 `<search_limit>256</search_limit>` makes ClickHouse's own built-in default
 explicit and actionable — see §6 for exactly what happens when a caller's
 mapped-role count exceeds it, measured live rather than assumed. The chart's
-embedded copy of this XML (`helm/ch-oauth-ldap/templates/_helpers.tpl`) and
-this fixture are kept in lockstep by `helm/ch-oauth-ldap/test.sh`'s
-embedded-XML assertion, so all three copies (fixture, chart, this guide) stay
-identical.
+embedded copy of this XML (`helm/ch-oauth-ldap/templates/_helpers.tpl`) is
+templated — `host`, `bind_dn`, `role_mapping/base_dn`, and
+`role_mapping/prefix` are rendered from `.Values.ldap.*` and so vary with
+each release's configuration, unlike this fixture's fixed literal values.
+What `helm/ch-oauth-ldap/test.sh`'s embedded-XML assertion actually
+cross-checks between the chart and this fixture is narrower: the overall
+element structure (same elements, same nesting) and the `<search_limit>`
+value specifically, which the assertion requires to equal `256` in both
+places. The templated fields are instead cross-checked against the
+*rendering's own* `config.yaml` values (e.g. the XML's `bind_dn` must equal
+that render's `ldap.user_rdn_attribute` + `ldap.user_base_dn`), not against
+this fixture's literal text — see `helm/ch-oauth-ldap/ci/lib/embedded-assertions.sh`.
+This guide's own fence above, by contrast, is a byte-for-byte copy of the
+fixture (enforced by `docs_contract_test.go`), so it does stay identical to
+the fixture — it just isn't identical to the chart's templated output.
 
 **Distributed-role propagation to a remote node requires ClickHouse ≥ 25.8**
 (fixed upstream by [ClickHouse #79099](https://github.com/ClickHouse/ClickHouse/pull/79099));
@@ -215,7 +226,11 @@ groups extraction → input dedupe → roles_mapping → full-match roles_filter
   matches this pattern.
 - **`roles_transform`**, when configured, is an Antalya-style
   `s/pattern/replacement/flags` rewrite applied to surviving candidates
-  *after* filtering (filtering sees the pre-transform name).
+  *after* filtering (filtering sees the pre-transform name). Worked example
+  with the fence above: `idp-readers` maps to `ch_readonly`, which matches
+  `roles_filter` and survives, and `roles_transform`'s `s/^ch_//` then
+  strips the `ch_` prefix, yielding the final ClickHouse role name
+  `readonly` (`idp-engineers` → `ch_engineer` → `engineer` the same way).
 - **Final dedupe** removes duplicates again, since distinct groups may
   map/transform onto the same final role name.
 - **Role names must already exist in ClickHouse.** Exactly as documented for
@@ -258,9 +273,12 @@ against the helper, is identical on both tested builds:**
 size_limit=256 time_limit=0 types_only=false
 ```
 
-`time_limit=0` because the examined 24.8/25.8 LDAP-directory parser has no
+`time_limit=0` because the examined 24.8 LDAP-directory parser has no
 corresponding `<search_timeout>` XML key for this configuration path — do
-not add one; it is not read.
+not add one; it is not read. 25.8 was not source-examined the same way, but
+the identical `time_limit=0` was independently measured live against it
+(see `lib/expectations.sh`'s `search_limit_overflow_wire_tuple`), so the
+same absence holds in practice on both tested builds.
 
 **The measured consequence of the resulting `sizeLimitExceeded` (LDAP result
 4) Search response is also identical on both tested builds:**
@@ -268,11 +286,17 @@ not add one; it is not read.
 own `ldap search size limit exceeded` log line records
 `size_limit=256 entries=256 result=4`), and **ClickHouse's LDAP-directory
 login path treats that non-success Search result as fatal — the whole
-authentication attempt fails** (HTTP 403 at the ClickHouse HTTP interface;
-the query behind it never runs) rather than authenticating with a truncated
-256-of-257 role set. This was an open question the phase-5 plan explicitly
-required measuring rather than assuming for 25.8 — it turned out to share
-24.8's behavior rather than differ from it.
+authentication attempt fails** (a non-200 response at the ClickHouse HTTP
+interface — measured as HTTP 403 on both tested builds, though
+`assert_search_limit_overflow_outcome` in `lib/expectations.sh` only asserts
+`CH_LAST_STATUS != 200`, not that specific code, matching this suite's
+elsewhere-documented discipline of never asserting a specific error
+string/status for a rejection whose exact shape isn't part of the
+contract; the query behind the request never runs) rather than
+authenticating with a truncated 256-of-257 role set. This was an open
+question the phase-5 plan explicitly required measuring rather than
+assuming for 25.8 — it turned out to share 24.8's behavior rather than
+differ from it.
 
 **Operational consequence: `search_limit` must be sized to cover the maximum
 legitimate mapped-role count for any one user**, or that user's

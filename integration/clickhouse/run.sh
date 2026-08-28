@@ -55,6 +55,35 @@ COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 # see "Concurrency" in integration/clickhouse/README.md.
 COMPOSE_PROJECT_NAME="ch-phase3"
 
+# ── Preflight: refuse to run alongside the phase-5 HA fixture ────────────
+# The reciprocal of run-ha.sh's own ha_preflight_no_phase3_collision — that
+# script already refuses to start if THIS fixture's containers/networks are
+# present, but nothing previously enforced the same rule in this direction,
+# so starting this fixture while run-ha.sh's ch-phase5-ha project was live
+# was silently allowed even though README.md's "Concurrency: one run per
+# Docker daemon at a time" applies to both. Cheap, side-effect-free, and
+# runs before any state this script owns exists — a die() here needs no
+# cleanup. Matched by substring (docker's own --filter name= semantics), not
+# an exact name, so it also catches a crashed phase-5-HA run's leftover
+# containers/networks, not just a live one.
+phase3_preflight_no_ha_collision() {
+    local hits
+    hits="$(docker ps -a --filter 'name=ch-phase5-ha' --format '{{.Names}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: phase-5-HA fixture container(s) present on this Docker daemon ($hits) — the phase-3 and phase-5-HA fixtures must not run concurrently (README.md: 'Concurrency: one run per Docker daemon at a time'); tear down the HA fixture first (docker rm -f the listed containers, then docker network rm ch-phase5-ha-auth-net ch-phase5-ha-cluster-net if they remain)"
+    fi
+    hits="$(docker network ls --filter 'name=ch-phase5-ha-auth-net' --format '{{.Name}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: leftover phase-5-HA network '$hits' exists — remove it (docker network rm ch-phase5-ha-auth-net) before running this fixture"
+    fi
+    hits="$(docker network ls --filter 'name=ch-phase5-ha-cluster-net' --format '{{.Name}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: leftover phase-5-HA network '$hits' exists — remove it (docker network rm ch-phase5-ha-cluster-net) before running this fixture"
+    fi
+    log "preflight: no phase-5-HA fixture collision detected — proceeding"
+}
+phase3_preflight_no_ha_collision
+
 # The cleanup trap is installed HERE — before RUN_TMP_DIR, ENV_FILE, or
 # anything else per-run exists — so that a SIGINT/SIGTERM delivered at ANY
 # point from here to the end of the script is guaranteed to run cleanup().

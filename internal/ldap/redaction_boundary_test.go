@@ -26,6 +26,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	ldapserver "github.com/vjeantet/ldapserver"
 
 	"github.com/altinity/go-mcp-oauth-sdk/oauth"
 
@@ -219,11 +220,13 @@ func TestRedactionBoundary_LDAPFailureMarkersAbsent(t *testing.T) {
 					requireInvalidCredentials(t, tc.name, err)
 
 					// Unauthenticated session: a Search on the same
-					// connection after the failed Bind must not succeed.
-					res, searchErr := conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("boundary-alice"), nil))
-					if searchErr == nil && res != nil && len(res.Entries) > 0 {
-						t.Fatalf("%s: search after failed bind succeeded with entries %+v, want unauthenticated", tc.name, res.Entries)
-					}
+					// connection after the failed Bind must not succeed —
+					// require the exact rejection failSearch (search.go)
+					// returns for an unauthenticated session, not just "no
+					// entries", which a wrongly SUCCESSFUL empty-result
+					// Search could also produce.
+					_, searchErr := conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("boundary-alice"), nil))
+					requireResultCode(t, tc.name+": search after failed bind", searchErr, ldapserver.LDAPResultInsufficientAccessRights)
 
 					logText := buf.String()
 					for _, marker := range []string{ldapBoundaryBearer, ldapBoundaryMarker, ldapBoundaryClaimJSON} {

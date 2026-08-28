@@ -423,6 +423,14 @@ run_old_chart_smoke
 # was wrong, since any real ch-oauth-ldap change legitimately touches those
 # paths (e.g. cmd/ch-jwt-verify/verify_test.go, internal/securitytest,
 # integration fixtures). Scoped down to just the sidecar's own files/dirs.
+#
+# cmd/ch-jwt-verify/ is included (production Go included, *_test.go files
+# excluded via the ":(exclude)" pathspec below): the sidecar's PRODUCTION
+# code must never move for a ch-oauth-ldap change, but its TESTS may -- e.g.
+# phase 5 adds a shared redaction-proof matrix that legitimately touches
+# cmd/ch-jwt-verify/verify_test.go. Both `git diff --stat` (committed
+# history) and `git status --porcelain` (working tree) below are checked
+# against this same pathspec set.
 # ==============================================================================
 
 UNTOUCHED_PATHS=(
@@ -431,6 +439,8 @@ UNTOUCHED_PATHS=(
     "Dockerfile"
     "scripts/build-image.sh"
     "examples/"
+    "cmd/ch-jwt-verify/"
+    ":(exclude)cmd/ch-jwt-verify/*_test.go"
 )
 
 run_untouched_path_proof() {

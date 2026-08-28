@@ -343,6 +343,8 @@ cmd/ch-jwt-verify/     # the sidecar binary (main, config, settings, verify)
 cmd/ch-oauth-ldap/     # the standalone LDAPv3 server (main, config)
 internal/ldap/         # LDAP session/DN/filter/entry primitives + Bind/Search handlers
 internal/securitytest/ # phase-5 AST redaction inventory, SDK contract, docs contract (see its doc.go)
+third_party/goldap/    # vendored, patched github.com/vjeantet/goldap message package (see its PATCHES.md)
+third_party/ldapserver/ # vendored, patched github.com/vjeantet/ldapserver LDAP server package
 docs/                  # ch-oauth-ldap-operator-guide.md: config/roles/cache/Search-limit/trust/HA consolidated
 integration/clickhouse/ # real-ClickHouse acceptance suite for ch-oauth-ldap (manual; see its README)
                        # scenarios/65-ldap-search-limits.sh (G'), compose-ha.yml/run-ha.sh/ha/ (Docker HA harness)

@@ -9,6 +9,9 @@ upstream MIT license, preserved per its terms; only `message/asn1.go`,
 `message/modify_dn_response.go`, `message/bytes.go`, `message/filter.go`,
 `message/filter_and.go`, `message/filter_or.go`, and
 `message/filter_not.go` differ from upstream, as follows.
+`message/filter_nesting_test.go` is a wholly new file (fix 3's regression
+test below) with no upstream counterpart at all, so it isn't a "differs
+from upstream" entry — it's new.
 
 ## 1. BER INTEGER encoding was missing sign-disambiguation padding
 
@@ -107,9 +110,18 @@ consuming repository's `internal/ldap` package ever authorizes
 exactly one AND with two non-recursive equality children — nesting depth
 1.
 
-See `message/filter_nesting_test.go` for the regression (nesting exactly
-at the limit still parses; nesting far beyond it is rejected with a short,
-bounded error rather than an unboundedly long one) and the consuming
+See `message/filter_nesting_test.go` for the regression: nesting exactly
+`maxFilterNestingDepth` levels deep still parses — the guard's check
+(`bytes.filterDepth >= maxFilterNestingDepth`) runs BEFORE each level
+recurses, so `maxFilterNestingDepth` nested wrappers only ever present it
+with `filterDepth` values `0..maxFilterNestingDepth-1`, never
+`maxFilterNestingDepth` itself; nesting one level past that
+(`maxFilterNestingDepth+1`) is the shallowest depth actually rejected, and
+far deeper nesting is rejected the same way, with a short, bounded error
+rather than an unboundedly long one. Both boundary depths
+(`maxFilterNestingDepth` succeeding, `maxFilterNestingDepth+1` failing) have
+their own dedicated test, not just the far-beyond-the-limit case. See also
+the consuming
 repository's `internal/ldap/filter_resource_test.go` for the staged,
 subprocess-isolated empirical measurement (deep AND: heap allocation delta
 now grows roughly linearly with nesting depth instead of quadratically;

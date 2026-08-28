@@ -260,6 +260,8 @@ const (
 	sinkLDAPDiagnostic      = "ldap-diagnostic"       // SetDiagnosticMessage
 	sinkHTTPError           = "http-error"            // http.Error
 	sinkVendoredLoggerPrint = "vendored-logger-print" // third_party/ldapserver Logger.Print*
+	sinkJSONEncodeResponse  = "json-encode-response"  // json.NewEncoder(w).Encode
+	sinkHTTPResponseWrite   = "http-response-write"   // http.ResponseWriter.Write (cmd/ch-jwt-verify only — see inspectCall)
 )
 
 // packageInitFunction is the synthesized `function` value for a call
@@ -437,7 +439,7 @@ func (c *siteCollector) inspectCall(call *ast.CallExpr, funcName string) {
 
 	switch sel.Sel.Name {
 	case "Msg", "Msgf", "Send":
-		c.record(funcName, sinkZerologTerminal, firstLiteralOrElse(call.Args, "<no-arg>"), sel.Sel.Name)
+		c.record(funcName, sinkZerologTerminal, zerologFingerprint(call, sel), sel.Sel.Name)
 		return
 	case "SetDiagnosticMessage":
 		var detail string
@@ -446,6 +448,34 @@ func (c *siteCollector) inspectCall(call *ast.CallExpr, funcName string) {
 		}
 		c.record(funcName, sinkLDAPDiagnostic, detail, "SetDiagnosticMessage")
 		return
+	case "Encode":
+		// json.NewEncoder(w).Encode(v) — response-body serialization. Only
+		// matched when the immediate receiver is itself a
+		// `<jsonAlias>.NewEncoder(...)` call, so an unrelated .Encode
+		// method elsewhere can never collide with this sink kind.
+		if inner, ok := sel.X.(*ast.CallExpr); ok {
+			if innerSel, ok := inner.Fun.(*ast.SelectorExpr); ok && innerSel.Sel.Name == "NewEncoder" {
+				if recv, isIdent := receiverIdentName(innerSel.X); isIdent && c.aliases[recv] == "encoding/json" {
+					c.record(funcName, sinkJSONEncodeResponse, normalizeArgs(call.Args), "json.NewEncoder(...).Encode")
+					return
+				}
+			}
+		}
+	case "Write":
+		// http.ResponseWriter.Write(...): AST alone can't resolve `w`'s
+		// static type (no go/types here), so this is deliberately narrow —
+		// scoped to cmd/ch-jwt-verify (the only scope with a bare
+		// `w.Write(...)` over an http.ResponseWriter today) and to the
+		// conventional receiver name `w` used throughout that file, so it
+		// can never collide with, say, internal/ldap's unrelated
+		// ldapserver response-packet `w.Write(res)` calls in a different
+		// scope.
+		if c.scope == "cmd/ch-jwt-verify" {
+			if recv, isIdent := receiverIdentName(sel.X); isIdent && recv == "w" {
+				c.record(funcName, sinkHTTPResponseWrite, normalizeArgs(call.Args), "w.Write")
+				return
+			}
+		}
 	}
 
 	recvName, isIdent := receiverIdentName(sel.X)
@@ -529,6 +559,69 @@ func firstLiteralOrElse(args []ast.Expr, fallback string) string {
 		return fallback
 	}
 	return normalizeExpr(args[0])
+}
+
+// zerologFingerprint builds the fingerprint for a zerolog terminal call
+// (.Msg/.Msgf/.Send): the normalized chain of field-builder calls leading up
+// to it, in source order, followed by the terminal call's own literal
+// message text. Each chain link is the method name alone (e.g. "Err"), or
+// the method name plus any literal string-KEY arguments (e.g. .Str("user",
+// u) contributes "Str(user)" — the key literal only, never u's value or
+// even its normalized shape, since the key is what defines the log
+// schema and the value is exactly the kind of content this package must
+// never persist to a checked-in fingerprint). This means adding, removing,
+// or reordering a field on the chain — or changing the message literal —
+// changes the fingerprint and forces a fresh manifest row; the previous
+// "just the .Msg literal" fingerprint silently accepted all of that as the
+// same site.
+func zerologFingerprint(call *ast.CallExpr, msgSel *ast.SelectorExpr) string {
+	var links []string
+	cur := msgSel.X
+	for i := 0; i < 32; i++ {
+		innerCall, ok := cur.(*ast.CallExpr)
+		if !ok {
+			break
+		}
+		innerSel, ok := innerCall.Fun.(*ast.SelectorExpr)
+		if !ok {
+			break
+		}
+		if keys := zerologChainKeys(innerCall); len(keys) > 0 {
+			links = append(links, innerSel.Sel.Name+"("+strings.Join(keys, ",")+")")
+		} else {
+			links = append(links, innerSel.Sel.Name)
+		}
+		cur = innerSel.X
+	}
+	// links were collected innermost-first (closest to .Msg); reverse to
+	// source (left-to-right, outer-to-inner call) order.
+	for i, j := 0, len(links)-1; i < j; i, j = i+1, j-1 {
+		links[i], links[j] = links[j], links[i]
+	}
+	terminal := firstLiteralOrElse(call.Args, "<no-arg>")
+	if len(links) == 0 {
+		return terminal
+	}
+	return strings.Join(links, "|") + "|" + terminal
+}
+
+// zerologChainKeys returns only the literal string-KEY arguments of one
+// field-builder call in a chained zerolog call (e.g. .Str("user", u) ->
+// ["user"]; .Err(err) -> nil, since its sole argument is not a string
+// literal). Deliberately never includes a non-literal argument's value or
+// even its shape — only a static, checked-in-safe literal key.
+func zerologChainKeys(call *ast.CallExpr) []string {
+	var keys []string
+	for _, a := range call.Args {
+		lit, ok := a.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		if s, err := strconv.Unquote(lit.Value); err == nil {
+			keys = append(keys, s)
+		}
+	}
+	return keys
 }
 
 // normalizeArgs renders a stable, line-number-independent textual fingerprint

@@ -289,10 +289,11 @@ func TestControls_SuccessfulBindThenCriticalReBindLeavesSearchUnauthenticated(t 
 	})
 	requireResultCode(t, "critical re-bind", err, ldapserver.LDAPResultUnavailableCriticalExtension)
 
-	res, err := conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("alice"), nil))
-	if err == nil && res != nil && len(res.Entries) > 0 {
-		t.Fatalf("search after critical re-bind succeeded with entries: %+v, want unauthenticated (session cleared)", res)
-	}
+	_, err = conn.Search(membershipSearch(protoGroupBaseDN, protoBindDN("alice"), nil))
+	// The exact rejection failSearch (search.go) returns for an
+	// unauthenticated session — not just "no entries", which a wrongly
+	// SUCCESSFUL empty-result Search could also produce.
+	requireResultCode(t, "search after critical re-bind", err, ldapserver.LDAPResultInsufficientAccessRights)
 }
 
 // ---- 4. critical Search -> zero entries/code 12; later normal Search

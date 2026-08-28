@@ -1312,7 +1312,14 @@ func TestVerifyDebugLogRedaction_Expired(t *testing.T) {
 		"iat": time.Now().Add(-2 * time.Hour).Unix(),
 	})
 
-	assertVerifyDebugLogRedacted(t, v, token)
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's own expiry sentinel
+	// (oauth.ErrTokenExpired, oauth/errors.go — checked ahead of
+	// strict_jwt.go's own missing/malformed-exp-claim case for an exp that
+	// parses fine but is simply in the past) so an unrelated failure
+	// earlier in the pipeline could never satisfy this test.
+	require.Contains(t, logged, "OAuth token expired",
+		"the SDK's oauth.ErrTokenExpired text must appear in the debug event")
 }
 
 // TestVerifyDebugLogRedaction_NotBefore covers ValidateStrictJWT's nbf check.
@@ -1325,7 +1332,12 @@ func TestVerifyDebugLogRedaction_NotBefore(t *testing.T) {
 		"nbf": time.Now().Add(time.Hour).Unix(),
 	})
 
-	assertVerifyDebugLogRedacted(t, v, token)
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's nbf-check sentinel text
+	// (oauth/strict_jwt.go) so an unrelated failure earlier in the
+	// pipeline could never satisfy this test.
+	require.Contains(t, logged, "token not yet valid",
+		"the SDK's nbf-check error text must appear in the debug event")
 }
 
 // TestVerifyDebugLogRedaction_IssuedInFuture covers ValidateStrictJWT's iat
@@ -1339,7 +1351,12 @@ func TestVerifyDebugLogRedaction_IssuedInFuture(t *testing.T) {
 		"iat": time.Now().Add(time.Hour).Unix(),
 	})
 
-	assertVerifyDebugLogRedacted(t, v, token)
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's iat-check sentinel text
+	// (oauth/strict_jwt.go) so an unrelated failure earlier in the
+	// pipeline could never satisfy this test.
+	require.Contains(t, logged, "token issued in the future",
+		"the SDK's iat-check error text must appear in the debug event")
 }
 
 // TestVerifyDebugLogRedaction_UsernameMismatch covers internal/identity's
@@ -1354,7 +1371,12 @@ func TestVerifyDebugLogRedaction_UsernameMismatch(t *testing.T) {
 		"sub": "u-1", "email": "alice@example.com", "email_verified": true,
 	})
 
-	assertVerifyDebugLogRedacted(t, v, token)
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to internal/identity's own username-mismatch
+	// sentinel (ErrUsernameMismatch) so an unrelated failure earlier in the
+	// pipeline could never satisfy this test.
+	require.Contains(t, logged, "requested username does not match verified claim",
+		"identity.ErrUsernameMismatch's text must appear in the debug event")
 }
 
 // TestVerifyDebugLogRedaction_DeniedUsername covers internal/identity's
@@ -1373,7 +1395,12 @@ func TestVerifyDebugLogRedaction_DeniedUsername(t *testing.T) {
 
 	token := p.mintJWT(t, map[string]interface{}{"sub": verifyDebugRedactionUser})
 
-	assertVerifyDebugLogRedacted(t, v, token)
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to internal/identity's own reserved-username
+	// sentinel (ErrReservedUsername) so an unrelated failure earlier in the
+	// pipeline could never satisfy this test.
+	require.Contains(t, logged, "requested username is reserved and cannot be claimed externally",
+		"identity.ErrReservedUsername's text must appear in the debug event")
 }
 
 // TestVerifyDebugLogRedaction_UnverifiedEmail covers the SDK's generic
@@ -1392,7 +1419,12 @@ func TestVerifyDebugLogRedaction_UnverifiedEmail(t *testing.T) {
 		"email": "alice@example.com", "email_verified": false,
 	})
 
-	assertVerifyDebugLogRedacted(t, v, token)
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's own sentinel (oauth.ErrEmailNotVerified,
+	// returned unwrapped by internal/identity.Policy.Bind) so an unrelated
+	// failure earlier in the pipeline could never satisfy this test.
+	require.Contains(t, logged, "OAuth email is not verified",
+		"oauth.ErrEmailNotVerified's text must appear in the debug event")
 }
 
 // TestVerifyDebugLogRedaction_DisallowedDomain covers the SDK's generic
@@ -1413,7 +1445,12 @@ func TestVerifyDebugLogRedaction_DisallowedDomain(t *testing.T) {
 		"email": "alice@not-allowed.example.com", "email_verified": true,
 	})
 
-	assertVerifyDebugLogRedacted(t, v, token)
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's own sentinel (oauth.ErrUnauthorizedDomain,
+	// returned unwrapped by internal/identity.Policy.Bind) so an unrelated
+	// failure earlier in the pipeline could never satisfy this test.
+	require.Contains(t, logged, "OAuth identity domain is not allowed",
+		"oauth.ErrUnauthorizedDomain's text must appear in the debug event")
 }
 
 // TestJWKSHealthTracking asserts the underlying go-mcp-oauth-sdk Verifier records

@@ -194,9 +194,22 @@ func TestRedactionInventory_CredentialReachableLocalSinksHaveMarkerProof(t *test
 // TestRedactionInventory_ProofTestsExist fails when a manifest row names a
 // proof_test that doesn't exist anywhere in the repo's *_test.go corpus
 // (plan §5.2's "referenced proof test disappearing" failure condition).
-// external-pinned rows are exempt — see the manifest header and doc.go's
-// package comment for why sibling phase-5 sub-tasks' marker tests aren't
-// visible to this AST scan yet.
+// external-pinned rows are NOT exempt: this repo's own *_test.go corpus
+// (cmd/ch-jwt-verify, internal/verification) is exactly where T3/T6/T7's
+// marker/characterization proofs for those SDK-adjacent sinks live, and
+// those sub-tasks have since merged (see e.g.
+// TestJWKSRotation_PreBumpCharacterization,
+// TestVerifyDebugLogRedaction_MalformedHeaderMarker,
+// TestVerifyDebugLogRedaction_UnknownKidMarker) — an earlier version of
+// this test exempted external-pinned rows because those sibling sub-tasks
+// were still running on disjoint, not-yet-merged worktrees; that carve-out
+// is stale now that they are on this tree, and keeping it would let a
+// future rename/deletion of one of those proof tests go undetected for
+// exactly the rows plan §5.2 cares most about (credential_reachable=yes,
+// ownership=external-pinned). sdk_contract_test.go/release_gate_test.go
+// still separately guard the SDK-pinned VERSION and the
+// SDK_REDACTION_AUTHORIZATION_GATE itself; this test only checks that the
+// named proof functions exist.
 func TestRedactionInventory_ProofTestsExist(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -209,9 +222,6 @@ func TestRedactionInventory_ProofTestsExist(t *testing.T) {
 
 	var missing []string
 	for _, r := range loadRealManifest(t) {
-		if r.Scope == externalScope {
-			continue
-		}
 		if r.ProofTest == "" || r.ProofTest == "n/a" {
 			continue
 		}

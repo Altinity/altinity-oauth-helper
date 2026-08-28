@@ -137,9 +137,9 @@
 # NODES, LEAKSCAN_COMPOSE_SERVICES, LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS)
 # against a second `source` of this file within the same shell — this
 # matters in practice, not just in theory: scenarios/80-leak-scan.sh
-# sources this file itself (see its own header), so a caller such as a
-# future run-ha.sh that sources this file once and then reassigns these
-# three arrays to its HA-shaped values would otherwise have that
+# sources this file itself (see its own header), so a caller such as
+# run-ha.sh — which sources this file once and then reassigns these
+# three arrays to its HA-shaped values — would otherwise have that
 # reassignment silently wiped back to the phase-3 defaults the moment
 # 80-leak-scan.sh's own `source lib/leakscan.sh` line runs later in the
 # same shell. Guarding the assignment (rather than, say, only sourcing this
