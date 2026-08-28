@@ -50,14 +50,16 @@ oauth_run admin@example.com "$CH_LOCAL_ADMIN_PASSWORD" \
     "SELECT currentUser(), arrayStringConcat(arraySort(currentRoles()), ',')"
 oauth_expect_status 200 "scenario G (real local auth)"
 
-PHASE3_G_USER=""
-PHASE3_G_ROLES=""
-IFS=$'\t' read -r PHASE3_G_USER PHASE3_G_ROLES <<<"$CH_LAST_BODY"
-
-[ "$PHASE3_G_USER" = "admin@example.com" ] \
-    || die "scenario G: expected currentUser() exactly 'admin@example.com', got '$PHASE3_G_USER' ($(oauth_body_diagnostics))"
-[ "$PHASE3_G_ROLES" = "ch_local_admin" ] \
-    || die "scenario G: expected currentRoles() exactly 'ch_local_admin', got '$PHASE3_G_ROLES' ($(oauth_body_diagnostics))"
+# Whole-body exact match via the shared leak-safe helper (see "Do not use a
+# contains-only assertion" in acceptance scenario C, and oauth.sh's own
+# contract for oauth_expect_exact_body) rather than parsing CH_LAST_BODY
+# into intermediate shell variables ourselves: a `read` split here would
+# (a) let a response-derived value flow straight into a die() message —
+# exactly the credential-echo path oauth_body_diagnostics exists to avoid
+# — and (b) only ever examine the first line, silently accepting an
+# unexpected trailing row after a correct first line. A single whole-body
+# equality check rejects both malformed shapes at once.
+oauth_expect_exact_body $'admin@example.com\tch_local_admin' "scenario G (real local auth)"
 oauth_expect_not_contains "ch_readonly" "scenario G (real local auth)"
 
 log "scenario G: real local password -> currentUser()=admin@example.com, currentRoles()=ch_local_admin (exact match, no ch_readonly) — OK"

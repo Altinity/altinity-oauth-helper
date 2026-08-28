@@ -55,34 +55,17 @@ COMPOSE_PROJECT_NAME="ch-phase3"
 RUN_TMP_DIR="$(mktemp -d "$TMPDIR/ch-phase3-run.XXXXXX")"
 chmod 700 "$RUN_TMP_DIR"
 
-RUN_LOG="$RUN_TMP_DIR/run.log"
-# Tee our own stdout+stderr into a private, per-run transcript. This is
-# part of the "captured runner stdout/stderr" artifact acceptance scenario
-# I's JWT leak scan checks — nothing else in this file treats it specially.
-exec > >(tee -a "$RUN_LOG") 2>&1
-
-ENV_FILE="$RUN_TMP_DIR/compose.env"
-: >"$ENV_FILE"
-chmod 600 "$ENV_FILE"
-
-# PHASE3_CH_IMAGE selects which ClickHouse build this run targets, defaulted
-# to the issue's pinned 24.8 baseline. EXPECTED_CH_VERSION is derived from it
-# (the tag after the LAST colon — `##*:`, so a registry host with a port,
-# e.g. `ghcr.io:5000/…:24.8.x`, still yields the tag) rather than
-# hardcoded, so scenario A's own version-pin check and
-# lib/expectations.sh's per-build behavioral table (see that file) both
-# stay correct for whichever build PHASE3_CH_IMAGE names —
-# run-all-builds.sh drives this same script once per known build. Digest
-# references (`image@sha256:…`) carry no tag to compare version() against
-# and are rejected up front.
-PHASE3_CH_IMAGE="${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}"
-case "$PHASE3_CH_IMAGE" in
-*@*) die "PHASE3_CH_IMAGE='$PHASE3_CH_IMAGE' is a digest reference; this suite needs a TAGGED image whose tag equals the server's version() string (e.g. altinity/clickhouse-server:24.8.11.51285.altinitystable)" ;;
-*:*) : ;;
-*) die "PHASE3_CH_IMAGE='$PHASE3_CH_IMAGE' has no tag; this suite needs a TAGGED image whose tag equals the server's version() string" ;;
-esac
-EXPECTED_CH_VERSION="${PHASE3_CH_IMAGE##*:}"
-
+# The cleanup trap is installed IMMEDIATELY after RUN_TMP_DIR is allocated
+# — before the tee, the env file, or the PHASE3_CH_IMAGE validation below,
+# every one of which can now (or in the future) call die() — so that no
+# exit path between here and the end of the script can ever leave
+# RUN_TMP_DIR behind. `trap` only fires for exits that occur after it is
+# registered; a die() reached before this line would otherwise skip
+# cleanup entirely, contradicting the README's "deleted by the EXIT trap
+# on every exit path" guarantee. cleanup() only touches RUN_TMP_DIR and
+# COMPOSE_PROJECT_NAME (already set above) plus compose/log from
+# lib/common.sh (already sourced) — nothing below this point that cleanup
+# itself depends on.
 cleanup() {
     local rc=$?
     set +e
@@ -109,6 +92,36 @@ cleanup() {
     exit "$rc"
 }
 trap cleanup EXIT
+
+RUN_LOG="$RUN_TMP_DIR/run.log"
+# Tee our own stdout+stderr into a private, per-run transcript. This is
+# part of the "captured runner stdout/stderr" artifact acceptance scenario
+# I's JWT leak scan checks — nothing else in this file treats it specially.
+exec > >(tee -a "$RUN_LOG") 2>&1
+
+ENV_FILE="$RUN_TMP_DIR/compose.env"
+: >"$ENV_FILE"
+chmod 600 "$ENV_FILE"
+
+# PHASE3_CH_IMAGE selects which ClickHouse build this run targets, defaulted
+# to the issue's pinned 24.8 baseline. EXPECTED_CH_VERSION is derived from it
+# (the tag after the LAST colon — `##*:`, so a registry host with a port,
+# e.g. `ghcr.io:5000/…:24.8.x`, still yields the tag) rather than
+# hardcoded, so scenario A's own version-pin check and
+# lib/expectations.sh's per-build behavioral table (see that file) both
+# stay correct for whichever build PHASE3_CH_IMAGE names —
+# run-all-builds.sh drives this same script once per known build. Digest
+# references (`image@sha256:…`) carry no tag to compare version() against
+# and are rejected up front. This validation runs AFTER the cleanup trap is
+# installed (above) specifically so a die() here still tears down
+# RUN_TMP_DIR instead of leaking it.
+PHASE3_CH_IMAGE="${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}"
+case "$PHASE3_CH_IMAGE" in
+*@*) die "PHASE3_CH_IMAGE='$PHASE3_CH_IMAGE' is a digest reference; this suite needs a TAGGED image whose tag equals the server's version() string (e.g. altinity/clickhouse-server:24.8.11.51285.altinitystable)" ;;
+*:*) : ;;
+*) die "PHASE3_CH_IMAGE='$PHASE3_CH_IMAGE' has no tag; this suite needs a TAGGED image whose tag equals the server's version() string" ;;
+esac
+EXPECTED_CH_VERSION="${PHASE3_CH_IMAGE##*:}"
 
 log "run started; private per-run state under $RUN_TMP_DIR"
 
