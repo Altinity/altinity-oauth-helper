@@ -52,42 +52,46 @@ COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 # down what this run created.
 COMPOSE_PROJECT_NAME="ch-phase3"
 
-RUN_TMP_DIR="$(mktemp -d "$TMPDIR/ch-phase3-run.XXXXXX")"
-chmod 700 "$RUN_TMP_DIR"
-
-# ENV_FILE is established here, BEFORE the cleanup trap is installed below,
-# because cleanup() calls compose(), and compose() (lib/common.sh) expands
-# "--env-file $ENV_FILE" unconditionally. With `set -u` active, an EXIT
-# trap that fires while ENV_FILE is still unset (e.g. a SIGINT delivered in
-# the narrow window that used to exist between installing the trap and
-# assigning ENV_FILE) dies on "ENV_FILE: unbound variable" before reaching
-# `rm -rf "$RUN_TMP_DIR"`, leaking the run's temp directory on exactly the
-# kind of interrupt this trap exists to handle. Keep ENV_FILE's assignment
-# above the trap install, not just above the PHASE3_CH_IMAGE validation.
-ENV_FILE="$RUN_TMP_DIR/compose.env"
-: >"$ENV_FILE"
-chmod 600 "$ENV_FILE"
-
-# The cleanup trap is installed IMMEDIATELY after RUN_TMP_DIR/ENV_FILE are
-# established — before the tee or the PHASE3_CH_IMAGE validation below,
-# either of which can now (or in the future) call die() — so that no exit
-# path between here and the end of the script can ever leave RUN_TMP_DIR
-# behind. `trap` only fires for exits that occur after it is registered; a
-# die() reached before this line would otherwise skip cleanup entirely,
-# contradicting the README's "deleted by the EXIT trap on every exit path"
-# guarantee. cleanup() only touches RUN_TMP_DIR, ENV_FILE, and
-# COMPOSE_PROJECT_NAME (all already set above) plus compose/log from
-# lib/common.sh (already sourced) — nothing below this point that cleanup
-# itself depends on.
+# The cleanup trap is installed HERE — before RUN_TMP_DIR, ENV_FILE, or
+# anything else per-run exists — so that a SIGINT/SIGTERM delivered at ANY
+# point from here to the end of the script is guaranteed to run cleanup().
+# Previously the trap was installed only after RUN_TMP_DIR/ENV_FILE were
+# created (mktemp, chmod, `: >"$ENV_FILE"`, chmod), which left a real
+# pre-trap window: a SIGINT landing between `mktemp -d` and `trap cleanup
+# EXIT` exited the script (128+signal, e.g. 130 for SIGINT) with no trap
+# registered at all, leaking the `ch-phase3-run.*` directory `mktemp` had
+# already created. Installing the trap first closes that window entirely —
+# `trap` only fires for exits that occur after it is registered, so nothing
+# below this line can ever exit without cleanup() running.
+#
+# Because the trap now predates every piece of state cleanup() touches,
+# cleanup() itself must tolerate running with none, some, or all of that
+# state present (see the guards inside it below):
+#   - RUN_TMP_DIR/ENV_FILE may not exist yet (mktemp/`: >"$ENV_FILE"` below
+#     haven't run) — rm -rf and `compose down` are both skipped when unset.
+#   - COMPOSE_FILE and COMPOSE_PROJECT_NAME (above) are already fixed
+#     values with no per-run state of their own, so compose() itself is
+#     always safe to call PROVIDED ENV_FILE is set — compose() (lib/
+#     common.sh) expands "--env-file $ENV_FILE" unconditionally, and with
+#     `set -u` active that dies on "ENV_FILE: unbound variable" if ENV_FILE
+#     is still unset, which is exactly why `compose down` is gated on
+#     `[ -n "${ENV_FILE:-}" ]` rather than called unconditionally.
+#   - FALLBACK_NETWORKS_CREATED is not assigned until well after this
+#     point (see bring_up_fixture_fallback), so it is read with its
+#     existing `${FALLBACK_NETWORKS_CREATED:-0}` default.
+#   - log/compose/die come from lib/common.sh, already sourced above, so
+#     they exist no matter how early cleanup() fires.
 cleanup() {
     local rc=$?
     set +e
     log "cleanup: tearing down the compose project and removing generated material"
-    local down_rc
-    compose down -v --remove-orphans >/dev/null 2>&1
-    down_rc=$?
-    if [ "$down_rc" -ne 0 ]; then
-        log "cleanup: WARNING — 'compose down -v --remove-orphans' exited $down_rc; containers/volumes of project $COMPOSE_PROJECT_NAME may be left behind (check 'docker ps -a --filter name=${COMPOSE_PROJECT_NAME}')"
+    if [ -n "${ENV_FILE:-}" ]; then
+        local down_rc
+        compose down -v --remove-orphans >/dev/null 2>&1
+        down_rc=$?
+        if [ "$down_rc" -ne 0 ]; then
+            log "cleanup: WARNING — 'compose down -v --remove-orphans' exited $down_rc; containers/volumes of project $COMPOSE_PROJECT_NAME may be left behind (check 'docker ps -a --filter name=${COMPOSE_PROJECT_NAME}')"
+        fi
     fi
     if [ "${FALLBACK_NETWORKS_CREATED:-0}" = "1" ]; then
         # These two networks were created by hand in the sandbox
@@ -97,14 +101,27 @@ cleanup() {
         docker network rm ch-phase3-auth-net ch-phase3-cluster-net >/dev/null 2>&1 \
             || log "cleanup: WARNING — could not remove one or both hand-made fallback networks (ch-phase3-auth-net, ch-phase3-cluster-net); a later run tolerates pre-existing ones"
     fi
-    # RUN_LOG lives under RUN_TMP_DIR, so this also removes the transcript
-    # tee'd above, along with the per-run secret env file, any curl
-    # credential configs a scenario left behind, and diagnostics captured
-    # on a health-gate timeout.
-    rm -rf "$RUN_TMP_DIR"
+    if [ -n "${RUN_TMP_DIR:-}" ]; then
+        # RUN_LOG (once created) lives under RUN_TMP_DIR, so this also
+        # removes the transcript tee'd below, along with the per-run secret
+        # env file, any curl credential configs a scenario left behind, and
+        # diagnostics captured on a health-gate timeout.
+        rm -rf "$RUN_TMP_DIR"
+    fi
     exit "$rc"
 }
 trap cleanup EXIT
+
+# RUN_TMP_DIR/ENV_FILE are created only now, strictly AFTER the trap above
+# is already installed and live — see the comment above cleanup() for why
+# that ordering, and not the reverse, is what closes the pre-trap interrupt
+# window.
+RUN_TMP_DIR="$(mktemp -d "$TMPDIR/ch-phase3-run.XXXXXX")"
+chmod 700 "$RUN_TMP_DIR"
+
+ENV_FILE="$RUN_TMP_DIR/compose.env"
+: >"$ENV_FILE"
+chmod 600 "$ENV_FILE"
 
 RUN_LOG="$RUN_TMP_DIR/run.log"
 # Tee our own stdout+stderr into a private, per-run transcript. This is
@@ -121,8 +138,8 @@ exec > >(tee -a "$RUN_LOG") 2>&1
 # stay correct for whichever build PHASE3_CH_IMAGE names —
 # run-all-builds.sh drives this same script once per known build. Digest
 # references (`image@sha256:…`) carry no tag to compare version() against
-# and are rejected up front. This validation runs AFTER the cleanup trap is
-# installed (above) specifically so a die() here still tears down
+# and are rejected up front. This validation runs long after the cleanup
+# trap is installed (above) specifically so a die() here still tears down
 # RUN_TMP_DIR instead of leaking it.
 PHASE3_CH_IMAGE="${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}"
 case "$PHASE3_CH_IMAGE" in
