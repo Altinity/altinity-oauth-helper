@@ -480,8 +480,12 @@ validation helper:
    not deployed by this chart). The LDAP server identifier inside it is
    **fixed to `oauth_helper`** — it is not a value, so it can never drift
    from what the XML actually names. Structure, port `389`, bind DN shape,
-   `verification_cooldown=0`, `enable_tls=no`, and a direct (unnested)
-   `role_mapping` under `<ldap>` all mirror the proven working fixture at
+   `verification_cooldown=0`, `enable_tls=no`, `<search_limit>256</search_limit>`
+   (ClickHouse's own built-in default, made explicit — see the operator
+   guide's [Search-limit section][guide-search-limits] for what happens
+   when a caller's mapped-role count exceeds it, measured live), and a
+   direct (unnested) `role_mapping` under `<ldap>` all mirror the proven
+   working fixture at
    `integration/clickhouse/clickhouse/common/config.d/ldap.xml` — see the
    root README's [ClickHouse compatibility caveats][root-caveats] for what
    that fixture proved and did not prove per ClickHouse version.
@@ -539,3 +543,4 @@ to anything within its NetworkPolicy-permitted network path.
 
 [ch-ldap]: https://clickhouse.com/docs/operations/external-authenticators/ldap
 [root-caveats]: ../../README.md#wiring-clickhouse-to-ch-oauth-ldap
+[guide-search-limits]: ../../docs/ch-oauth-ldap-operator-guide.md#6-clickhouse-search-limits--measured-not-assumed

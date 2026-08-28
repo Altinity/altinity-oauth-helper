@@ -13,7 +13,10 @@ ClickHouse-facing configuration done.
 ## Prerequisites
 
 - Docker with Compose v2 (`docker compose`) or the standalone `docker-compose`
-  binary — `lib/common.sh` auto-detects whichever is available.
+  binary — `lib/common.sh` auto-detects whichever is available. The HA
+  harness (`run-ha.sh`, below) additionally uses a second, standalone
+  `docker-compose` file (`compose-ha.yml`) layered on top of the same
+  four-service base — no extra tooling beyond the same Compose binary.
 - `curl` on the host. **No host `clickhouse-client` is needed** — all
   administrative SQL runs inside the containers via `compose exec`.
 - `$TMPDIR`, if set, must point at a writable directory that is **not** `/tmp`
@@ -108,7 +111,9 @@ Host ports default to `18123` (origin HTTP) and `18080` (IdP); override with
 ## Scenarios
 
 `run.sh` runs the scenario-A preflight itself, then sources every
-`scenarios/*.sh` in lexical order.
+`scenarios/*.sh` in lexical order — scenarios A–I plus phase-5 scenario G'
+(Search-limit compatibility), filename-numbered `65-*.sh` so it sorts
+between G (`60-*.sh`) and H (`70-*.sh`) without renumbering either.
 
 | Scenario | File | Proves |
 |---|---|---|
@@ -119,9 +124,10 @@ Host ports default to `18123` (origin HTTP) and `18080` (IdP); override with
 | E — invalid/expired | `40-invalid-expired.sh` | Malformed and correctly-signed-but-expired tokens are rejected. |
 | F — role refresh | `50-role-refresh.sh` | A new token with different groups, on a new authentication, yields the new role set with nothing stale. |
 | G — local precedence | `60-local-precedence.sh` | A locally defined user (`admin@example.com`, not the helper-denied literal `admin`) wins over LDAP: her real password works, a valid external JWT does not. |
+| G' — Search-limit compatibility (phase 5) | `65-ldap-search-limits.sh` | A token mapping 257 roles against the fixture's `<search_limit>256</search_limit>`: the helper's own telemetry confirms `size_limit=256 entries=256 result=4` (sizeLimitExceeded), and ClickHouse's measured, per-build reaction to that non-success Search is enforced via `lib/expectations.sh`'s `search_limit_overflow_expectation_for` — see `docs/ch-oauth-ldap-operator-guide.md` §6 for what was actually measured. The 257 grant-less, origin-only roles this scenario creates are dropped before scenario H runs, regardless of outcome. |
 | H — distributed propagation (base-table oracle) | `70-distributed-propagation.sh` | With `push_external_roles_in_interserver_queries=0` the remote read is denied; with `=1` it succeeds and remote `system.query_log` shows `user = initial_user = alice@example.com`; the helper saw exactly `2 + OAUTH_RETRY_EXTRA_ATTEMPTS` new Binds — 2 in the common case, plus one per transient-transport retry the scenario itself made (remote never independently re-authenticated). Outcome is per build — see below. |
 | H' — view canary (expected fail) | `75-distributed-propagation-view.sh` | The same propagation through a **normal VIEW** on the remote side. Currently fails on every ClickHouse line tested (ClickHouse #116840); kept as an expected-fail canary so it flips loudly when upstream fixes it. |
-| I — JWT leak scan | `80-leak-scan.sh` | Scanner self-test (plant a real token, require detection), then every retained token is asserted absent from all three services' logs, both nodes' on-disk server logs, the runner transcript, and captured HTTP error bodies. |
+| I — JWT leak scan | `80-leak-scan.sh` | Scanner self-test (plant a real token, require detection), then every retained token (including G''s) is asserted absent from all three services' logs, both nodes' on-disk server logs, the runner transcript, and captured HTTP error bodies. |
 
 ## Per-build expectations and the two upstream ClickHouse bugs
 
@@ -166,6 +172,33 @@ success. Never silently accept a stale expectation. A build prefix with no
 recorded expectation also dies loudly; add an explicit entry before running
 against a new line. `run-all-builds.sh`'s `BUILDS` list must stay in sync with
 the prefixes `expectation_for` recognizes.
+
+## HA (phase 5)
+
+```bash
+./integration/clickhouse/run-ha.sh
+```
+
+A separate, manual, local gate (own `COMPOSE_PROJECT_NAME`,
+`compose-ha.yml` layered on the same base fixture, own
+`ch-phase5-ha-*-net` networks) that runs `ch-oauth-ldap` as two independent
+replicas behind an HAProxy TCP frontend (`ha/haproxy.cfg`) and proves, via a
+persistent same-socket session probe (`ha/session-probe/`) and mechanical
+HAProxy stats-socket observation — never a fixed sleep — the Docker-level
+half of issue #19's two-replica-no-shared-state Definition-of-Done clause:
+both replicas authenticate independently, no shared session/verifier/role
+cache is required for correctness, a killed replica's existing session
+fails outright rather than migrating to the survivor, fresh authentication
+keeps working through the survivor, and a recreated replica is re-admitted
+once DNS resolves it again.
+
+**What this does not prove:** real Kubernetes ClusterIP/EndpointSlice
+convergence, kube-proxy/CNI behavior, or any Kubernetes failover SLA — see
+`docs/ch-oauth-ldap-operator-guide.md` §8 for the exact claim boundary and
+the Kubernetes runbook to execute on a real cluster instead. It refuses to
+run if this suite's own `run.sh` fixture is already up on the same Docker
+daemon (same "one run per Docker daemon at a time" discipline as above,
+just under a distinct project/network name).
 
 ## Diagnostics
 
