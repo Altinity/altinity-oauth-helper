@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,51 +23,117 @@ import (
 // testIdP is an in-process OIDC test fixture, independent of any fixture
 // used by cmd/ch-jwt-verify's own tests — internal/verification is a
 // standalone package with its own compile-time and test boundary.
+//
+// The signing key/kid it currently serves under /jwks is mutable (guarded by
+// mu) rather than fixed at construction: redaction_matrix_test.go's
+// pre-bump JWKS-rotation characterization test (plan §4.3) needs to warm the
+// SDK Verifier's internal JWKS cache under one key, then swap the served key
+// live — via rotateKey — to prove the real "kid changed since last fetch"
+// re-fetch branch executes, not just a same-process construction-time
+// fixture swap.
 type testIdP struct {
 	server   *httptest.Server
-	signer   jose.Signer
-	keyID    string
 	issuer   string
 	audience string
+
+	mu   sync.Mutex
+	priv *rsa.PrivateKey
+	kid  string
 }
 
 func newTestIdP(t *testing.T) *testIdP {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	const kid = "test-key"
 
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: priv},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
-	)
-	require.NoError(t, err)
+	p := &testIdP{
+		priv:     priv,
+		kid:      "test-key",
+		audience: "ch-jwt-verify.test",
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		p.mu.Lock()
 		set := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
-			Key:       &priv.PublicKey,
-			KeyID:     kid,
+			Key:       &p.priv.PublicKey,
+			KeyID:     p.kid,
 			Algorithm: "RS256",
 			Use:       "sig",
 		}}}
+		p.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(set)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	return &testIdP{
-		server:   srv,
-		signer:   signer,
-		keyID:    kid,
-		issuer:   srv.URL,
-		audience: "ch-jwt-verify.test",
-	}
+	p.server = srv
+	p.issuer = srv.URL
+	return p
 }
 
-// mintJWT builds a token with claims layered over required defaults; pass
-// an explicit nil-valued key to omit a claim (e.g. claims["exp"] = nil).
+// signerFor builds a fresh jose.Signer for an explicit key/kid pair,
+// independent of p's currently-registered signing key — used both by
+// currentSigner (below) and by mintJWTWithKeyKid, which deliberately signs
+// with a key/kid combination that does NOT match what /jwks currently
+// serves (wrong-signature and unknown-kid marker cases in
+// redaction_matrix_test.go).
+func signerFor(t *testing.T, key *rsa.PrivateKey, kid string) jose.Signer {
+	t.Helper()
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: key},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
+	)
+	require.NoError(t, err)
+	return signer
+}
+
+// currentSigner returns a signer for p's currently-registered key/kid,
+// reading both fields under mu so it can't race a concurrent rotateKey (or
+// the /jwks handler, which reads the same fields per request).
+func (p *testIdP) currentSigner(t *testing.T) jose.Signer {
+	t.Helper()
+	p.mu.Lock()
+	key, kid := p.priv, p.kid
+	p.mu.Unlock()
+	return signerFor(t, key, kid)
+}
+
+// currentKID returns the kid p currently serves under /jwks.
+func (p *testIdP) currentKID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.kid
+}
+
+// rotateKey atomically replaces the key/kid p's /jwks endpoint serves,
+// simulating an IdP key rotation. It does not touch any cache already held
+// by an oauth.Verifier that previously fetched the old JWKS — that
+// cache/invalidate/re-fetch behavior is exactly what
+// redaction_matrix_test.go's rotation characterization test exercises.
+func (p *testIdP) rotateKey(newKey *rsa.PrivateKey, newKid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.priv = newKey
+	p.kid = newKid
+}
+
+// mintJWT builds a token with claims layered over required defaults, signed
+// with p's currently-registered key/kid; pass an explicit nil-valued key to
+// omit a claim (e.g. claims["exp"] = nil).
 func (p *testIdP) mintJWT(t *testing.T, claims map[string]interface{}) string {
+	t.Helper()
+	return p.mintJWTWithSigner(t, p.currentSigner(t), claims)
+}
+
+// mintJWTWithKeyKid is mintJWT's counterpart for signing with an explicit
+// key/kid pair rather than p's currently-registered one — see signerFor.
+func (p *testIdP) mintJWTWithKeyKid(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]interface{}) string {
+	t.Helper()
+	return p.mintJWTWithSigner(t, signerFor(t, key, kid), claims)
+}
+
+func (p *testIdP) mintJWTWithSigner(t *testing.T, signer jose.Signer, claims map[string]interface{}) string {
 	t.Helper()
 	final := map[string]interface{}{}
 	if _, ok := claims["iss"]; !ok {
@@ -88,7 +155,7 @@ func (p *testIdP) mintJWT(t *testing.T, claims map[string]interface{}) string {
 		}
 		final[k] = v
 	}
-	token, err := josejwt.Signed(p.signer).Claims(final).Serialize()
+	token, err := josejwt.Signed(signer).Claims(final).Serialize()
 	require.NoError(t, err)
 	return token
 }
