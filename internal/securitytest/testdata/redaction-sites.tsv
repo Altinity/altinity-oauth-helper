@@ -1,0 +1,204 @@
+# redaction-sites.tsv — phase-5 redaction-sink manifest (plan-19p5.md §5.2).
+#
+# Tab-separated. Lines starting with '#' and blank lines are ignored. The
+# first non-comment line must be exactly the header below, naming every
+# column in order. Every data row has exactly 12 fields.
+#
+# Columns:
+#   scope                 one of: cmd/ch-oauth-ldap, cmd/ch-jwt-verify,
+#                         internal/ldap, internal/verification,
+#                         internal/identity, internal/roles (AST-enumerated
+#                         first-party packages, plan §5.1),
+#                         third_party/ldapserver (separately AST-enumerated
+#                         vendored Logger.Print* sites, plan §5.1), or
+#                         external-pinned (declarative rows describing a
+#                         sink inside github.com/altinity/go-mcp-oauth-sdk —
+#                         not AST-discoverable from this repo's source, so
+#                         redaction_inventory_test.go exempts external-pinned
+#                         rows from the "stale row" and "proof test exists"
+#                         checks; sdk_contract_test.go/release_gate_test.go
+#                         are what actually keep these honest).
+#   path                  file path relative to the module root (or
+#                         "<module>@<version>" for an external-pinned row).
+#   function              enclosing Go function/method; "<package-init>"
+#                         for a package-level var/const initializer; a
+#                         nested closure appends ".closure" per nesting
+#                         level (e.g. "Verifier.Handler.closure").
+#   sink_kind             one of: zerolog-terminal, stdlib-log-print,
+#                         fmt-errorf, fmt-fprint-response, errors-new,
+#                         errors-join, ldap-diagnostic, http-error,
+#                         vendored-logger-print.
+#   fingerprint           the normalized-AST fingerprint doc.go's
+#                         normalizeExpr/normalizeArgs computes — literal
+#                         source text (never a line number), so it survives
+#                         reformatting/reordering but changes if the actual
+#                         message/argument shape changes. An empty field is
+#                         valid (a call with no fingerprintable literal
+#                         argument, e.g. third_party/ldapserver's two bare
+#                         `Logger.Printf("")` separator calls, which
+#                         collapse to one row here — one manifest row
+#                         legitimately covers more than one identical
+#                         discovered call site).
+#   credential_reachable  "yes" or "no": could attacker/credential/JWT
+#                         content realistically reach this sink's output?
+#   data_class            short free-text label for what data class (if
+#                         any) can reach the sink.
+#   ownership             "local" (this repo owns and can patch the source,
+#                         including the vendored third_party/ldapserver
+#                         fork) or "external-pinned" (go-mcp-oauth-sdk;
+#                         changes require a separately authorized SDK
+#                         release, per SDK_REDACTION_AUTHORIZATION_GATE).
+#   proof_type            "non-credential" (fixed literal/no attacker data
+#                         ever reaches it — no dynamic test required),
+#                         "structural" (safety follows from a call-graph
+#                         fact, e.g. "return value is always discarded" or
+#                         "field is operator config, not request data" —
+#                         backed by an existing behavioral test cited in
+#                         proof_test), "marker" (a dynamic test embeds a
+#                         distinguishing marker and asserts its absence —
+#                         REQUIRED whenever credential_reachable=yes and
+#                         ownership=local), or "characterization" (the
+#                         explicit pre-bump mode of plan §4.3 — evidence a
+#                         known external blocker is real, not a release
+#                         assertion).
+#   proof_test            comma-separated Go test function name(s) proving
+#                         the row, or "n/a" when credential_reachable=no
+#                         and no dynamic test is required. Every named test
+#                         must exist somewhere in the repo's *_test.go
+#                         corpus (checked by AST) UNLESS scope is
+#                         external-pinned, since T6/T7's marker tests for
+#                         the SDK-adjacent rows below live on sibling
+#                         phase-5 sub-task branches this AST inventory
+#                         cannot see until they are merged — the
+#                         intentional design is that merging those branches
+#                         without their tests would then be caught here as
+#                         a genuinely missing proof test.
+#   state                 "safe" (proven and currently non-disclosing),
+#                         "unreachable" (constructed but provably never
+#                         surfaces from this repo's current call graph), or
+#                         "blocked_external" (permitted ONLY for the exact
+#                         audited external-pinned SDK site while
+#                         SDK_REDACTION_AUTHORIZATION_GATE stays open).
+#   gate                  "-" for every row except a blocked_external row,
+#                         which must name its authorization gate exactly
+#                         (currently only SDK_REDACTION_AUTHORIZATION_GATE).
+#
+# Local sinks proven by an existing dynamic test are deliberately pointed
+# at tests that already exist on this branch today (TestProtocol_*,
+# TestAdversarial_*, TestVerify*, TestBind*, TestNew*, TestRoles*) rather
+# than at sibling phase-5 sub-tasks' not-yet-merged marker matrices
+# (T1 internal/ldap/controls.go, T2 search.go size/time-limit telemetry,
+# T3's boundary-matrix extensions, T6's verifier redaction/rotation matrix,
+# T7's cmd/ch-jwt-verify debug-log matrix): those sub-tasks run in their own
+# disjoint worktrees and are not visible here. Once they land, re-run
+# `go test ./internal/securitytest -run TestZZDump... ` — no such helper
+# ships here; regenerate by AST-discovering the merged tree — and extend
+# this manifest for whatever their production changes newly introduce
+# (T1's controls.go guard-rejection log, T2's finishSearch telemetry
+# fields). The "unmapped sink" check is exactly the mechanism designed to
+# force that reconciliation rather than silently drifting.
+scope	path	function	sink_kind	fingerprint	credential_reachable	data_class	ownership	proof_type	proof_test	state	gate
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	LoadConfig	fmt-errorf	lit:read config: %w	no	config-error-text	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	LoadConfig	fmt-errorf	lit:parse config: %w	no	config-error-text	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:oauth: either issuer or jwks_url must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: listen must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: user_base_dn must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: group_base_dn must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: user_rdn_attribute must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: invalid user_base_dn: %w	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: invalid group_base_dn: %w	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	main	zerolog-terminal	lit:ch-oauth-ldap exited with error	no	infra-error-text	local	structural	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	run	zerolog-terminal	lit:ch-oauth-ldap listening	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	run	zerolog-terminal	lit:ch-oauth-ldap shutting down	no	none	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	run	zerolog-terminal	lit:closing LDAP listener during shutdown	no	infra-error-text	local	structural	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	LoadConfig	fmt-errorf	lit:read config: %w	no	config-error-text	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	LoadConfig	fmt-errorf	lit:parse config: %w	no	config-error-text	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	validateConfig	fmt-errorf	lit:listen: either unix or tcp must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	validateConfig	fmt-errorf	lit:listen: unix and tcp are mutually exclusive	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	validateConfig	fmt-errorf	lit:oauth: either issuer or jwks_url must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	validateConfig	fmt-errorf	lit:oauth: expected_audiences must contain at least one non-empty value	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	validateConfig	fmt-errorf	lit:oauth: expected_audiences and audience (including CH_JWT_VERIFY_OAUTH_AUDIENCE) are mutually exclusive; conf...#c4fa8fb2	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	validateConfig	fmt-errorf	lit:oauth: audience is required (set oauth.audience or oauth.expected_audiences, RFC 8707 byte-exact match)	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/config.go	validateConfig	fmt-errorf	lit:oauth: verifier_leeway must not be negative	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/main.go	main	zerolog-terminal	lit:ch-jwt-verify exited with error	no	infra-error-text	local	structural	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/main.go	run.closure	fmt-fprint-response	lit:jwks fetch failing: %v,constref:lastErr	no	jwks-health-error-text	local	structural	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/main.go	run	zerolog-terminal	lit:ch-jwt-verify listening	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/main.go	run	zerolog-terminal	lit:ch-jwt-verify shutting down	no	none	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/verify.go	<package-init>	errors-new	lit:authentication failed	no	none	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/verify.go	Verifier.Handler.closure	http-error	lit:method not allowed	no	none	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/verify.go	Verifier.Handler.closure	zerolog-terminal	lit:verify: missing or malformed Basic Authorization header	no	none	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/verify.go	Verifier.Handler.closure	http-error	lit:missing or malformed Authorization	no	none	local	non-credential	n/a	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/verify.go	Verifier.Handler.closure	zerolog-terminal	lit:verify: rejected	yes	verification-error-text	local	marker	TestVerifyRejectionLogRedactsCredentialShapedRequestedUsername	safe	-
+cmd/ch-jwt-verify	cmd/ch-jwt-verify/verify.go	Verifier.Handler.closure	http-error	call:sel:Error()	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.handleBind	ldap-diagnostic	lit:only simple authentication is supported	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.handleBind	zerolog-terminal	lit:ldap bind rejected: unsupported authentication choice	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.handleBind	zerolog-terminal	lit:ldap bind succeeded	no	verified-identity-metadata	local	marker	TestProtocol_SentinelCredentialAbsentFromLogs	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.failBind	ldap-diagnostic	constref:invalidCredentialsDiagnostic	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.failBind	zerolog-terminal	lit:ldap bind failed	no	fixed-reason-literal	local	marker	TestProtocol_SentinelCredentialAbsentFromLogs	safe	-
+internal/ldap	internal/ldap/dn.go	NewUserBaseDN	errors-new	lit:ldap: user_rdn_attribute must not be empty	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/dn.go	NewUserBaseDN	fmt-errorf	lit:ldap: invalid user base DN %q: %w	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	fmt-errorf	lit:ldap: malformed bind DN: %w	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap: bind DN is not exactly one RDN below the configured user base	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap: bind DN leading RDN must carry exactly one attribute	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	fmt-errorf	lit:ldap: bind DN leading RDN attribute %q does not match configured user_rdn_attribute %q	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap: bind DN does not structurally match the configured user base	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap: bind DN leading attribute value is empty	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	NewGroupBaseDN	fmt-errorf	lit:ldap: invalid group base DN %q: %w	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/entry.go	NewGroupEntry	errors-new	lit:ldap: group base DN is nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/entry.go	NewGroupEntry	errors-new	lit:ldap: role must not be empty	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/search.go	connectionHandler.handleSearch	zerolog-terminal	lit:ldap search succeeded (zero roles)	no	role-metadata-safe	local	structural	TestProtocol_ZeroRoleBindGetsSuccessfulEmptySearch	safe	-
+internal/ldap	internal/ldap/search.go	connectionHandler.handleSearch	zerolog-terminal	lit:ldap search succeeded	no	role-metadata-safe	local	structural	TestProtocol_SearchReturnsFullSyntheticEntry	safe	-
+internal/ldap	internal/ldap/search.go	connectionHandler.failSearch	ldap-diagnostic	constref:searchNotAuthorizedDiagnostic	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/search.go	connectionHandler.failSearch	zerolog-terminal	lit:ldap search rejected	no	protocol-constant	local	structural	TestProtocol_WrongBaseScopeFilterTable	safe	-
+internal/ldap	internal/ldap/server.go	New	errors-new	lit:ldap: rootCtx must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/server.go	New	errors-new	lit:ldap: verifier must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/server.go	New	errors-new	lit:ldap: roleResolver must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/unsupported.go	logUnsupported	zerolog-terminal	lit:ldap operation rejected: unsupported	no	protocol-constant	local	structural	TestProtocol_UnsupportedOperationsFailClosed	safe	-
+internal/ldap	internal/ldap/unsupported.go	connectionHandler.handleNotFound	ldap-diagnostic	constref:unsupportedOperationDiagnostic	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/verification	internal/verification/verifier.go	New	fmt-errorf	lit:verification: at least one non-empty expected audience is required	no	config-value	local	structural	TestNewRejectsEmptyAudiences	safe	-
+internal/verification	internal/verification/verifier.go	New	fmt-errorf	lit:verification: verifier_leeway must not be negative	no	config-value	local	structural	TestNewRejectsNegativeLeeway	safe	-
+internal/identity	internal/identity/policy.go	<package-init>	errors-new	lit:identity: configured username claim is missing or empty	no	none	local	non-credential	n/a	safe	-
+internal/identity	internal/identity/policy.go	<package-init>	errors-new	lit:identity: requested username does not match verified claim	no	none	local	non-credential	n/a	safe	-
+internal/identity	internal/identity/policy.go	<package-init>	errors-new	lit:identity: requested username is reserved and cannot be claimed externally	no	none	local	non-credential	n/a	safe	-
+internal/identity	internal/identity/policy.go	NewPolicy	fmt-errorf	lit:identity: unknown match_mode %q (must be %q or %q)	no	config-value	local	structural	TestNewPolicyRejectsUnknownMatchMode	safe	-
+internal/identity	internal/identity/policy.go	Policy.resolveClaim	fmt-errorf	lit:%w: claim %q	no	config-value	local	structural	TestBindCustomUsernameClaimMissingFailsClosed	safe	-
+internal/identity	internal/identity/policy.go	Policy.Bind	fmt-errorf	lit:%w: claims are nil	no	none	local	structural	TestBindRejectsNilClaims	safe	-
+internal/identity	internal/identity/policy.go	Policy.Bind	fmt-errorf	lit:%w: requested user %q does not match %s claim	yes	redacted-username	local	marker	TestBindUsernameMismatchErrorRedactsCredentialShapedRequestedUsername	safe	-
+internal/identity	internal/identity/policy.go	Policy.Bind	fmt-errorf	lit:%w: %q	yes	redacted-username	local	marker	TestBindReservedUsernameErrorRedactsCredentialShapedRequestedUsername	safe	-
+internal/roles	internal/roles/pipeline.go	<package-init>	errors-new	lit:roles: groups claim is present but malformed	no	none	local	non-credential	n/a	safe	-
+internal/roles	internal/roles/pipeline.go	New	fmt-errorf	lit:roles: invalid roles_filter regex: %w	no	config-value	local	structural	TestRolesInvalidFilterRegexFailsConstruction	safe	-
+internal/roles	internal/roles/pipeline.go	New	fmt-errorf	lit:roles: invalid roles_transform: %w	no	config-value	local	structural	TestRolesTransformInvalidSyntaxFailsConstruction	safe	-
+internal/roles	internal/roles/pipeline.go	Pipeline.extractGroups	fmt-errorf	lit:%w: claim %q contains a non-string element	no	config-value	local	structural	TestRolesRejectsMixedTypeArray	safe	-
+internal/roles	internal/roles/pipeline.go	Pipeline.extractGroups	fmt-errorf	lit:%w: claim %q is not a string array	no	config-value	local	structural	TestRolesRejectsScalarGroupsClaim	safe	-
+internal/roles	internal/roles/pipeline.go	parseSedTransform	fmt-errorf	lit:must have the form s<delim>pattern<delim>replacement<delim>flags	no	config-value	local	structural	TestRolesTransformInvalidSyntaxFailsConstruction	safe	-
+internal/roles	internal/roles/pipeline.go	parseSedTransform	fmt-errorf	lit:delimiter must not be a backslash	no	config-value	local	structural	TestRolesTransformInvalidSyntaxFailsConstruction	safe	-
+internal/roles	internal/roles/pipeline.go	parseSedTransform	fmt-errorf	lit:duplicate flag %q	no	config-value	local	structural	TestRolesTransformDuplicateFlagFailsConstruction	safe	-
+internal/roles	internal/roles/pipeline.go	parseSedTransform	fmt-errorf	lit:unsupported flag %q	no	config-value	local	structural	TestRolesTransformUnsupportedFlagFailsConstruction	safe	-
+internal/roles	internal/roles/pipeline.go	parseSedTransform	fmt-errorf	lit:invalid pattern: %w	no	config-value	local	structural	TestRolesTransformInvalidRegexFailsConstruction	safe	-
+internal/roles	internal/roles/pipeline.go	splitOnUnescapedDelim	fmt-errorf	lit:expected %d delimiter-separated fields, got %d	no	config-value	local	structural	TestRolesTransformMissingFieldFailsConstruction	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.callOnClose.closure	vendored-logger-print	lit:panic in OnClientClose for client [%d]: %v,sel:Numero,constref:r	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve.closure	vendored-logger-print	lit:client %d write error, closing connection: %s,sel:Numero,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Erreur OnNewConnection: %s,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Sorry client %d, i can not wait anymore (reading timeout) ! %s,sel:Numero,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Error readMessagePacket: %s,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Error reading Message : %s %x,call:sel:Error(),sel:bytes	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:<<< %d - %s - hex=%x,sel:Numero,call:sel:ProtocolOpName(),constref:messagePacket	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client %d close(),sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client %d close() - stop reading from client,sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:Client %d close() - sent abandon signal to request[messageID = %d],sel:Numero,constref:messageID	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client %d close() - Abandon signal sent to processors,sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client [%d] request processors ended,sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client [%d] connection closed,sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.writeMessage	vendored-logger-print	lit:>>> %d - %s - hex=%x,sel:Numero,call:sel:ProtocolOpName(),call:sel:Bytes()	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/route.go	RouteMux.ServeLDAP	vendored-logger-print	lit:	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/route.go	RouteMux.ServeLDAP	vendored-logger-print	lit: ROUTE MATCH ; %s,sel:label	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.ListenAndServe	vendored-logger-print	lit:Listening on %s ,constref:addr	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.serve	vendored-logger-print	lit:Stopping server	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.serve	vendored-logger-print	constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.serve	vendored-logger-print	lit:Connection client [%d] from %s accepted,sel:Numero,call:sel:String()	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.Stop	vendored-logger-print	lit:gracefully closing client connections...	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.Stop	vendored-logger-print	lit:all clients connection closed	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+external-pinned	go-mcp-oauth-sdk@v0.2.0	parseAndFetchKeys	zerolog-terminal	oauth/jwt.go:117 log.Info().Str("kid", keyID).Msg(...)	yes	jwt-content	external-pinned	characterization	TestJWKSRotation_PreBumpCharacterization	blocked_external	SDK_REDACTION_AUTHORIZATION_GATE
+external-pinned	go-mcp-oauth-sdk@v0.2.0	ValidateStrictJWT	fmt-errorf	lit:unable to parse or validate JWT header	yes	jwt-header-sanitized-text	external-pinned	marker	TestVerifyDebugLogRedaction_MalformedHeaderMarker	safe	-
+external-pinned	go-mcp-oauth-sdk@v0.2.0	ValidateStrictJWT	fmt-errorf	lit:failed to resolve a JWK for the token's key id: %w	yes	jwt-kid-sanitized-text	external-pinned	marker	TestVerifyDebugLogRedaction_UnknownKidMarker	safe	-
+external-pinned	go-mcp-oauth-sdk@v0.2.0	fetchJWKSet	zerolog-terminal	lit:can't close %s response body	no	jwks-uri-and-error-no-bearer	external-pinned	structural	n/a	unreachable	-
