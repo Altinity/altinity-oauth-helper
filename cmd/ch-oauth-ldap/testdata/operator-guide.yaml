@@ -1,0 +1,51 @@
+# operator-guide.yaml — the exact, valid production ch-oauth-ldap
+# configuration excerpted verbatim into docs/ch-oauth-ldap-operator-guide.md
+# (see plan-19p5.md §21.3/§21.4, A3). This file is loaded through the real
+# production LoadConfig (cmd/ch-oauth-ldap/config.go) by
+# TestOperatorGuideYAML_LoadsThroughProductionLoadConfig in config_test.go,
+# and is separately strict-decoded with yaml.NewDecoder(...).KnownFields(true)
+# by TestOperatorGuideYAML_StrictKnownFields, so any drift between this file
+# and the Config struct's known keys is caught in CI-run tests, not only by
+# eyeballing the docs.
+#
+# It intentionally exercises every knob called out by T13a: expected_issuer +
+# jwks_url both set, multiple expected_audiences, username_claim,
+# groups_claim, verifier_leeway/jwks_cache_lifetime/token_cache_lifetime, a
+# full identity policy, roles_mapping + a restrictive roles_filter + a
+# non-empty roles_transform, and the full ldap block.
+oauth:
+  expected_issuer: https://tenant.example.auth0.com/
+  jwks_url: https://tenant.example.auth0.com/.well-known/jwks.json
+  expected_audiences:
+    - clickhouse
+    - mcp
+  username_claim: email
+  groups_claim: roles
+  verifier_leeway: 60s
+  required_scopes: []
+  jwks_cache_lifetime: 5m
+  token_cache_lifetime: 30s
+
+identity:
+  username_match: lowercase_equal
+  require_email_verified: true
+  allowed_email_domains:
+    - example.com
+  allowed_hosted_domains: []
+  denied_usernames:
+    - default
+    - admin
+
+roles:
+  roles_mapping:
+    idp-readers: ch_readonly
+    idp-engineers: ch_engineer
+  roles_filter: '^ch_[A-Za-z0-9_]+$'
+  roles_transform: 's/^ch_//'
+
+ldap:
+  listen: ':389'
+  user_base_dn: 'ou=users,dc=altinity,dc=internal'
+  group_base_dn: 'ou=groups,dc=altinity,dc=internal'
+  user_rdn_attribute: uid
+  role_cn_prefix: 'clickhouse_'
