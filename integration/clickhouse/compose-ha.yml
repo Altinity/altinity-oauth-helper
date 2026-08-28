@@ -1,0 +1,176 @@
+# integration/clickhouse/compose-ha.yml
+#
+# Phase-5 Docker HA fixture (issue #19 phase 5, plan §15-§19): the same
+# real-ClickHouse topology as compose.yml, except `ch-oauth-ldap` is now an
+# HAProxy TCP frontend load-balancing across TWO independently running
+# `ch-oauth-ldap` replicas (ch-oauth-ldap-a, ch-oauth-ldap-b) rather than a
+# single helper process. Nothing about ClickHouse's own configuration
+# changes: clickhouse/common/config.d/ldap.xml still points at the hostname
+# `ch-oauth-ldap`, which now resolves to HAProxy instead of a lone helper —
+# ClickHouse never learns HA is happening.
+#
+# Do not run this file directly with a bare `docker compose up`. run-ha.sh
+# owns per-run secret generation, the rootless-port and phase-3-collision
+# preflights, the mechanical health/stats gate, RBAC bootstrap, the
+# persistent session-probe flow, and teardown; invoking this compose file on
+# its own skips all of that.
+#
+# See run.sh/compose.yml for the two ClickHouse services and their shared
+# config-mount rationale (unchanged here) — this file only adds/changes the
+# helper side. `PHASE3_CLUSTER_SECRET` (env var name, not renamed) is what
+# clickhouse/common/config.d/remote_servers.xml's `<secret from_env=...>`
+# literally names, and both ClickHouse services here mount that SAME
+# unmodified config.d directory, so the env var name must not drift from
+# it. `PHASE3_CH_IMAGE` is likewise unchanged so run-ha.sh can reuse
+# lib/expectations.sh's build-derived EXPECTED_CH_VERSION machinery exactly
+# as run.sh does, even though this fixture does not itself run the
+# per-build distributed-propagation scenarios (H/H').
+#
+# The HAProxy image is pinned by DIGEST, not a floating tag — see
+# ha/haproxy.cfg's own header for how that digest was resolved, and
+# tests/cases/ha-fallback-parity.sh for the test asserting run-ha.sh's
+# sandbox-fallback template embeds the IDENTICAL digest.
+
+services:
+  synthetic-idp:
+    build:
+      context: ../..
+      dockerfile: integration/clickhouse/Dockerfile
+    image: altinity-oauth-helper-phase3-helper:local
+    command: ["/bin/synthetic-idp"]
+    environment:
+      ISSUER: http://synthetic-idp/
+      AUDIENCE: clickhouse
+      LISTEN: :80
+    networks:
+      - auth-net
+    ports:
+      - "127.0.0.1:${PHASE3_IDP_PORT:-18080}:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  # Two independent replicas of the SAME production ch-oauth-ldap binary and
+  # the SAME helper config (integration/clickhouse/helper/config.yaml,
+  # unmodified) — this is the whole HA claim under test: neither replica
+  # shares process memory, a session store, or a verifier/role cache with
+  # the other (see plan §19 and §25's "B needs none of A's memory" row).
+  ch-oauth-ldap-a:
+    build:
+      context: ../..
+      dockerfile: integration/clickhouse/Dockerfile
+    image: altinity-oauth-helper-phase3-helper:local
+    command: ["/bin/ch-oauth-ldap", "--config", "/etc/ch-oauth-ldap/config.yaml"]
+    volumes:
+      - ./helper/config.yaml:/etc/ch-oauth-ldap/config.yaml:ro
+    networks:
+      - auth-net
+    depends_on:
+      synthetic-idp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "389"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  ch-oauth-ldap-b:
+    build:
+      context: ../..
+      dockerfile: integration/clickhouse/Dockerfile
+    image: altinity-oauth-helper-phase3-helper:local
+    command: ["/bin/ch-oauth-ldap", "--config", "/etc/ch-oauth-ldap/config.yaml"]
+    volumes:
+      - ./helper/config.yaml:/etc/ch-oauth-ldap/config.yaml:ro
+    networks:
+      - auth-net
+    depends_on:
+      synthetic-idp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "389"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  # HAProxy TCP frontend. Compose service name stays "ch-oauth-ldap" so the
+  # UNCHANGED clickhouse/common/config.d/ldap.xml (which names
+  # <host>ch-oauth-ldap</host>) transparently resolves to this frontend
+  # instead of a lone helper. Runs as the image's own unprivileged `haproxy`
+  # user (no root/capability workaround) — see run-ha.sh's rootless-port
+  # preflight, and ha/haproxy.cfg's header for the pinned digest and the
+  # resolver/health-check rationale.
+  ch-oauth-ldap:
+    image: haproxy@sha256:ac78ddd4921742360f533c28d24ecd0a003ea8065e2bfd5697c565ce1427f4b0
+    volumes:
+      - ./ha/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - auth-net
+    depends_on:
+      ch-oauth-ldap-a:
+        condition: service_healthy
+      ch-oauth-ldap-b:
+        condition: service_healthy
+    healthcheck:
+      # Mechanically defined readiness via the runtime stats UNIX socket
+      # (socat, already present in the Official haproxy image) rather than a
+      # TCP probe of :389 itself — a bare TCP accept on the frontend says
+      # nothing about backend state, which is exactly what run-ha.sh's own
+      # `show stat` gate checks separately and explicitly.
+      test: ["CMD-SHELL", "echo 'show info' | socat stdio UNIX-CONNECT:/var/lib/haproxy/haproxy.sock | grep -q '^Uptime_sec'"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  clickhouse-origin:
+    image: ${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}
+    volumes:
+      - ./clickhouse/common/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/common/users.d:/etc/clickhouse-server/users.d:ro
+    environment:
+      PHASE3_CLUSTER_SECRET: ${PHASE3_CLUSTER_SECRET:?PHASE3_CLUSTER_SECRET must be set by run-ha.sh (never invoke this compose file directly)}
+    networks:
+      - auth-net
+      - cluster-net
+    ports:
+      - "127.0.0.1:${PHASE3_CH_HTTP_PORT:-18123}:8123"
+    depends_on:
+      ch-oauth-ldap:
+        condition: service_healthy
+      synthetic-idp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  clickhouse-remote:
+    image: ${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}
+    volumes:
+      - ./clickhouse/common/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/common/users.d:/etc/clickhouse-server/users.d:ro
+    environment:
+      PHASE3_CLUSTER_SECRET: ${PHASE3_CLUSTER_SECRET:?PHASE3_CLUSTER_SECRET must be set by run-ha.sh (never invoke this compose file directly)}
+    # Deliberately no ports:, and deliberately not on auth-net — matches
+    # compose.yml's phase-3 topology exactly (see that file's own header).
+    networks:
+      - cluster-net
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+networks:
+  # Explicit, HA-run-scoped literal names distinct from compose.yml's
+  # ch-phase3-* names (see run-ha.sh's phase-3-collision preflight and
+  # "Concurrency: one run per Docker daemon at a time" in README.md) so a
+  # phase-3 and phase-5-HA run can never collide on the same Docker daemon
+  # even if someone ignores the preflight's own explicit refusal.
+  auth-net:
+    name: ch-phase5-ha-auth-net
+  cluster-net:
+    name: ch-phase5-ha-cluster-net
