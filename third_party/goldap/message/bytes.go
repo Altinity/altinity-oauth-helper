@@ -7,6 +7,24 @@ import (
 type Bytes struct {
 	offset int
 	bytes  []byte
+
+	// filterDepth counts how many Filter AND/OR/NOT levels already
+	// enclose whatever this *Bytes region is about to decode. It is zero
+	// for every *Bytes value that is not itself inside a Filter's AND/OR/
+	// NOT child region (every ordinary construction of a Bytes value in
+	// this package leaves it at its zero value); readFilterAnd/
+	// readFilterOr/readFilterNot (filter_and.go/filter_or.go/
+	// filter_not.go) are the only code that reads or advances it, each
+	// propagating bytes.filterDepth+1 into the sub-*Bytes region it hands
+	// its own readComponents callback. See maxFilterNestingDepth in
+	// filter.go and third_party/goldap/PATCHES.md's third item for why
+	// this exists: a Filter's AND/OR/NOT alternatives recurse into
+	// readFilter with no depth bound of their own otherwise, and every
+	// level of that recursion re-wraps the error returned by a failing
+	// descendant, which made a single well-under-the-64-KiB-cap message
+	// with ~1000 levels of nested AND filters allocate on the order of
+	// 150 MB just decoding the resulting error chain.
+	filterDepth int
 }
 
 func (bytes *Bytes) getBytes() []byte {
@@ -134,7 +152,6 @@ func (bytes *Bytes) writeBytes(b []byte) (size int) {
 	return
 }
 
-//
 // Parse tag, length and read the a primitive value
 // Supported types are:
 // - boolean
@@ -147,7 +164,6 @@ func (bytes *Bytes) writeBytes(b []byte) (size int) {
 // - class: the expected class value(classUniversal, classApplication, classContextSpecific)
 // - tag: the expected tag value
 // - typeTag: the real primitive type to parse (tagBoolean, tagInteger, tagEnym, tagUTF8String, tagOctetString)
-//
 func (bytes *Bytes) ReadPrimitiveSubBytes(class int, tag int, typeTag int) (value interface{}, err error) {
 	// Check tag
 	tagAndLength, err := bytes.ParseTagAndLength()

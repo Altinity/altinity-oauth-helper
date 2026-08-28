@@ -630,6 +630,56 @@ func captureRealStdout(t *testing.T) func() string {
 	return stop
 }
 
+// explicitFalseControlOID is an arbitrary OID this server does not
+// implement, used only by rawSentinelBindWithExplicitFalseControl below —
+// its exact value never matters (the server implements no controls of its
+// own to distinguish by OID), only that a control element is present at
+// all. Named distinctly from any similarly-purposed OID constant that may
+// exist elsewhere in this package, since this file must stay self-contained
+// within its own declared scope.
+const explicitFalseControlOID = "1.2.3.4.5.6.999.9"
+
+// rawSentinelBindWithExplicitFalseControl BER-encodes one complete
+// LDAPMessage: messageID + a simple BindRequest(dn, token) + one [0]
+// Controls element carrying explicitFalseControlOID with its criticality
+// BOOLEAN EXPLICITLY present and set to FALSE.
+//
+// LDAP's restricted BER (RFC 4511's BOOLEAN encoding note) requires a field
+// at its default value to be omitted entirely — an ordinary non-critical
+// control (criticality defaults to FALSE) must never encode the BOOLEAN at
+// all. Encoding it explicitly anyway is itself malformed:
+// third_party/goldap/message/control.go's readComponents reads the BOOLEAN
+// whenever its tag is present, and rejects the ENTIRE LDAPMessage with
+// "criticality default value FALSE should not be specified" the moment the
+// decoded value is false. That decode failure happens entirely inside the
+// vendored goldap dependency, invoked from
+// third_party/ldapserver/client.go's readMessagePacket loop, before any
+// production route handler in this package — including any control-policy
+// guard that may sit in front of routing — ever sees the message; see that
+// loop's `Logger.Printf("Error reading Message : %s\n\t%x", ...); continue`
+// (client.go ~line 299), which is the vendored decode-error logger site
+// this helper exists to exercise (plan §5.9/§7.5/§6/§23.6). The loop
+// continues to the connection's next request rather than closing it, which
+// is why a subsequent valid Bind on the SAME connection must still succeed.
+func rawSentinelBindWithExplicitFalseControl(messageID int, dn, token string) []byte {
+	bindReq := ber.Encode(ber.ClassApplication, ber.TypeConstructed, 0, nil, "BindRequest")
+	bindReq.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 3, "version"))
+	bindReq.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, dn, "name"))
+	bindReq.AppendChild(ber.NewString(ber.ClassContext, ber.TypePrimitive, 0, token, "simple"))
+
+	ctrl := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "control")
+	ctrl.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, explicitFalseControlOID, "controlType"))
+	ctrl.AppendChild(ber.NewBoolean(ber.ClassUniversal, ber.TypePrimitive, ber.TagBoolean, false, "criticality"))
+	controls := ber.Encode(ber.ClassContext, ber.TypeConstructed, 0, nil, "Controls")
+	controls.AppendChild(ctrl)
+
+	env := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Message")
+	env.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "messageID"))
+	env.AppendChild(bindReq)
+	env.AppendChild(controls)
+	return env.Bytes()
+}
+
 // TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel binds with a
 // unique sentinel JWT/password while capturing BOTH the application zerolog
 // writer AND the real OS stdout file descriptor, and asserts the sentinel
@@ -637,10 +687,32 @@ func captureRealStdout(t *testing.T) func() string {
 // plausibly triggers the dependency's own packet-hex logger) appears in
 // neither. See captureRealStdout's doc comment for why stdout capture must
 // be fd-level to actually prove the dependency's packet logger is disabled.
+//
+// Extended for phase-5 §5.9/§7.5/§6/§23.6 (do not build a second server
+// elsewhere — this is the one production test server every "vendored logger
+// stays disabled" proof in the manifest points to): it additionally asserts
+// the package-level ldapserver.Logger identity immediately after
+// startTestServer's own New() call and again at the very end, and drives a
+// third, sentinel-bearing raw connection through the explicit-FALSE
+// malformed-control boundary (§7.5) — a hand-encoded Bind whose password is
+// the sentinel and whose attached control explicitly encodes BOOLEAN FALSE
+// for criticality, which goldap's decoder rejects before any production
+// route handler ever runs (see rawSentinelBindWithExplicitFalseControl
+// above), exercising the vendored client.go:299 "%x" decode-error
+// Logger.Printf — followed by a valid Bind on that SAME connection, which
+// must still succeed.
 func TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel(t *testing.T) {
 	const sentinelToken = "SENTINEL-ADV-8e21c4f0-do-not-log-me"
 	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
 	addr, _, _ := startTestServer(t, newFakeVerifier(acct), newFakeRoles(acct))
+
+	// (1) DiscardingLogger identity, checked immediately after New (called
+	// synchronously inside startTestServer, above) — see server.go's New,
+	// which unconditionally reassigns this package-level dependency global
+	// before returning.
+	if ldapserver.Logger != ldapserver.DiscardingLogger {
+		t.Fatalf("ldapserver.Logger != ldapserver.DiscardingLogger immediately after New — the vendored dependency's own packet-hex logger is not disabled")
+	}
 
 	var appLog bytes.Buffer
 	prevLogger := log.Logger
@@ -649,17 +721,69 @@ func TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel(t *testing.T) 
 
 	stopCapture := captureRealStdout(t)
 
-	// The failing case whose password IS the sentinel: the case most likely
-	// to leak, since a naive implementation might log the raw verifier-call
-	// arguments on failure.
+	// (2) The failing case whose password IS the sentinel: the case most
+	// likely to leak, since a naive implementation might log the raw
+	// verifier-call arguments on failure.
 	conn := dialTest(t, addr)
 	requireInvalidCredentials(t, "sentinel bind", bindAs(conn, protoBindDN("alice"), sentinelToken))
 
-	// A successful Bind using the real password, to prove the dependency's
-	// own hex-packet logger (client.go's "<<< ... hex=%x" on every inbound
-	// message, which necessarily contains the password) is disabled too.
+	// (3) A successful Bind using the real password, to prove the
+	// dependency's own hex-packet logger (client.go's "<<< ... hex=%x" on
+	// every inbound message, which necessarily contains the password) is
+	// disabled too.
 	conn2 := dialTest(t, addr)
 	requireSuccess(t, "real bind", bindAs(conn2, protoBindDN("alice"), "jwt-alice"))
+
+	// (4) Explicit-FALSE malformed boundary, on a fresh third connection: a
+	// raw Bind whose password is the sentinel and whose attached control
+	// explicitly encodes criticality=FALSE. The decode fails before any
+	// production handler runs, so no response is ever sent — a bounded read
+	// deadline distinguishes that from "the server is still processing it".
+	rawConn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial (explicit-FALSE malformed): %v", err)
+	}
+	defer rawConn.Close()
+
+	malformed := rawSentinelBindWithExplicitFalseControl(1, protoBindDN("alice"), sentinelToken)
+	if _, err := rawConn.Write(malformed); err != nil {
+		t.Fatalf("write explicit-FALSE malformed sentinel bind: %v", err)
+	}
+	rawConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	noRespBuf := make([]byte, 16)
+	n, readErr := rawConn.Read(noRespBuf)
+	if n != 0 {
+		t.Fatalf("got %d unexpected response bytes for the malformed explicit-FALSE message, want none", n)
+	}
+	if netErr, ok := readErr.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("Read after explicit-FALSE malformed message returned (n=%d, err=%v), want a read-deadline timeout (no response ever sent)", n, readErr)
+	}
+
+	// (5) The same connection remains usable: the vendored decoder loops to
+	// the next request rather than closing the connection (see
+	// rawSentinelBindWithExplicitFalseControl's doc comment) — a subsequent
+	// valid Bind on it, reusing this file's own rawSimpleBindMessage helper,
+	// must succeed.
+	if _, err := rawConn.Write(rawSimpleBindMessage(2, protoBindDN("alice"), "jwt-alice")); err != nil {
+		t.Fatalf("write valid bind after explicit-FALSE malformed message: %v", err)
+	}
+	rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	respPkt, err := ber.ReadPacket(rawConn)
+	if err != nil {
+		t.Fatalf("read bind response after explicit-FALSE malformed message: %v", err)
+	}
+	if len(respPkt.Children) < 2 || len(respPkt.Children[1].Children) < 1 {
+		t.Fatalf("bind response after explicit-FALSE malformed message: malformed packet %+v", respPkt)
+	}
+	if gotID := respPkt.Children[0].Value.(int64); gotID != 2 {
+		t.Fatalf("bind response after explicit-FALSE malformed message: messageID = %d, want 2", gotID)
+	}
+	if gotTag := respPkt.Children[1].Tag; gotTag != 1 {
+		t.Fatalf("bind response after explicit-FALSE malformed message: op tag = %d, want 1 (BindResponse)", gotTag)
+	}
+	if gotCode := respPkt.Children[1].Children[0].Value.(int64); gotCode != int64(ldapserver.LDAPResultSuccess) {
+		t.Fatalf("bind after explicit-FALSE malformed message: resultCode = %d, want %d (success) — same connection must remain usable", gotCode, ldapserver.LDAPResultSuccess)
+	}
 
 	stdout := stopCapture()
 
@@ -677,6 +801,14 @@ func TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel(t *testing.T) 
 	if strings.Contains(appLog.String(), "jwt-alice") || strings.Contains(stdout, "jwt-alice") ||
 		strings.Contains(appLog.String(), passwordHex) || strings.Contains(stdout, passwordHex) {
 		t.Fatalf("real bind password leaked into captured output:\napp log:\n%s\nstdout:\n%s", appLog.String(), stdout)
+	}
+
+	// (6) The logger identity must still be DiscardingLogger at the end —
+	// nothing this test did (including the malformed-decode path, which
+	// exercises the vendored Logger.Printf call directly) may have re-armed
+	// it.
+	if ldapserver.Logger != ldapserver.DiscardingLogger {
+		t.Fatalf("ldapserver.Logger != ldapserver.DiscardingLogger at end of test — something re-armed the vendored dependency's packet logger")
 	}
 }
 

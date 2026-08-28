@@ -45,7 +45,18 @@ func (filterAnd FilterAnd) write(bytes *Bytes) (size int) {
 }
 
 func readFilterAnd(bytes *Bytes) (filterand FilterAnd, err error) {
-	err = bytes.ReadSubBytes(classContextSpecific, TagFilterAnd, filterand.readComponents)
+	// See maxFilterNestingDepth (filter.go) and bytes.filterDepth
+	// (bytes.go): reject immediately, without reading this AND's content
+	// or recursing into it at all, once the nesting bound is reached —
+	// bounded error generation, not just bounded recursion.
+	if bytes.filterDepth >= maxFilterNestingDepth {
+		err = LdapError{fmt.Sprintf("readFilterAnd: filter nesting exceeds maximum depth %d", maxFilterNestingDepth)}
+		return
+	}
+	err = bytes.ReadSubBytes(classContextSpecific, TagFilterAnd, func(sub *Bytes) error {
+		sub.filterDepth = bytes.filterDepth + 1
+		return filterand.readComponents(sub)
+	})
 	if err != nil {
 		err = LdapError{fmt.Sprintf("readFilterAnd:\n%s", err.Error())}
 		return

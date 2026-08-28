@@ -7,9 +7,10 @@
 # applies RBAC/data bootstrap, runs the acceptance scenario-A
 # infrastructure/compatibility preflight, then sources every
 # integration/clickhouse/scenarios/*.sh file in lexical order (scenarios B
-# through I; dies if none are found). See integration/clickhouse/README.md
-# for the full design and rationale; integration/clickhouse/lib/common.sh
-# documents the exact sourcing contract scenario files can rely on.
+# through I plus phase-5 G' Search-limit compatibility; dies if none are
+# found). See integration/clickhouse/README.md for the full design and
+# rationale; integration/clickhouse/lib/common.sh documents the exact
+# sourcing contract scenario files can rely on.
 #
 # Usage:
 #   ./integration/clickhouse/run.sh
@@ -53,6 +54,35 @@ COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 # only one run of this fixture is supported per Docker daemon at a time;
 # see "Concurrency" in integration/clickhouse/README.md.
 COMPOSE_PROJECT_NAME="ch-phase3"
+
+# ── Preflight: refuse to run alongside the phase-5 HA fixture ────────────
+# The reciprocal of run-ha.sh's own ha_preflight_no_phase3_collision — that
+# script already refuses to start if THIS fixture's containers/networks are
+# present, but nothing previously enforced the same rule in this direction,
+# so starting this fixture while run-ha.sh's ch-phase5-ha project was live
+# was silently allowed even though README.md's "Concurrency: one run per
+# Docker daemon at a time" applies to both. Cheap, side-effect-free, and
+# runs before any state this script owns exists — a die() here needs no
+# cleanup. Matched by substring (docker's own --filter name= semantics), not
+# an exact name, so it also catches a crashed phase-5-HA run's leftover
+# containers/networks, not just a live one.
+phase3_preflight_no_ha_collision() {
+    local hits
+    hits="$(docker ps -a --filter 'name=ch-phase5-ha' --format '{{.Names}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: phase-5-HA fixture container(s) present on this Docker daemon ($hits) — the phase-3 and phase-5-HA fixtures must not run concurrently (README.md: 'Concurrency: one run per Docker daemon at a time'); tear down the HA fixture first (docker rm -f the listed containers, then docker network rm ch-phase5-ha-auth-net ch-phase5-ha-cluster-net if they remain)"
+    fi
+    hits="$(docker network ls --filter 'name=ch-phase5-ha-auth-net' --format '{{.Name}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: leftover phase-5-HA network '$hits' exists — remove it (docker network rm ch-phase5-ha-auth-net) before running this fixture"
+    fi
+    hits="$(docker network ls --filter 'name=ch-phase5-ha-cluster-net' --format '{{.Name}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: leftover phase-5-HA network '$hits' exists — remove it (docker network rm ch-phase5-ha-cluster-net) before running this fixture"
+    fi
+    log "preflight: no phase-5-HA fixture collision detected — proceeding"
+}
+phase3_preflight_no_ha_collision
 
 # The cleanup trap is installed HERE — before RUN_TMP_DIR, ENV_FILE, or
 # anything else per-run exists — so that a SIGINT/SIGTERM delivered at ANY
@@ -378,6 +408,32 @@ bring_up_fixture() {
     bring_up_fixture_fallback
 }
 
+# ── Test hook (used only by tests/lib-tests.sh) ───────────────────────────
+# When PHASE3_TEST_INVOKE_FALLBACK is set to a nonempty value, call
+# bring_up_fixture_fallback() directly and exit immediately afterward,
+# skipping bring_up_fixture's own isolator-detection attempt, the
+# mechanical health gate, RBAC bootstrap, the scenario-A preflight, and
+# scenario sourcing entirely. This exists solely so
+# integration/clickhouse/tests/lib-tests.sh can exercise the fallback's
+# exact Docker/Compose call sequence and generated compose file under a
+# stub `docker` binary, with no real daemon involved and none of run.sh's
+# later stages running. If PHASE3_TEST_FALLBACK_COMPOSE_COPY is also set,
+# the generated FALLBACK_COMPOSE_FILE is copied there before this process
+# exits — the fallback's own compose file lives under RUN_TMP_DIR, which
+# the cleanup() trap below unconditionally removes on every exit path
+# (including this one), so a test that wants to inspect the generated
+# compose content after this subprocess exits needs a copy outside that
+# directory. Both variables are unset in every production invocation, so
+# neither branch below ever runs outside this test.
+if [ -n "${PHASE3_TEST_INVOKE_FALLBACK:-}" ]; then
+    bring_up_fixture_fallback
+    if [ -n "${PHASE3_TEST_FALLBACK_COMPOSE_COPY:-}" ]; then
+        cp "$FALLBACK_COMPOSE_FILE" "$PHASE3_TEST_FALLBACK_COMPOSE_COPY"
+    fi
+    log "test hook: bring_up_fixture_fallback completed; exiting before the real health gate/bootstrap/scenario run"
+    exit 0
+fi
+
 log "bringing up the fixture (docker compose up --build -d)"
 bring_up_fixture
 
@@ -572,9 +628,9 @@ scenario_a_preflight
 # ── Auto-source scenarios/*.sh in lexical order ───────────────────────────
 # See the "Sourcing contract" header in lib/common.sh for exactly what a
 # scenario file can assume at this point. The suite ships with scenarios
-# B–I, so an empty glob is a broken checkout/path, never a legitimate
-# "nothing to run" — dying here stops a silent preflight-only pass from
-# masquerading as a full green run.
+# B–I plus phase-5 G' Search-limit compatibility, so an empty glob is a
+# broken checkout/path, never a legitimate "nothing to run" — dying here
+# stops a silent preflight-only pass from masquerading as a full green run.
 shopt -s nullglob
 scenario_files=("$SCRIPT_DIR"/scenarios/*.sh)
 shopt -u nullglob

@@ -177,6 +177,88 @@
 #                                                       and log a
 #                                                       "KNOWN LIMITATION"
 #                                                       line.
+#
+# ── Search-limit-overflow expectation (scenario G', phase 5 §8.6) ─────────
+# A THIRD, independent per-build tracked behavior, deliberately kept
+# separate from H/H' above: not a distributed-role-propagation defect, but
+# ClickHouse's own LDAP user-directory reaction when a Search it issued
+# against ch-oauth-ldap comes back non-success (sizeLimitExceeded, result
+# 4) because the caller mapped more roles than the fixture's configured
+# <search_limit> (see integration/clickhouse/clickhouse/common/config.d/
+# ldap.xml). Upstream 24.8 strongly PREDICTS that a non-success Search
+# result fails the whole LDAP authentication attempt, but the phase-5 plan
+# is explicit that this must be MEASURED per build, live, rather than
+# committed as an assumption — see "Per-build outcome, not assumption" and
+# "ClickHouse overflow consequence is empirical" in that plan. The two
+# functions below were populated by running acceptance scenario G'
+# (integration/clickhouse/scenarios/65-ldap-search-limits.sh) in a
+# temporary, permissive characterization mode against both required
+# Altinity Stable images, recording what was actually observed, and only
+# then flipping the scenario to enforce it (see that scenario file's own
+# header for the exact recorded observations this file encodes).
+#
+#   search_limit_overflow_expectation_for
+#                                    prints one of:
+#                                      auth_fails_on_size_limit_exceeded
+#                                      auth_succeeds_with_truncated_roles
+#                                    for $EXPECTED_CH_VERSION's build prefix.
+#                                    Dies loudly for an unrecognized prefix —
+#                                    same fail-closed discipline as
+#                                    expectation_for above: a new build must
+#                                    get an explicit, MEASURED entry here
+#                                    before scenario G' can run against it,
+#                                    never silently inherit one.
+#   search_limit_overflow_wire_tuple
+#                                    prints the exact decoded Search-request
+#                                    tuple ClickHouse's own LDAP client sent
+#                                    for scenario G', as measured live
+#                                    against both required images from the
+#                                    helper's own T2 telemetry (size_limit /
+#                                    time_limit / types_only) —
+#                                    "size_limit=N time_limit=N
+#                                    types_only=BOOL" — for the given build
+#                                    prefix. This is the characterization
+#                                    record for operator documentation to
+#                                    cite; scenario G' itself asserts the
+#                                    safety-relevant subset (size_limit=256,
+#                                    entries=256, result=4) directly against
+#                                    the helper's live log, so this function
+#                                    is descriptive, not re-asserted against
+#                                    that evidence.
+#   assert_search_limit_overflow_outcome LABEL
+#                                    call after oauth_run has already set
+#                                    $CH_LAST_STATUS/$CH_LAST_BODY for
+#                                    scenario G''s single fresh
+#                                    authentication attempt, whose SQL MUST
+#                                    have been exactly
+#                                    "SELECT length(currentRoles())".
+#                                    Branches on
+#                                    search_limit_overflow_expectation_for:
+#                                      auth_fails_on_size_limit_exceeded:
+#                                        require CH_LAST_STATUS != 200 (a
+#                                        generic failure only — the exact
+#                                        upstream LDAP-directory exception
+#                                        text for a non-success Search
+#                                        result is not part of this suite's
+#                                        contract, matching
+#                                        oauth_expect_auth_failure's own
+#                                        "never assert a specific error
+#                                        string" discipline). An UNEXPECTED
+#                                        200 dies with a "BEHAVIOR CHANGED"
+#                                        message rather than silently
+#                                        passing.
+#                                      auth_succeeds_with_truncated_roles:
+#                                        require CH_LAST_STATUS == 200 AND
+#                                        CH_LAST_BODY == "256" exactly —
+#                                        proving TRUNCATION actually
+#                                        happened (256 of the 257 mapped
+#                                        roles), never treating HTTP 200
+#                                        alone as sufficient evidence (see
+#                                        "For a successful response..." in
+#                                        the phase-5 plan). A non-200
+#                                        status, or a 200 with any other
+#                                        body, dies with a "BEHAVIOR
+#                                        CHANGED"-style message.
 
 # ch_build_prefix VERSION — see contract above.
 ch_build_prefix() {
@@ -317,6 +399,84 @@ assert_propagation_outcome() {
         ;;
     *)
         die "$label: expectation_for returned unrecognized outcome '$outcome' for key '$key'"
+        ;;
+    esac
+}
+
+# search_limit_overflow_expectation_for — see contract above. Populated by
+# running scenario G' against both required Altinity Stable images and
+# recording what was actually observed live (see
+# integration/clickhouse/scenarios/65-ldap-search-limits.sh's own header):
+# on BOTH 24.8 and 25.8, a Search returning sizeLimitExceeded (result 4)
+# fails the whole LDAP simple-Bind authentication attempt outright (HTTP
+# 403 at the ClickHouse HTTP interface; currentRoles() never runs) — the
+# 24.8 half matches the plan's stated prediction, now confirmed live rather
+# than assumed; the 25.8 half was an open question the plan explicitly
+# required measuring rather than assuming, and it turned out to share
+# 24.8's behavior rather than differ from it (ClickHouse's LDAP
+# user-directory login path treats ANY non-success Search result as fatal,
+# regardless of how many entries were actually returned — this is not a
+# distributed-role-propagation-style version split). Both entries are kept
+# explicit and separate (rather than a shared wildcard default) so a third
+# build with genuinely different behavior cannot silently inherit either
+# one — see this function's own fail-closed default case below.
+search_limit_overflow_expectation_for() {
+    local prefix
+    prefix="$(ch_build_prefix "$EXPECTED_CH_VERSION")"
+    case "$prefix" in
+    24.8) printf 'auth_fails_on_size_limit_exceeded' ;;
+    25.8) printf 'auth_fails_on_size_limit_exceeded' ;;
+    *)
+        die "search_limit_overflow_expectation_for: no recorded Search-limit-overflow expectation for ClickHouse build prefix '$prefix' (full version: $EXPECTED_CH_VERSION) — add one to integration/clickhouse/lib/expectations.sh (measured live against a real container running scenario G' in characterization mode, per the phase-5 plan's process) before running scenario G' against this build"
+        ;;
+    esac
+}
+
+# search_limit_overflow_wire_tuple — see contract above. Both required
+# images were observed, live, to send the identical decoded Search-request
+# tuple for scenario G' (the fixture's LDAP-directory configuration — not
+# the roles_mapping/count — governs sizeLimit/timeLimit/typesOnly, and both
+# builds share the same fixture config): sizeLimit=256 (from this fixture's
+# explicit <search_limit>256</search_limit>), timeLimit=0 (no
+# client-requested Search deadline — the examined 24.8 parser has no
+# corresponding <search_timeout> key; see ldap.xml's own header), and
+# typesOnly=false (a normal attribute-and-value Search, not a
+# names-only one).
+search_limit_overflow_wire_tuple() {
+    local prefix
+    prefix="$(ch_build_prefix "$EXPECTED_CH_VERSION")"
+    case "$prefix" in
+    24.8) printf 'size_limit=256 time_limit=0 types_only=false' ;;
+    25.8) printf 'size_limit=256 time_limit=0 types_only=false' ;;
+    *)
+        die "search_limit_overflow_wire_tuple: no recorded wire tuple for ClickHouse build prefix '$prefix' (full version: $EXPECTED_CH_VERSION) — add one to integration/clickhouse/lib/expectations.sh (measured live from the helper's own T2 Search telemetry) before running scenario G' against this build"
+        ;;
+    esac
+}
+
+# assert_search_limit_overflow_outcome LABEL — see contract above.
+assert_search_limit_overflow_outcome() {
+    local label="$1"
+    local outcome prefix
+    outcome="$(search_limit_overflow_expectation_for)"
+    prefix="$(ch_build_prefix "$EXPECTED_CH_VERSION")"
+    case "$outcome" in
+    auth_fails_on_size_limit_exceeded)
+        if [ "$CH_LAST_STATUS" = "200" ]; then
+            die "$label: BEHAVIOR CHANGED — build $prefix unexpectedly AUTHENTICATED where 'auth_fails_on_size_limit_exceeded' is recorded (measured live) as this build's LDAP-directory reaction to a sizeLimitExceeded Search result. ClickHouse may have changed how it handles a non-success Search response; update search_limit_overflow_expectation_for in lib/expectations.sh for this build rather than silently accepting a stale expectation."
+        fi
+        log "$label: auth_fails_on_size_limit_exceeded expectation met on build $prefix (HTTP $CH_LAST_STATUS, $(oauth_body_diagnostics)) — OK"
+        ;;
+    auth_succeeds_with_truncated_roles)
+        if [ "$CH_LAST_STATUS" != "200" ]; then
+            die "$label: BEHAVIOR CHANGED — build $prefix unexpectedly FAILED authentication where 'auth_succeeds_with_truncated_roles' is recorded (measured live) for this build; got HTTP $CH_LAST_STATUS ($(oauth_body_diagnostics)). Update search_limit_overflow_expectation_for in lib/expectations.sh for this build rather than silently accepting a stale expectation."
+        fi
+        [ "$CH_LAST_BODY" = "256" ] \
+            || die "$label: build $prefix authenticated (as expected for 'auth_succeeds_with_truncated_roles') but length(currentRoles()) = '$CH_LAST_BODY', expected exactly '256' — HTTP 200 alone does not prove truncation actually happened; the LDAP-directory role mapping may have changed shape ($(oauth_body_diagnostics))"
+        log "$label: auth_succeeds_with_truncated_roles expectation met on build $prefix — length(currentRoles()) = 256 (truncated from 257 mapped roles) — OK"
+        ;;
+    *)
+        die "$label: search_limit_overflow_expectation_for returned unrecognized outcome '$outcome' for build $prefix"
         ;;
     esac
 }

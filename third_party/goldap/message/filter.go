@@ -2,6 +2,18 @@ package message
 
 import "fmt"
 
+// maxFilterNestingDepth is a generous hard cap on how many Filter AND/OR/
+// NOT levels readFilterAnd/readFilterOr/readFilterNot (filter_and.go/
+// filter_or.go/filter_not.go) will descend into, enforced via each
+// *Bytes value's filterDepth field (bytes.go). The one Search filter this
+// consuming repository's internal/ldap package ever authorizes —
+// AuthorizeGroupMembershipFilter's `(&(objectClass=...)(member=...))` — is
+// exactly one AND with two non-recursive equality children (nesting depth
+// 1), so this leaves enormous headroom for any legitimate client while
+// closing off unbounded recursion/error-chain growth from a malformed,
+// deeply nested filter. See third_party/goldap/PATCHES.md's third item.
+const maxFilterNestingDepth = 32
+
 //
 //        Filter ::= CHOICE {
 //             and             [0] SET SIZE (1..MAX) OF filter Filter,

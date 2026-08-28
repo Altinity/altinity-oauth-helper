@@ -42,6 +42,22 @@
       ClickHouse's own <prefix>clickhouse_</prefix> strips the same prefix
       back off to recover the local role name it must already have from
       bootstrap/common.sql).
+    - search_limit=256 (phase-5, issue #19 phase 5 §8.2): makes the
+      upstream 24.8 LDAP client's built-in default explicit and actionable
+      rather than leaving it undocumented. Upstream 24.8 parses
+      <search_limit> under the LDAP-directory prefix and passes it to
+      ldap_search_ext_s as the Search request's sizeLimit — 256 is that
+      parser's own default, so this line is behavior-neutral versus the
+      previously-implicit value, not a new restriction. It is the knob
+      acceptance scenario G' (integration/clickhouse/scenarios/
+      65-ldap-search-limits.sh) exercises by minting a token carrying 257
+      mapped role names — one more than this limit — and it is the knob a
+      real deployment with a legitimately large mapped-role count for one
+      user must raise. Deliberately NOT paired with a <search_timeout>: the
+      examined 24.8 LDAP-directory parser has no corresponding parsed XML
+      key for a Search-side timeout in this configuration path (see the
+      phase-5 plan's "Make ClickHouse's Search limit explicit in the real
+      fixture").
 
   The pinned runtime remains the final proof of this XML (see the plan's
   "Real ClickHouse LDAP interoperability contingency" for the widening
@@ -56,6 +72,7 @@
             <bind_dn>uid={user_name},ou=users,dc=altinity,dc=internal</bind_dn>
             <verification_cooldown>0</verification_cooldown>
             <enable_tls>no</enable_tls>
+            <search_limit>256</search_limit>
         </oauth_helper>
     </ldap_servers>
 

@@ -32,10 +32,13 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 )
 
-// Local fork carrying two fixes upstream lacks as of the pinned version:
+// Local fork carrying three fixes upstream lacks as of the pinned version:
 // a BER INTEGER sign-disambiguation bug that corrupts MessageID
-// correlation past 127, and a missing ModifyDNResponse.SetResultCode
-// needed for fail-closed ModifyDN handling. See third_party/goldap/PATCHES.md.
+// correlation past 127, a missing ModifyDNResponse.SetResultCode needed
+// for fail-closed ModifyDN handling, and an unbounded Filter AND/OR/NOT
+// nesting recursion that let a single well-under-the-64-KiB-cap malformed
+// Search filter allocate on the order of 150 MB. See
+// third_party/goldap/PATCHES.md.
 replace github.com/vjeantet/goldap => ./third_party/goldap
 
 // Local fork carrying a pre-authentication memory-safety fix the pinned
