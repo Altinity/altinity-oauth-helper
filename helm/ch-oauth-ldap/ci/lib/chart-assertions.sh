@@ -5,14 +5,14 @@
 # verification gate. Exposes one entry point, run_chart_assertions, which
 # implements:
 #
-#   * plan §37 — the full positive render matrix (11 cases), each rendered
+#   * plan §37 — the full positive render matrix (12 cases), each rendered
 #     with `helm template` and passed through common.sh's kubeconform_check;
-#   * plan §38 — the full negative render matrix (40 numbered cases; case
+#   * plan §38 — the full negative render matrix (41 numbered cases; case
 #     23 is table-driven over the five reserved podLabels keys, so this
-#     runs 44 distinct `helm template` invocations in total), each
+#     runs 45 distinct `helm template` invocations in total), each
 #     asserting `helm template` exits non-zero, emits NOTHING on stdout,
 #     AND emits the chart's exact §5 fail-closed message on stderr. Cases
-#     25-40 are the injection guards: line breaks / YAML-significant
+#     25-41 are the injection guards: line breaks / YAML-significant
 #     characters in every value the templates interpolate, non-integer
 #     integers, allow-all-in-disguise NetworkPolicy selectors, and a string
 #     where the embedded config expects a boolean;
@@ -218,7 +218,7 @@ _ca_assert_selector_pair() {
 }
 
 # ==============================================================================
-# §37 Positive render matrix (11 cases)
+# §37 Positive render matrix (12 cases)
 # ==============================================================================
 
 _ca_positive_matrix() {
@@ -326,11 +326,24 @@ _ca_positive_matrix() {
     CA_RENDER_IN_SELECTOR=$(_ca_render_path "11-in-expression-selector")
     assert_match "$CA_RENDER_IN_SELECTOR" 'operator: In' F
     assert_match "$CA_RENDER_IN_SELECTOR" 'topologyKey: "topology.kubernetes.io/zone"' F
+
+    # 12 (review pass 3, Finding 3) -- the README's digest-pinning workflow
+    # ("pin image.tag to a resolved @sha256:<digest> reference") must
+    # actually render: image.tag=@sha256:<64 hex> must pass validation and
+    # the Deployment's image: field must join it onto image.repository with
+    # NO colon (repository@sha256:digest), never the tag-shaped
+    # "repository:@sha256:digest", which is not valid OCI syntax.
+    _ca_positive "digest-pinned image.tag" "12-digest-pinned-tag" \
+        -f "$valid" \
+        --set-string 'image.tag=@sha256:440a208ab9006b81f7a261c235b6b5ad1e18d0d5cbf04719a95d39cd8365650b'
+    CA_RENDER_DIGEST=$(_ca_render_path "12-digest-pinned-tag")
+    assert_match "$CA_RENDER_DIGEST" 'image: "ghcr.io/altinity/ch-oauth-ldap@sha256:440a208ab9006b81f7a261c235b6b5ad1e18d0d5cbf04719a95d39cd8365650b"' F
+    assert_not_match "$CA_RENDER_DIGEST" ':@sha256:' F
 }
 
 # ==============================================================================
-# §38 Negative render matrix (40 numbered cases; #23 is table-driven over 5
-# reserved podLabels keys, so this runs 44 `helm template` invocations)
+# §38 Negative render matrix (41 numbered cases; #23 is table-driven over 5
+# reserved podLabels keys, so this runs 45 `helm template` invocations)
 # ==============================================================================
 
 _ca_negative_matrix() {
@@ -461,7 +474,7 @@ _ca_negative_matrix() {
         --set-json 'podAnnotations={"checksum/ch-oauth-ldap-config":"x"}'
 
     # ------------------------------------------------------------------------
-    # 25-40: injection guards (validate rules 0 and 16-20). Each payload is
+    # 25-41: injection guards (validate rules 0 and 16-20). Each payload is
     # the shape that, before those rules and the quoting/`toYaml` fixes in
     # the templates, actually escaped its YAML context; see the chart's
     # templates/_helpers.tpl for the two independent layers now in place.
@@ -511,50 +524,57 @@ _ca_negative_matrix() {
     # 31 -- a `"` in image.tag used to close the hand-written quotes around
     # `image:` and inject sibling container keys.
     _ca_negative "double quote in image.tag" \
-        "image.tag must be an OCI tag ([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})" \
+        "image.tag must be an OCI tag ([A-Za-z0-9_][A-Za-z0-9_.-]{0,127}) or a digest reference (@sha256:<64 lowercase hex>)" \
         --set-string 'image.tag=a"b'
 
-    # 32
+    # 32 (review pass 3, Finding 3) -- a malformed digest (too short, and
+    # therefore not a valid sha256) must still be rejected: accepting the
+    # digest form must not mean accepting anything starting with "@sha256:".
+    _ca_negative "malformed digest in image.tag" \
+        "image.tag must be an OCI tag ([A-Za-z0-9_][A-Za-z0-9_.-]{0,127}) or a digest reference (@sha256:<64 lowercase hex>)" \
+        --set-string 'image.tag=@sha256:deadbeef'
+
+    # 33
     _ca_negative "line break in image.repository" \
         "image.repository must not contain line breaks" \
         --set-string "image.repository=$(printf 'ghcr.io/x\ny')"
 
-    # 33
+    # 34
     _ca_negative "invalid image.pullPolicy" \
         "image.pullPolicy must be one of Always, IfNotPresent, Never" \
         --set-string 'image.pullPolicy=Sometimes'
 
-    # 34
+    # 35
     _ca_negative "line break in podAntiAffinity.topologyKey" \
         "podAntiAffinity.topologyKey must not contain line breaks" \
         --set-string "podAntiAffinity.topologyKey=$(printf 'kubernetes.io/hostname\n                hostIPC: true')"
 
-    # 35 -- a "number" that is really a string with a trailing injected key.
+    # 36 -- a "number" that is really a string with a trailing injected key.
     _ca_negative "non-integer podAntiAffinity.weight" \
         "podAntiAffinity.weight must be an integer between 1 and 100" \
         --set-string "podAntiAffinity.weight=$(printf '1\n              hostIPC: true')"
 
-    # 36
+    # 37
     _ca_negative "DoesNotExist-only pod selector (allow-all in disguise)" \
         "networkPolicy.clickhousePodSelector must include a positive term" \
         --set-json 'networkPolicy.clickhousePodSelector={"matchExpressions":[{"key":"bogus","operator":"DoesNotExist"}]}'
 
-    # 37
+    # 38
     _ca_negative "NotIn-only namespace selector (allow-all in disguise)" \
         "networkPolicy.clickhouseNamespaceSelector must include a positive term" \
         --set-json 'networkPolicy.clickhouseNamespaceSelector={"matchExpressions":[{"key":"bogus","operator":"NotIn","values":["x"]}]}'
 
-    # 38 -- a string where the embedded config.yaml emits a bare boolean.
+    # 39 -- a string where the embedded config.yaml emits a bare boolean.
     _ca_negative "identity.require_email_verified as a string" \
         "identity.require_email_verified must be a boolean (true/false), not a string" \
         --set-string 'identity.require_email_verified=true'
 
-    # 39
+    # 40
     _ca_negative "non-integer replicaCount" \
         "replicaCount must be an integer" \
         --set-string "replicaCount=$(printf '2\n  hostIPC: true')"
 
-    # 40 -- the name overrides feed labels and resource names.
+    # 41 -- the name overrides feed labels and resource names.
     _ca_negative "line break in nameOverride" \
         "nameOverride must not contain line breaks" \
         --set-string "nameOverride=$(printf 'a\n    evil: x')"

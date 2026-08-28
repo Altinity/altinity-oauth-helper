@@ -61,12 +61,17 @@
 #       file -- proving canonical publication is refused in the latter two
 #       cases BEFORE any go build/docker step, and that a clean tree is not
 #       wrongly refused by the guard itself.
-#     - the real script's dirty-working-tree guard BYPASSES (review Finding
-#       1): two more throwaway repos proving the strengthened
-#       `--untracked-files=all --ignored=matching` status pre-check still
-#       refuses a `status.showUntrackedFiles=no`-hidden untracked .go file
-#       and a .gitignore'd .go file -- both of which a bare `git status
-#       --porcelain` (the pre-fix check) let through silently.
+#     - the real script's dirty-working-tree guard BYPASS (review Finding
+#       1): a throwaway repo proving the `--untracked-files=all` status
+#       pre-check still refuses a `status.showUntrackedFiles=no`-hidden
+#       untracked .go file, which a bare `git status --porcelain` (the
+#       pre-fix check) let through silently. A SECOND throwaway repo proves
+#       the deliberate NON-bypass added in review pass 3: a .gitignore'd .go
+#       file is no longer refused (the pre-pass-3 `--ignored=matching` flag
+#       is gone), because `git archive HEAD` -- the actual build input --
+#       can never see a gitignored file regardless of what `git status`
+#       reports, so refusing on it was a false positive with no correctness
+#       payoff, not a bypass to close.
 #     - a HEAD-export BEHAVIORAL proof (review Finding 1's actual fix): the
 #       real, unmodified script run against a throwaway repo whose tracked
 #       .go file is tampered under `git update-index --assume-unchanged`
@@ -78,6 +83,16 @@
 #       input is `git archive HEAD`'s export, not the working tree: the
 #       tampered marker must be absent and the committed HEAD marker
 #       present.
+#     - a SELF-TAMPER BEHAVIORAL proof (review pass 3 Finding 2): the exact
+#       same threat, applied to the script's OWN on-disk bytes rather than a
+#       .go file -- a throwaway repo commits the REAL script content
+#       (copied from $_IA_SCRIPT, never a hand-duplicated copy that could
+#       drift), then the on-disk copy is tampered under `--assume-unchanged`
+#       to neutralize the tag-republish guard's `exit 1`. Runs the real,
+#       tampered-on-disk script (a PATH-stubbed `docker manifest inspect`
+#       reports the tag as already existing) and proves the run still
+#       refuses -- proving the guard that actually ran was the committed
+#       HEAD copy (via the self re-exec), not the neutralized on-disk one.
 #     - static proof (review Finding 1) that `git archive --format=tar
 #       HEAD` precedes `go build`, and that the compile/Dockerfile-copy
 #       paths read from that export ($SRC_DIR), never from $REPO.
@@ -407,15 +422,39 @@ _ia_script_tag_republish_static() {
 # Static complement to _ia_script_dirty_tree_guard's behavioral regression:
 # the refusal must be wired in ahead of `git rev-parse --short=7 HEAD`, so a
 # dirty tree is caught before SHA/TAG (and everything derived from them) is
-# even computed.
+# even computed. Also statically proves the review pass 3 fix: the actual
+# `git status` invocation must not pass the gitignored-path flag, since git
+# archive HEAD (the actual build input) can never see a gitignored file
+# regardless of what git status reports about it -- flagging one is a
+# false-positive cost with no correctness payoff, confirmed behaviorally by
+# _ia_script_dirty_tree_guard_bypasses below.
+#
+# The invocation itself is located by its unique
+# `DIRTY_STATUS="$(git status --porcelain` anchor, never the bare substring
+# `git status --porcelain` -- the header comment above ALSO contains that
+# bare substring (in prose, describing the very check below), so a bare
+# substring search would silently pick up the comment instead of the real
+# invocation, and the flag-absence check would then be proving nothing.
 _ia_script_dirty_tree_guard_static() {
     local script="$1"
-    local porcelain_line rev_parse_line
+    local porcelain_line rev_parse_line invocation
 
     assert_match "$script" 'git status --porcelain'
 
-    porcelain_line=$(command grep -nF 'git status --porcelain' "$script" | command head -n1 | command cut -d: -f1)
+    porcelain_line=$(command grep -nF 'DIRTY_STATUS="$(git status --porcelain' "$script" | command head -n1 | command cut -d: -f1)
     rev_parse_line=$(command grep -nE 'git rev-parse --short=7 HEAD' "$script" | command head -n1 | command cut -d: -f1)
+
+    if [ -n "$porcelain_line" ]; then
+        invocation=$(command sed -n "${porcelain_line}p" "$script")
+        case "$invocation" in
+            *'--ignored=matching'*)
+                fail "$script: line $porcelain_line still passes --ignored=matching to git status -- review pass 3 dropped this flag because git archive HEAD (the actual build input) can never see a gitignored file regardless of what git status reports"
+                ;;
+            *)
+                pass "$script: the dirty-tree guard's git status invocation (line $porcelain_line) does not pass --ignored=matching"
+                ;;
+        esac
+    fi
 
     if [ -z "$porcelain_line" ] || [ -z "$rev_parse_line" ]; then
         fail "$script: could not locate both the dirty-tree check and 'git rev-parse --short=7 HEAD' to order them"
@@ -678,19 +717,24 @@ _ia_script_dirty_tree_guard() {
 }
 
 # _ia_script_dirty_tree_guard_bypasses SCRIPT
-# Extends _ia_script_dirty_tree_guard with the two specific bypasses the
-# review reproduced against the pre-fix bare `git status --porcelain`:
+# Extends _ia_script_dirty_tree_guard with two specific scenarios a bare
+# `git status --porcelain` (the pre-Finding-1 check) could not tell apart:
 #   1. `git config status.showUntrackedFiles no` hides an untracked .go
-#      file from a bare `git status --porcelain` entirely.
-#   2. A .gitignore'd .go file is never reported by `git status
-#      --porcelain` without `--ignored=matching`, even though `go build`
-#      still happily compiles it if it sits in the package directory.
-# The strengthened `--untracked-files=all --ignored=matching` flags must
-# refuse both cases -- proving the convenience pre-check is now as strong
-# as `git status` alone can be made. The one remaining bypass no `git
-# status` invocation can ever see (`--assume-unchanged`/`--skip-worktree`)
-# is proven separately, behaviorally, against the archive export, by
-# _ia_script_head_export_behavioral below.
+#      file from a bare `git status --porcelain` entirely -- this remains a
+#      real bypass and `--untracked-files=all` must still refuse it.
+#   2. A .gitignore'd .go file is never reported by `git status --porcelain`
+#      regardless of flags. Review pass 1 treated this as a bypass to close
+#      (via `--ignored=matching`); review pass 3 corrected that: since `git
+#      archive HEAD` (not the working tree) is the actual build input, a
+#      gitignored file can never reach the build no matter what `git
+#      status` reports about it, so refusing on it is a false positive with
+#      zero correctness payoff, not a bypass. This case now proves the
+#      OPPOSITE of what it proved before pass 3: the guard must NOT refuse.
+# The remaining bypass no `git status` invocation can ever see
+# (`--assume-unchanged`/`--skip-worktree`) is proven separately,
+# behaviorally, against the archive export, by
+# _ia_script_head_export_behavioral below (and, for this script's own
+# bytes, by _ia_script_self_tamper_behavioral).
 _ia_script_dirty_tree_guard_bypasses() {
     local script="$1"
     _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
@@ -708,13 +752,18 @@ _ia_script_dirty_tree_guard_bypasses() {
     _ia_dtg_new_repo "$show_untracked_dir"
     _ia_dtg_new_repo "$gitignored_dir"
 
-    # Bypass 1: status.showUntrackedFiles=no.
+    # Case 1 (real bypass, must still be refused): status.showUntrackedFiles=no.
     git -C "$show_untracked_dir" config status.showUntrackedFiles no
     command mkdir -p "$show_untracked_dir/cmd/ch-oauth-ldap"
     printf 'package main\nfunc main(){}\n' >"$show_untracked_dir/cmd/ch-oauth-ldap/extra.go"
 
-    # Bypass 2: a committed .gitignore excluding *.go, then an untracked
-    # (ignored) .go file added afterward.
+    # Case 2 (deliberate non-bypass, must NOT be refused): a committed
+    # .gitignore excluding *.go, then an untracked (ignored) .go file added
+    # afterward. No go.mod exists in this throwaway repo, so -- exactly like
+    # _ia_script_dirty_tree_guard's "clean" case above -- an unrefused run
+    # is left to fail later for the unrelated reason of having no
+    # cmd/ch-oauth-ldap package to build; the assertion below only checks
+    # that the dirty-tree guard's OWN refusal text is absent.
     printf '*.go\n' >"$gitignored_dir/.gitignore"
     git -C "$gitignored_dir" add .gitignore
     git -C "$gitignored_dir" commit -q -m "add gitignore"
@@ -735,10 +784,10 @@ _ia_script_dirty_tree_guard_bypasses() {
     REPO="$gitignored_dir" TMPDIR="$base/tmp" bash "$script" \
         >"$base/gitignored.out" 2>"$base/gitignored.err"
     status=$?
-    if [ "$status" -ne 0 ] && command grep -qF "$refusal_marker" "$base/gitignored.err"; then
-        pass "dirty-tree guard bypasses: .gitignore'd .go file in $gitignored_dir is refused (exit $status) -- --ignored=matching catches it"
+    if command grep -qF "$refusal_marker" "$base/gitignored.err"; then
+        fail "dirty-tree guard bypasses: .gitignore'd .go file in $gitignored_dir was refused by the dirty-tree guard (exit $status) -- review pass 3 dropped --ignored=matching precisely because git archive HEAD can never see a gitignored file regardless of git status, so this is a false-positive refusal, not correct bypass-closing: $(command head -n3 "$base/gitignored.err")"
     else
-        fail "dirty-tree guard bypasses: .gitignore'd .go file in $gitignored_dir was NOT refused (exit $status): $(command head -n3 "$base/gitignored.err")"
+        pass "dirty-tree guard bypasses: .gitignore'd .go file in $gitignored_dir is NOT refused by the dirty-tree guard (exit $status came from something else, e.g. no go.mod/cmd package to build in this throwaway repo -- expected, same as the clean-tree case above)"
     fi
 }
 
@@ -879,6 +928,106 @@ GO_STUB
     fi
 }
 
+# _ia_script_self_tamper_behavioral SCRIPT
+# Behavioral proof for review pass 3's Finding 2: the same
+# `--assume-unchanged` threat _ia_script_head_export_behavioral proves
+# against a .go file, applied instead to the script's OWN on-disk bytes.
+# Without the self re-exec fix, every check below the point bash first loads
+# this file -- the dirty-tree guard, the tag-republish guard, the archive
+# export itself -- would run from whatever bytes are actually on disk, not
+# HEAD, exactly the gap the source-tree export closes for cmd/**/*.go.
+#
+# Commits the REAL, unmodified script content (copied from SCRIPT itself,
+# never a hand-duplicated copy that could silently drift from the actual
+# guard logic) into a throwaway repo at the same relative path the self
+# re-exec logic looks for, marks it `--assume-unchanged`, then tampers the
+# on-disk copy to neutralize the tag-republish guard's `exit 1` into a
+# no-op. Runs that tampered on-disk copy directly (SCRIPT's own
+# self-detection auto-resolves REPO to this throwaway repo from the
+# invoked path, exactly like a real checkout) against a PATH-stubbed
+# `docker manifest inspect` that reports the tag as already published, and
+# proves the run still refuses -- proving the guard that actually executed
+# was the committed HEAD copy (via the self re-exec), not the neutralized
+# on-disk one.
+_ia_script_self_tamper_behavioral() {
+    local script="$1"
+    _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
+
+    if ! command -v git >/dev/null 2>&1; then
+        fail "self-tamper behavioral proof: git not on PATH"
+        return
+    fi
+
+    local base="$RUN_TMP_DIR/self-tamper-behavioral"
+    local repo="$base/repo"
+    command mkdir -p "$repo/scripts" "$repo/cmd/ch-oauth-ldap" "$base/stub" "$base/tmp"
+
+    git -C "$repo" init -q
+    git -C "$repo" config user.email gate@example.invalid
+    git -C "$repo" config user.name gate
+    printf 'FROM scratch\n' >"$repo/Dockerfile.ch-oauth-ldap"
+    printf 'module example.com/ia-self-tamper\n\ngo 1.22\n' >"$repo/go.mod"
+    printf 'package main\n\nfunc main() {}\n' >"$repo/cmd/ch-oauth-ldap/main.go"
+
+    command cp "$script" "$repo/scripts/build-ch-oauth-ldap-image.sh"
+    command chmod +x "$repo/scripts/build-ch-oauth-ldap-image.sh"
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m init
+
+    # Tamper the ON-DISK copy under --assume-unchanged: invisible to every
+    # `git status` flag combination, including this script's own
+    # --untracked-files=all convenience pre-check. Neutralize the
+    # tag-republish guard's `exit 1` (the line immediately following its
+    # unique "no force override" refusal text) into a no-op, simulating an
+    # operator -- or attacker -- quietly disabling the immutability check on
+    # their own machine while a `git status` on the repo stays clean.
+    git -C "$repo" update-index --assume-unchanged scripts/build-ch-oauth-ldap-image.sh
+    local anchor_line exit_line
+    anchor_line=$(command grep -nF 'There is no force override.' "$repo/scripts/build-ch-oauth-ldap-image.sh" | command head -n1 | command cut -d: -f1)
+    if [ -z "$anchor_line" ]; then
+        fail "self-tamper behavioral proof: could not locate the tag-republish guard's refusal text in the committed script to tamper"
+        return
+    fi
+    exit_line=$((anchor_line + 1))
+    command awk -v n="$exit_line" '
+        NR == n { sub(/exit 1/, ": # tampered: guard neutralized") }
+        { print }
+    ' "$repo/scripts/build-ch-oauth-ldap-image.sh" >"$repo/scripts/build-ch-oauth-ldap-image.sh.tampered"
+    command mv "$repo/scripts/build-ch-oauth-ldap-image.sh.tampered" "$repo/scripts/build-ch-oauth-ldap-image.sh"
+    command chmod +x "$repo/scripts/build-ch-oauth-ldap-image.sh"
+    if ! command grep -qF 'tampered: guard neutralized' "$repo/scripts/build-ch-oauth-ldap-image.sh"; then
+        fail "self-tamper behavioral proof: failed to tamper the on-disk script's tag-republish guard (line $exit_line was not the expected 'exit 1')"
+        return
+    fi
+
+    cat >"$base/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+if [ "$1" = "manifest" ] && [ "$2" = "inspect" ]; then
+    exit 0
+fi
+exit 0
+DOCKER_STUB
+    command chmod +x "$base/stub/docker"
+
+    REPO="$repo" \
+        TMPDIR="$base/tmp" \
+        PATH="$base/stub:$PATH" \
+        bash "$repo/scripts/build-ch-oauth-ldap-image.sh" \
+        >"$base/run.out" 2>"$base/run.err"
+    local status=$?
+
+    if [ "$status" -eq 0 ]; then
+        fail "self-tamper behavioral proof: script exited 0 against a tag that already exists in the registry (stubbed) -- the on-disk tag-republish guard was neutralized via --assume-unchanged and the self re-exec from HEAD did not override it: $(command tail -n5 "$base/run.out")"
+        return
+    fi
+
+    if command grep -qF "refusing to publish" "$base/run.err"; then
+        pass "self-tamper behavioral proof: the committed (HEAD) tag-republish guard still refuses even though the on-disk copy of the script itself was tampered via --assume-unchanged -- the self re-exec from 'git show HEAD:...' is what enforces this"
+    else
+        fail "self-tamper behavioral proof: script exited nonzero ($status) but not via the expected tag-republish refusal -- see $base/run.err: $(command tail -n5 "$base/run.err")"
+    fi
+}
+
 # =============================================================================
 # Section 51 (+ A7) -- .github/workflows/build-ch-oauth-ldap.yml
 # =============================================================================
@@ -945,10 +1094,16 @@ _ia_workflow_assertions() {
 # _ia_workflow_tag_republish_static WORKFLOW
 # Static proof of the review's Finding 2 fix in the workflow: the
 # `docker buildx imagetools inspect` existence check must run before the
-# build-push action, with no force-override input.
+# build-push action, with no force-override input. Also proves the review
+# pass 3 fix: ordering alone is not enough -- the guard must inspect BOTH
+# the shared final tag (${FULL}:${TAG}) AND this job's own per-arch sub-tag
+# (${FULL}:${TAG}-${{ matrix.arch }}), matching scripts/build-ch-oauth-ldap-
+# image.sh's per-arch loop, so a retry after a partial run can't silently
+# overwrite an already-published sub-tag just because the final manifest
+# tag was never assembled.
 _ia_workflow_tag_republish_static() {
     local workflow="$1"
-    local inspect_line buildpush_line
+    local step_line inspect_line buildpush_line guard_block
 
     assert_match "$workflow" 'docker buildx imagetools inspect' F
 
@@ -963,6 +1118,26 @@ _ia_workflow_tag_republish_static() {
         pass "$workflow: docker buildx imagetools inspect existence check (line $inspect_line) precedes docker/build-push-action (line $buildpush_line)"
     else
         fail "$workflow: expected the docker buildx imagetools inspect existence check (line $inspect_line) to precede docker/build-push-action (line $buildpush_line)"
+    fi
+
+    # Tag-identity check (not just step ordering): the guard STEP's own body
+    # -- from its "- name:" line (not just the inspect line itself, since
+    # the candidate tags are built one bash statement EARLIER, in a `for
+    # CANDIDATE in ...` line) up to the build-push line -- must reference
+    # both the final tag and this job's per-arch sub-tag, so the check
+    # cannot pass merely by inspecting the final tag while a different tag
+    # is what actually gets pushed.
+    step_line=$(command grep -nF 'Refuse to republish an already-published tag' "$workflow" | command head -n1 | command cut -d: -f1)
+    if [ -z "$step_line" ]; then
+        fail "$workflow: could not locate the 'Refuse to republish an already-published tag' step to scope the tag-identity check"
+        return
+    fi
+    guard_block=$(command sed -n "${step_line},${buildpush_line}p" "$workflow")
+    if printf '%s' "$guard_block" | command grep -qF '${FULL}:${TAG}"' && \
+        printf '%s' "$guard_block" | command grep -qF '${FULL}:${TAG}-${'; then
+        pass "$workflow: the republish guard step (lines $step_line-$buildpush_line) inspects both the final tag and a per-arch sub-tag, not the final tag alone"
+    else
+        fail "$workflow: the republish guard step (lines $step_line-$buildpush_line) must inspect both \${FULL}:\${TAG} and a per-arch \${FULL}:\${TAG}-<arch> sub-tag before push -- found: $guard_block"
     fi
 
     assert_not_match "$workflow" 'FORCE' F
@@ -997,6 +1172,7 @@ run_image_assertions() {
     _ia_script_sigint_regression "$_IA_SCRIPT"
     _ia_script_dirty_tree_guard "$_IA_SCRIPT"
     _ia_script_dirty_tree_guard_bypasses "$_IA_SCRIPT"
+    _ia_script_self_tamper_behavioral "$_IA_SCRIPT"
     _ia_script_head_export_behavioral "$_IA_SCRIPT"
     _ia_workflow_assertions
 

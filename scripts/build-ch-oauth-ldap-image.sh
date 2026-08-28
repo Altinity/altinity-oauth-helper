@@ -18,13 +18,34 @@
 #     into this script's own owned temp dir) — never $REPO's working tree.
 #     That export is the actual correctness mechanism for "one tag, one
 #     manifest": a bare `git status --porcelain` check (even strengthened
-#     with --untracked-files=all --ignored=matching) can still be fooled by
-#     `git config status.showUntrackedFiles no`, by a tracked file marked
-#     --assume-unchanged/--skip-worktree, or (without --ignored=matching) by
-#     a .gitignore'd .go file sitting in a package directory — all of which
-#     `go build` against the live tree would happily compile in anyway. The
-#     `git status` check below is kept only as a fast-fail UX convenience
-#     (a clearer message than a mid-build failure), not as the guarantee.
+#     with --untracked-files=all) can still be fooled by `git config
+#     status.showUntrackedFiles no`, or by a tracked file marked
+#     --assume-unchanged/--skip-worktree — both of which `go build` against
+#     the live tree would happily compile in anyway. A .gitignore'd file
+#     sitting in a package directory is NOT a bypass of anything, precisely
+#     because of this export: `git archive HEAD` reads only the committed
+#     tree, so a gitignored file can never reach the build regardless of
+#     what `git status` reports about it — this is also why the check below
+#     deliberately does NOT pass --ignored=matching (dropped in review pass
+#     3): flagging every gitignored path in the tree (editor state,
+#     `.env` files, `node_modules/`, ...) as a fatal "dirty tree" had real
+#     false-positive cost on an ordinary long-lived dev checkout and zero
+#     correctness payoff once this export is what the build actually reads
+#     from. The `git status` check below is kept only as a fast-fail UX
+#     convenience (a clearer message than a mid-build failure) for the two
+#     things that DO matter to a human even though they can't reach the
+#     build either (an uncommitted change looks like it should be in the
+#     tag but silently isn't) — not as the guarantee.
+#
+#     The same tamper class applies to this script's OWN on-disk bytes, not
+#     just the source tree: every check below (dirty-tree guard, tag-
+#     republish guard, the archive export itself) would otherwise run from
+#     whatever bytes bash happened to load at invocation, never re-read from
+#     HEAD, so an --assume-unchanged tamper on this very file would be just
+#     as invisible to `git status` as one on a .go file. Immediately below,
+#     before any of those checks run, the script re-execs itself from `git
+#     show HEAD:scripts/build-ch-oauth-ldap-image.sh` for exactly the same
+#     reason the source tree is exported rather than trusted from disk.
 #
 #     Before doing any build work, the script also refuses to publish a
 #     `<prefix>-<sha>` tag (or any of its per-arch sub-tags) that already
@@ -77,23 +98,81 @@ fi
 
 cd "$REPO"
 
+# Per-run private state lives under $TMPDIR. Most Linux dev/CI hosts leave
+# TMPDIR unset, so default it to $HOME/tmp rather than refusing to run —
+# deliberately NOT /tmp: sandboxed Docker hosts (including the one this
+# repo's integration fixture was developed on) block /tmp for container
+# bind mounts, and the per-arch build contexts below are bind-mounted into
+# the Docker build by `docker build`'s own context transfer. Defaulted here,
+# ahead of every check below (including the self re-exec immediately
+# following), so the self re-exec's own temp file has somewhere to live.
+TMPDIR="${TMPDIR:-$HOME/tmp}"
+mkdir -p "$TMPDIR"
+export TMPDIR
+umask 077
+
+# Self re-exec from the committed HEAD bytes (review pass 3 finding): every
+# check from here on — the dirty-tree guard, the tag-republish guard, the
+# `git archive HEAD` export itself — must run from the committed recipe,
+# not from whatever bytes happen to be sitting on disk for THIS script. An
+# operator (or attacker) marking this very file `--assume-unchanged` and
+# then editing it — e.g. deleting the tag-republish guard a few lines below
+# — would otherwise be invisible to every `git status` flag combination
+# while every check below silently ran the tampered logic, exactly the gap
+# Finding 1 (git archive HEAD) closed for the source tree and
+# Dockerfile.ch-oauth-ldap. Close it the same way: re-exec this script from
+# `git show HEAD:<path>` before any of those checks run.
+#
+# Guarded by an env marker against the obvious infinite loop once relaunched
+# (that env var is exported, so it survives across `exec`), and skipped
+# entirely when $REPO's HEAD does not track this script at the expected
+# path — this repo's own test gate deliberately runs this real script
+# against throwaway repos that never commit a copy of it (they're testing
+# unrelated properties), and there is no self-tamper channel to close when
+# there is nothing at HEAD to compare against.
+if [[ -z "${_CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED:-}" ]]; then
+    _SELF_REL_PATH="scripts/build-ch-oauth-ldap-image.sh"
+    if git cat-file -e "HEAD:$_SELF_REL_PATH" 2>/dev/null; then
+        _SELF_HEAD_COPY=""
+        for _sv_attempt in {1..10}; do
+            printf -v _sv_suffix '%04x%04x' "$RANDOM" "$RANDOM"
+            _sv_candidate="$TMPDIR/ch-oauth-ldap-image-self.$_sv_suffix"
+            if (set -o noclobber; : >"$_sv_candidate") 2>/dev/null; then
+                _SELF_HEAD_COPY="$_sv_candidate"
+                unset _sv_suffix _sv_candidate _sv_attempt
+                break
+            fi
+        done
+        if [[ -z "$_SELF_HEAD_COPY" ]]; then
+            echo "failed to create a unique self-verification file under $TMPDIR after 10 attempts" >&2
+            exit 1
+        fi
+        trap 'rm -f "$_SELF_HEAD_COPY"' EXIT INT TERM
+        git show "HEAD:$_SELF_REL_PATH" >"$_SELF_HEAD_COPY"
+        chmod 0700 "$_SELF_HEAD_COPY"
+        export _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED=1
+        exec bash "$_SELF_HEAD_COPY" "$@"
+    fi
+    unset _SELF_REL_PATH
+fi
+
 # Fast-fail UX convenience only — NOT the correctness mechanism. This is a
 # cheap, early, clear-message check for the common case of an obviously
 # dirty tree. `--untracked-files=all` reports every untracked file
-# individually (not collapsed to its containing directory) and
-# `--ignored=matching` additionally reports .gitignore'd paths, so this is
-# the strongest a `git status` invocation can be made — but it can still be
-# bypassed: `git config status.showUntrackedFiles no` hides untracked files
-# from `git status` entirely (both flags above are overridden by that
-# config), and a tracked file marked `--assume-unchanged` or
+# individually (not collapsed to its containing directory), which is as
+# strong as a `git status` invocation can usefully be made here — but it
+# can still be bypassed: `git config status.showUntrackedFiles no` hides
+# untracked files from `git status` entirely (overridden by the flag
+# above), and a tracked file marked `--assume-unchanged` or
 # `--skip-worktree` is hidden from `git status` regardless of any flag
 # combination, even though `go build` still happily compiles whatever bytes
 # are actually sitting on disk. The real guarantee — that the compiled
 # image reflects exactly `HEAD`, nothing else — comes from the `git archive
-# HEAD` export below, which reads committed object-database content and is
-# immune to all three bypasses. See the header comment for the full
-# rationale.
-DIRTY_STATUS="$(git status --porcelain --untracked-files=all --ignored=matching)"
+# HEAD` export below (and, for this script's own bytes, the self re-exec
+# above), which reads committed object-database content and is immune to
+# both of those bypasses regardless of what `git status` reports. See the
+# header comment for the full rationale.
+DIRTY_STATUS="$(git status --porcelain --untracked-files=all)"
 if [[ -n "$DIRTY_STATUS" ]]; then
     echo "refusing to publish: working tree at $REPO is not clean (fast-fail convenience check — see script header) — a ldap-<sha> tag must always identify exactly one manifest (see helm/ch-oauth-ldap/README.md), so canonical publication requires a clean tree. Commit or stash tracked changes; remove (or .gitignore) untracked files. Dirty paths:" >&2
     echo "$DIRTY_STATUS" >&2
@@ -133,17 +212,6 @@ if [[ "${#EXISTING_TAGS[@]}" -gt 0 ]]; then
     echo "publish from a new commit, or pass a different tag-prefix argument. There is no force override." >&2
     exit 1
 fi
-
-# Per-run private state lives under $TMPDIR. Most Linux dev/CI hosts leave
-# TMPDIR unset, so default it to $HOME/tmp rather than refusing to run —
-# deliberately NOT /tmp: sandboxed Docker hosts (including the one this
-# repo's integration fixture was developed on) block /tmp for container
-# bind mounts, and the per-arch build contexts below are bind-mounted into
-# the Docker build by `docker build`'s own context transfer.
-TMPDIR="${TMPDIR:-$HOME/tmp}"
-mkdir -p "$TMPDIR"
-export TMPDIR
-umask 077
 
 # RUN_TMP_DIR is declared, and the cleanup trap installed, before any other
 # per-run state exists — see integration/clickhouse/run.sh's identical

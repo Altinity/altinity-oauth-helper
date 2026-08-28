@@ -97,7 +97,7 @@ spec:
       {{- end }}
       containers:
         - name: ch-oauth-ldap
-          image: {{ printf "%s:%s" (toString .Values.image.repository) (toString .Values.image.tag) | quote }}
+          image: {{ include "ch-oauth-ldap.imageRef" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           args:
             - --config=/etc/ch-oauth-ldap/config.yaml

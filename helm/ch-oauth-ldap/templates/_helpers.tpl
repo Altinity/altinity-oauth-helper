@@ -66,6 +66,26 @@ participate — do not hardcode either.
 {{- end -}}
 
 {{/*
+The full image reference the Deployment pulls: image.repository joined to
+image.tag. image.tag is validated above (ch-oauth-ldap.re.imageTag) to be
+EITHER a normal OCI tag, joined with ":" (repository:tag — the
+ldap-<sha> default), OR the digest-pinned form the README recommends for a
+hard-immutability guarantee, an "@sha256:<digest>" string that already
+carries its own "@" separator and must be concatenated with NO colon
+(repository@sha256:digest — "repository:@sha256:digest" is not valid OCI
+syntax and no registry resolves it).
+*/}}
+{{- define "ch-oauth-ldap.imageRef" -}}
+{{- $repository := toString .Values.image.repository }}
+{{- $tag := toString .Values.image.tag }}
+{{- if hasPrefix "@" $tag }}
+{{- printf "%s%s" $repository $tag -}}
+{{- else }}
+{{- printf "%s:%s" $repository $tag -}}
+{{- end }}
+{{- end -}}
+
+{{/*
 XML-escape a value-derived text node. Fixed replacement order: & first,
 then <, then >, so entities the first pass introduces are never
 re-escaped. Do NOT run the fixed, already-escaped membership-filter
@@ -140,7 +160,14 @@ accepts, which as a side effect excludes every YAML-significant character
 {{- end -}}
 {{- define "ch-oauth-ldap.re.imageRepository" -}}^[a-z0-9]([-a-z0-9._]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([-a-z0-9._]*[a-z0-9])?)*$
 {{- end -}}
-{{- define "ch-oauth-ldap.re.imageTag" -}}^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$
+{{- /*
+Accepts either a normal OCI tag, or the digest-pinned form the README
+recommends for a hard-immutability guarantee: an `@sha256:<64 lowercase
+hex>` reference, which ch-oauth-ldap.imageRef below joins onto
+image.repository WITHOUT a colon (repository@sha256:... — never
+repository:@sha256:...).
+*/ -}}
+{{- define "ch-oauth-ldap.re.imageTag" -}}^(@sha256:[0-9a-f]{64}|[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})$
 {{- end -}}
 {{- define "ch-oauth-ldap.re.integer" -}}^[0-9]+$
 {{- end -}}
@@ -350,7 +377,7 @@ priorityClassName, the qualified-name shape for topologyKey).
 {{- fail "image.repository must be a lowercase OCI repository reference (registry[:port]/path)" }}
 {{- end }}
 {{- if not (regexMatch (include "ch-oauth-ldap.re.imageTag" .) (toString .Values.image.tag)) }}
-{{- fail "image.tag must be an OCI tag ([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})" }}
+{{- fail "image.tag must be an OCI tag ([A-Za-z0-9_][A-Za-z0-9_.-]{0,127}) or a digest reference (@sha256:<64 lowercase hex>)" }}
 {{- end }}
 {{- if not (has (toString .Values.image.pullPolicy) (list "Always" "IfNotPresent" "Never")) }}
 {{- fail "image.pullPolicy must be one of Always, IfNotPresent, Never" }}

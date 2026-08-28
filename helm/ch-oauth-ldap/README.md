@@ -74,7 +74,12 @@ change over time. So "immutable" here means *this tag will not be
 silently republished to point somewhere else* — not *rebuilding this
 commit reproduces this exact manifest*. If you need a hard guarantee that
 the image you deploy never changes underneath you, pin `image.tag` to a
-resolved `@sha256:<digest>` reference rather than the `ldap-<sha>` tag.
+resolved `@sha256:<64 lowercase hex digits>` reference (e.g.
+`image.tag=@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85`)
+rather than the `ldap-<sha>` tag — the chart accepts this exact shape as an
+alternative to a normal OCI tag and renders it onto `image.repository` with
+no colon (`repository@sha256:digest`, valid OCI digest-reference syntax),
+never `repository:@sha256:digest`.
 `pullPolicy: IfNotPresent` (the chart default) is safe either way — it
 only governs whether an already-cached local image is reused, not whether
 a tag can ever be moved in the registry.
@@ -156,9 +161,11 @@ value from ever changing the *structure* of what the chart renders:
      `podAntiAffinity.topologyKey` must be a Kubernetes label key
      (`[prefix/]name`);
    - `image.repository` must be a lowercase OCI repository reference,
-     `image.tag` an OCI tag (`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}` — so a `"`
-     can never close the quotes around `image:`), and `image.pullPolicy` one
-     of `Always`, `IfNotPresent`, `Never`;
+     `image.tag` either an OCI tag (`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}` — so
+     a `"` can never close the quotes around `image:`) or a digest reference
+     (`@sha256:` followed by exactly 64 lowercase hex digits, see
+     [Image and pull policy](#image-and-pull-policy)), and `image.pullPolicy`
+     one of `Always`, `IfNotPresent`, `Never`;
    - `replicaCount` and `podAntiAffinity.weight` must be real integers
      (`weight` in 1–100), not strings that merely start with digits;
    - `identity.require_email_verified` must be a real boolean — it is the

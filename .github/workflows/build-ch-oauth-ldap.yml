@@ -9,9 +9,15 @@ name: Build & push ch-oauth-ldap image
 # never used as tags.
 #
 # Tag-republication guard: before any per-arch build/push runs, this
-# refuses outright if `<prefix>-<sha>` already exists in the registry --
-# there is no force override. A rebuild of the same commit is not
-# guaranteed to reproduce the same manifest byte for byte
+# refuses outright if `<prefix>-<sha>` OR that arch's own
+# `<prefix>-<sha>-<arch>` sub-tag already exists in the registry -- there
+# is no force override. Each matrix job checks both the shared final tag
+# and its own per-arch sub-tag (mirroring scripts/build-ch-oauth-ldap-
+# image.sh's per-arch loop), so a retry after a partial run (e.g. amd64
+# pushed, then the manifest job failed before assembling the final tag)
+# cannot silently overwrite the already-published amd64 sub-tag just
+# because the final tag still doesn't exist. A rebuild of the same commit
+# is not guaranteed to reproduce the same manifest byte for byte
 # (Dockerfile.ch-oauth-ldap's `alpine:3.24` base floats within its minor
 # version, `apk add ca-certificates` is unpinned, and the toolchain can
 # drift), so silently republishing an already-published tag risks moving
@@ -117,12 +123,15 @@ jobs:
       - name: Refuse to republish an already-published tag
         env:
           TAG: ${{ steps.vars.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
         run: |
           FULL="${REGISTRY}/${IMAGE}"
-          if docker buildx imagetools inspect "${FULL}:${TAG}" >/dev/null 2>&1; then
-            echo "refusing to publish: ${FULL}:${TAG} already exists in the registry and would be silently moved to a possibly different manifest. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
-            exit 1
-          fi
+          for CANDIDATE in "${FULL}:${TAG}" "${FULL}:${TAG}-${ARCH}"; do
+            if docker buildx imagetools inspect "${CANDIDATE}" >/dev/null 2>&1; then
+              echo "refusing to publish: ${CANDIDATE} already exists in the registry and would be silently moved to a possibly different manifest. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
+              exit 1
+            fi
+          done
 
       - name: Build & push per-arch image
         uses: docker/build-push-action@v6
