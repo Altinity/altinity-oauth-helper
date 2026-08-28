@@ -85,18 +85,22 @@
 #
 # Local sinks proven by an existing dynamic test are deliberately pointed
 # at tests that already exist on this branch today (TestProtocol_*,
-# TestAdversarial_*, TestVerify*, TestBind*, TestNew*, TestRoles*) rather
-# than at sibling phase-5 sub-tasks' not-yet-merged marker matrices
-# (T1 internal/ldap/controls.go, T2 search.go size/time-limit telemetry,
-# T3's boundary-matrix extensions, T6's verifier redaction/rotation matrix,
-# T7's cmd/ch-jwt-verify debug-log matrix): those sub-tasks run in their own
-# disjoint worktrees and are not visible here. Once they land, re-run
-# `go test ./internal/securitytest -run TestZZDump... ` — no such helper
-# ships here; regenerate by AST-discovering the merged tree — and extend
-# this manifest for whatever their production changes newly introduce
-# (T1's controls.go guard-rejection log, T2's finishSearch telemetry
-# fields). The "unmapped sink" check is exactly the mechanism designed to
-# force that reconciliation rather than silently drifting.
+# TestAdversarial_*, TestVerify*, TestBind*, TestNew*, TestRoles*,
+# TestControls_*, TestRedactionBoundary_*) rather than at sibling phase-5
+# sub-tasks' not-yet-merged marker matrices. T1 (internal/ldap/controls.go's
+# critical-control guard) and T2 (search.go's size/time-limit telemetry,
+# consolidated into finishSearch) have both landed and are reconciled below
+# — see controls.go's criticalControlGuard.ServeLDAP/logCriticalControlRejected
+# rows and search.go's connectionHandler.finishSearch row, each proven by
+# TestControls_CriticalControlMarkerNeverReachesLogOrDiagnostic and/or
+# TestRedactionBoundary_SearchTelemetryOmitsRoleValues. T3's boundary-matrix
+# extensions, T6's verifier redaction/rotation matrix and T7's
+# cmd/ch-jwt-verify debug-log matrix remain sibling phase-5 sub-tasks running
+# in their own disjoint worktrees, not yet visible here. Once they land,
+# regenerate by AST-discovering the merged tree and extend this manifest for
+# whatever their production changes newly introduce. The "unmapped sink"
+# check is exactly the mechanism designed to force that reconciliation
+# rather than silently drifting.
 scope	path	function	sink_kind	fingerprint	credential_reachable	data_class	ownership	proof_type	proof_test	state	gate
 cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	LoadConfig	fmt-errorf	lit:read config: %w	no	config-error-text	local	non-credential	n/a	safe	-
 cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	LoadConfig	fmt-errorf	lit:parse config: %w	no	config-error-text	local	non-credential	n/a	safe	-
@@ -135,6 +139,8 @@ internal/ldap	internal/ldap/bind.go	connectionHandler.handleBind	zerolog-termina
 internal/ldap	internal/ldap/bind.go	connectionHandler.handleBind	zerolog-terminal	lit:ldap bind succeeded	no	verified-identity-metadata	local	marker	TestProtocol_SentinelCredentialAbsentFromLogs	safe	-
 internal/ldap	internal/ldap/bind.go	connectionHandler.failBind	ldap-diagnostic	constref:invalidCredentialsDiagnostic	no	protocol-constant	local	non-credential	n/a	safe	-
 internal/ldap	internal/ldap/bind.go	connectionHandler.failBind	zerolog-terminal	lit:ldap bind failed	no	fixed-reason-literal	local	marker	TestProtocol_SentinelCredentialAbsentFromLogs	safe	-
+internal/ldap	internal/ldap/controls.go	criticalControlGuard.ServeLDAP	ldap-diagnostic	constref:criticalControlDiagnostic	no	protocol-constant	local	marker	TestControls_CriticalControlMarkerNeverReachesLogOrDiagnostic	safe	-
+internal/ldap	internal/ldap/controls.go	logCriticalControlRejected	zerolog-terminal	lit:ldap operation rejected: unsupported critical control	no	protocol-constant	local	marker	TestControls_CriticalControlMarkerNeverReachesLogOrDiagnostic	safe	-
 internal/ldap	internal/ldap/dn.go	NewUserBaseDN	errors-new	lit:ldap: user_rdn_attribute must not be empty	no	config-value	local	non-credential	n/a	safe	-
 internal/ldap	internal/ldap/dn.go	NewUserBaseDN	fmt-errorf	lit:ldap: invalid user base DN %q: %w	no	config-value	local	non-credential	n/a	safe	-
 internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	fmt-errorf	lit:ldap: malformed bind DN: %w	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
@@ -146,8 +152,7 @@ internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap
 internal/ldap	internal/ldap/dn.go	NewGroupBaseDN	fmt-errorf	lit:ldap: invalid group base DN %q: %w	no	config-value	local	non-credential	n/a	safe	-
 internal/ldap	internal/ldap/entry.go	NewGroupEntry	errors-new	lit:ldap: group base DN is nil	no	none	local	non-credential	n/a	safe	-
 internal/ldap	internal/ldap/entry.go	NewGroupEntry	errors-new	lit:ldap: role must not be empty	no	none	local	non-credential	n/a	safe	-
-internal/ldap	internal/ldap/search.go	connectionHandler.handleSearch	zerolog-terminal	lit:ldap search succeeded (zero roles)	no	role-metadata-safe	local	structural	TestProtocol_ZeroRoleBindGetsSuccessfulEmptySearch	safe	-
-internal/ldap	internal/ldap/search.go	connectionHandler.handleSearch	zerolog-terminal	lit:ldap search succeeded	no	role-metadata-safe	local	structural	TestProtocol_SearchReturnsFullSyntheticEntry	safe	-
+internal/ldap	internal/ldap/search.go	connectionHandler.finishSearch	zerolog-terminal	constref:msg	no	search-telemetry-safe	local	marker	TestRedactionBoundary_SearchTelemetryOmitsRoleValues,TestProtocol_ZeroRoleBindGetsSuccessfulEmptySearch,TestProtocol_SearchReturnsFullSyntheticEntry	safe	-
 internal/ldap	internal/ldap/search.go	connectionHandler.failSearch	ldap-diagnostic	constref:searchNotAuthorizedDiagnostic	no	protocol-constant	local	non-credential	n/a	safe	-
 internal/ldap	internal/ldap/search.go	connectionHandler.failSearch	zerolog-terminal	lit:ldap search rejected	no	protocol-constant	local	structural	TestProtocol_WrongBaseScopeFilterTable	safe	-
 internal/ldap	internal/ldap/server.go	New	errors-new	lit:ldap: rootCtx must not be nil	no	none	local	non-credential	n/a	safe	-

@@ -2,6 +2,7 @@ package ldap
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,12 @@ import (
 // fakeVerifier/fakeRoles/account are all reused unchanged from
 // protocol_test.go; only verifier/roleResolver are test fakes, and no test
 // here calls controls.go's criticalControlGuard directly.
+//
+// The redaction-inventory proof at the bottom of this file
+// (TestControls_CriticalControlMarkerNeverReachesLogOrDiagnostic) additionally
+// reuses redaction_boundary_test.go's captureAppLog/redactionCaptureModes —
+// the same A2 non-parallel-capture discipline that file's header documents
+// applies to that one test.
 //
 // Every control this file attaches uses an OID this server does not
 // implement (testUnknownControlOID below), since the server implements no
@@ -512,4 +519,91 @@ func TestControls_CriticalOperationsReturnTypedResult12(t *testing.T) {
 		_, err := conn.WhoAmI([]goldapclient.Control{unknownControl(true)})
 		requireResultCode(t, "extended", err, ldapserver.LDAPResultUnavailableCriticalExtension)
 	})
+}
+
+// ---- 9. critical-control marker never reaches log or diagnostic -----------
+//
+// This is the redaction-inventory proof for controls.go's two new sinks
+// (criticalControlGuard.ServeLDAP's three SetDiagnosticMessage(
+// criticalControlDiagnostic) call sites, which the manifest's five-part key
+// dedupes into one row, and logCriticalControlRejected's fixed Msg). Reading
+// controls.go shows hasCriticalControl and every switch case below it only
+// ever reference the fixed criticalControlDiagnostic constant and fixed op
+// literals — never a control's actual OID or value — so this is a
+// structural fact provable by inspection. This test proves it dynamically
+// too: goldap's LDAPOID is read as a plain octet string with no
+// numeric-OID-format enforcement (see third_party/goldap/message/oid.go's
+// readLDAPOID), so a distinctive marker string can stand in for a real OID
+// on the wire, and this test attaches it to both a critical Bind and a
+// critical Search, capturing the application log at both the default and
+// (per A2) Trace global level, then asserts the marker appears in neither
+// the captured log nor the client-visible diagnostic text either response
+// returns.
+
+// markerControlValue implements goldapclient.Control like unknownControlValue
+// above, except its controlType is an arbitrary caller-supplied string
+// rather than a fixed test OID, so it can carry a distinguishing marker.
+type markerControlValue struct {
+	oid      string
+	critical bool
+}
+
+func (c markerControlValue) GetControlType() string { return c.oid }
+func (c markerControlValue) String() string         { return c.oid }
+func (c markerControlValue) Encode() *ber.Packet {
+	packet := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "Control")
+	packet.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, c.oid, "Control Type"))
+	if c.critical {
+		packet.AppendChild(ber.NewLDAPBoolean(ber.ClassUniversal, ber.TypePrimitive, ber.TagBoolean, true, "Criticality"))
+	}
+	return packet
+}
+
+func markerControl(oid string, critical bool) goldapclient.Control {
+	return markerControlValue{oid: oid, critical: critical}
+}
+
+func TestControls_CriticalControlMarkerNeverReachesLogOrDiagnostic(t *testing.T) {
+	const controlMarker = "CRITICAL-CONTROL-MARKER-9c1f0a3d-should-never-be-logged-or-diagnosed"
+
+	for _, mode := range redactionCaptureModes {
+		t.Run(mode.name, func(t *testing.T) {
+			acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
+			addr, _, _ := startTestServer(t, newFakeVerifier(acct), newFakeRoles(acct))
+			buf := captureAppLog(t, mode)
+
+			// Critical Bind carrying the marker as its control's OID.
+			conn := dialTest(t, addr)
+			_, err := conn.SimpleBind(&goldapclient.SimpleBindRequest{
+				Username:           protoBindDN("alice"),
+				Password:           "jwt-alice",
+				Controls:           []goldapclient.Control{markerControl(controlMarker, true)},
+				AllowEmptyPassword: true,
+			})
+			bindErr := asLDAPError(err)
+			if bindErr == nil || int(bindErr.ResultCode) != ldapserver.LDAPResultUnavailableCriticalExtension {
+				t.Fatalf("critical bind with marker control: err=%v, want result 12", err)
+			}
+			if strings.Contains(bindErr.Error(), controlMarker) {
+				t.Fatalf("bind diagnostic contains the control marker: %v", bindErr)
+			}
+
+			// A real Bind, then a critical Search carrying the marker.
+			requireSuccess(t, "real bind", bindAs(conn, protoBindDN("alice"), "jwt-alice"))
+			req := membershipSearch(protoGroupBaseDN, protoBindDN("alice"), nil)
+			req.Controls = []goldapclient.Control{markerControl(controlMarker, true)}
+			_, searchErr := conn.Search(req)
+			searchLdapErr := asLDAPError(searchErr)
+			if searchLdapErr == nil || int(searchLdapErr.ResultCode) != ldapserver.LDAPResultUnavailableCriticalExtension {
+				t.Fatalf("critical search with marker control: err=%v, want result 12", searchErr)
+			}
+			if strings.Contains(searchLdapErr.Error(), controlMarker) {
+				t.Fatalf("search diagnostic contains the control marker: %v", searchLdapErr)
+			}
+
+			if strings.Contains(buf.String(), controlMarker) {
+				t.Fatalf("captured application log contains the control marker:\n%s", buf.String())
+			}
+		})
+	}
 }
