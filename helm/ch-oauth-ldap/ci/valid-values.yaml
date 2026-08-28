@@ -1,0 +1,19 @@
+# Synthetic, non-secret values sufficient for valid `helm lint`/`helm
+# template` rendering. Not a deployment recommendation — see values.yaml
+# for documented defaults and README.md for real operator guidance.
+#
+# Excluded from the packaged chart via .helmignore.
+
+image:
+  tag: ldap-0123abc # immutable-looking synthetic tag, not a real published image
+
+oauth:
+  expected_issuer: "https://idp.example.invalid/"
+  jwks_url: "https://idp.example.invalid/.well-known/jwks.json"
+  expected_audiences:
+    - clickhouse
+
+networkPolicy:
+  clickhousePodSelector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse

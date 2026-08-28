@@ -1,0 +1,2 @@
+# Dev override: single replica, no PDB (PDB only renders for replicaCount > 1).
+replicaCount: 1

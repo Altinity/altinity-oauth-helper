@@ -1,0 +1,117 @@
+# Default values for ch-oauth-ldap.
+#
+# This chart renders an environment-level, internal-only Deployment plus a
+# ClusterIP Service exposing LDAP port 389 (see templates/service.yaml and
+# templates/deployment.yaml, owned by a sibling change). ClickHouse reaches
+# it over the cluster network as its LDAP user directory; there is no public
+# exposure and no HTTP surface. The bind port the container process opens is
+# fixed by the chart (not a value here) — see templates/_helpers.tpl and
+# templates/configmap.yaml.
+#
+# `helm lint` does not enforce this chart's `required`/`fail` validation
+# (Helm 4.1.4 and Helm 3 both treat those as non-fatal for lint); use
+# `helm template`/install/upgrade to prove fail-closed rendering.
+
+image:
+  repository: ghcr.io/altinity/ch-oauth-ldap
+  tag: ""           # required: pin an immutable published tag, e.g. ldap-<7-char-sha>
+  pullPolicy: IfNotPresent
+
+# -- Replica count. Production default is 2 for best-effort HA; see
+# values-dev.yaml for a 1-replica override (which also omits the PDB).
+replicaCount: 2
+
+# -- Best-effort node spread for the two production replicas. Does not
+# guarantee survival of node loss; a non-empty explicit `affinity` below
+# replaces this generated preference entirely.
+podAntiAffinity:
+  enabled: true
+  topologyKey: kubernetes.io/hostname
+  weight: 100
+
+imagePullSecrets: []
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+priorityClassName: ""
+affinity: {}
+topologySpreadConstraints: []
+
+# -- Initial engineering defaults, not measured sizing. See README.md for
+# the server's fixed connection/timeout/body-size constraints and the
+# capacity math these resources budget against.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+# -- One of: debug, info, warn, error.
+logLevel: info
+
+# -- Cluster DNS suffix used to build the ClickHouse-facing Service hostname
+# rendered into the LDAP XML ConfigMap: <fullname>.<namespace>.svc.<clusterDomain>.
+clusterDomain: cluster.local
+
+# -- Ingress-only NetworkPolicy restricting who may reach the LDAP port.
+# Rendered by default (this phase's recorded security decision: the OAuth
+# bearer travels in clear text as the LDAP bind password, so source
+# restriction is the only network-layer mitigation available without TLS).
+# `enabled: false` is a documented compatibility escape hatch — it omits
+# only the NetworkPolicy and never changes Service exposure.
+#
+# Both selectors are full Kubernetes LabelSelector objects. When enabled,
+# `clickhousePodSelector` must be substantive (at least one matchLabels
+# entry or matchExpressions entry) — normal rendering fails otherwise.
+# `clickhouseNamespaceSelector` left as `{}` means "no namespace
+# restriction, ClickHouse must be in this release's namespace"; once
+# supplied non-empty it must also be substantive.
+networkPolicy:
+  enabled: true
+  clickhousePodSelector: {}
+  clickhouseNamespaceSelector: {}
+
+# -- OAuth/JWT verification. Mirrors cmd/ch-oauth-ldap's `oauth:` config
+# block exactly; see cmd/ch-oauth-ldap/config.go.
+oauth:
+  expected_issuer: ""
+  jwks_url: ""
+  expected_audiences: []
+  username_claim: email
+  groups_claim: roles
+  verifier_leeway: 60s
+  required_scopes: []
+  jwks_cache_lifetime: 5m
+  token_cache_lifetime: 30s
+
+# -- Identity/username policy. Mirrors cmd/ch-oauth-ldap's `identity:` block
+# exactly.
+identity:
+  username_match: lowercase_equal
+  require_email_verified: true
+  allowed_email_domains: []
+  allowed_hosted_domains: []
+  denied_usernames:
+    - default
+    - admin
+    - operator
+
+# -- OAuth-group-to-ClickHouse-role mapping. Mirrors cmd/ch-oauth-ldap's
+# `roles:` block exactly.
+roles:
+  roles_mapping: {}
+  roles_filter: '^ch_[A-Za-z0-9_]+$'
+  roles_transform: ''
+
+# -- LDAP directory shape the binary presents to ClickHouse. Mirrors
+# cmd/ch-oauth-ldap's `ldap:` block, minus the bind address: that is fixed
+# by the chart to the container's published port and cannot be set here —
+# normal rendering rejects any operator-supplied value for it.
+ldap:
+  user_base_dn: 'ou=users,dc=altinity,dc=internal'
+  group_base_dn: 'ou=groups,dc=altinity,dc=internal'
+  user_rdn_attribute: uid
+  role_cn_prefix: 'clickhouse_'
