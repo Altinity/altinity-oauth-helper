@@ -28,7 +28,7 @@ no native Bearer/JWT auth path; Antalya does).
 | `integration/clickhouse/` | real-ClickHouse acceptance suite for `ch-oauth-ldap` — `run.sh` (4-service Docker fixture: synthetic IdP + helper + two ClickHouse nodes, preflight, sources `scenarios/*.sh` A–I), `run-all-builds.sh` (every build in `lib/expectations.sh`), `lib/expectations.sh` (per-ClickHouse-version expected outcomes for the two tracked upstream bugs, #78791/#79099 and #116840), `clickhouse/common/config.d/ldap.xml` (the working LDAP config `README.md` copies). Manual/local gate, not CI; see `integration/clickhouse/README.md` |
 | `cmd/synthetic-idp/` | a controllable in-process test IdP (imported from altinity-mcp) used by examples/local dev and the integration suite (`/sign` mints RS256 JWTs, repeatable `role=` → `roles` claim) — not part of the shipped image |
 | `helm/ch-jwt-verify/` | Helm chart — ConfigMaps (sidecar config, CH `http_authentication_servers` XML) + a reusable container fragment (`_helpers.tpl`) for sidecar mode, plus a standalone Deployment+Service mode; see `helm/ch-jwt-verify/README.md` |
-| `helm/ch-oauth-ldap/` | standalone Helm chart for the environment-level LDAP deployment — two-replica Deployment, internal-only `ClusterIP` Service on 389, default-on source-restricting NetworkPolicy, PDB, and the two ConfigMaps (helper config, CH LDAP XML); committed local gate is `helm/ch-oauth-ldap/test.sh` (render/negative-matrix/embedded-content/packaging checks, plus its own `ci/` fixtures) — see `helm/ch-oauth-ldap/README.md` |
+| `helm/ch-oauth-ldap/` | standalone Helm chart for the environment-level LDAP deployment — two-replica Deployment, internal-only `ClusterIP` Service on 389, default-on source-restricting NetworkPolicy, PDB, and the two ConfigMaps (helper config, CH LDAP XML); committed local gate is `helm/ch-oauth-ldap/test.sh` (render/negative-matrix/embedded-content/packaging/actionlint checks, plus its own `ci/` fixtures) — see `helm/ch-oauth-ldap/README.md` |
 | `examples/` | consumer × deploy-style recipes (`_platform` is the shared Dex+Postgres+ClickHouse+sidecar base every consumer overlay layers on); `examples/README.md` tracks the working/planned/broken matrix |
 | `scripts/build-image.sh` | multi-arch (`amd64`+`arm64`) build & push for `ghcr.io/altinity/ch-jwt-verify`, legacy `DOCKER_BUILDKIT=0` |
 | `scripts/build-ch-oauth-ldap-image.sh` | multi-arch (`amd64`+`arm64`) build & push for `ghcr.io/altinity/ch-oauth-ldap`, mirrors `build-image.sh`'s legacy `DOCKER_BUILDKIT=0` convention; never compiles into the checkout, and builds only from an exported `git archive HEAD` tree (never the live working tree); refuses to republish an already-existing tag (no force override) |
@@ -66,8 +66,10 @@ fork that logic — extend the SDK instead when the need is generic (not
   when touching `cmd/ch-oauth-ldap`, `internal/ldap`, or ClickHouse-facing config.
 - `helm/ch-oauth-ldap/test.sh` — the `ch-oauth-ldap` chart's committed local
   gate (render matrix, negative-render matrix, embedded-YAML/XML structural
-  checks, kubeconform, packaging hygiene). Like the Go gate, it is not run by
-  any workflow — run it yourself when touching `helm/ch-oauth-ldap/**`.
+  checks, kubeconform, packaging hygiene, and a pinned-actionlint validity
+  check on `.github/workflows/build-ch-oauth-ldap.yml`, informational-only
+  against `build-ch-jwt-verify.yml`). Like the Go gate, it is not run by any
+  workflow — run it yourself when touching `helm/ch-oauth-ldap/**`.
 - No Makefile, no linter config committed yet — if you add `golangci-lint`
   or similar, wire it into a real CI workflow in the same change, not just
   locally.

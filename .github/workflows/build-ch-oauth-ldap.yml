@@ -227,10 +227,11 @@ jobs:
           # same fail-closed-on-ambiguous-error handling as the per-arch
           # guard (see its comment for the ghcr.io "denied" rationale).
           #
-          # TAG/FULL come in through `env:` (not inlined `${{ }}` in the
-          # script body) so this step's body is plain bash -- identical in
-          # shape to the per-arch guard step -- and can be extracted from
-          # the workflow YAML and executed standalone by the gate.
+          # TAG/FULL come in through `env:` (never inlined as an expression
+          # in the script body) so this step's body is plain bash --
+          # identical in shape to the per-arch guard step -- and can be
+          # extracted from the workflow YAML and executed standalone by the
+          # gate.
           NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
           # errexit-safe capture -- see the per-arch guard step's comment
           # above for why a bare `OUT=$(...); RC=$?` would block every

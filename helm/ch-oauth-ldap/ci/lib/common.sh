@@ -48,6 +48,13 @@
 #     kubeconform_check MANIFEST
 #     print_gate_pins
 #
+#   Pinned, reproducible actionlint (workflow-validity gate, added for the
+#   ${{ }}-in-a-run:-comment incident that made build-ch-oauth-ldap.yml an
+#   invalid workflow file on main):
+#     ACTIONLINT_VERSION             default v1.7.7, env-overridable
+#     ensure_actionlint BIN_DIR
+#     print_gate_pins (also prints ACTIONLINT_VERSION)
+#
 #   Deterministic SIGINT/cleanup regression harness (sections 29, 50):
 #     gate_sigint_regression LABEL SCRIPT RUN_DIR_PREFIX STATE_DIR
 #       Runs the real, unmodified SCRIPT under an isolated $TMPDIR with a
@@ -319,14 +326,76 @@ kubeconform_check() {
         "$manifest"
 }
 
+# --- reproducible actionlint (workflow-validity gate) ------------------------
+
+# Pinned actionlint release. `v1.7.7` is the version this check was
+# authored and verified against (it is what caught the ${{ }}-in-a-comment
+# defect that made build-ch-oauth-ldap.yml an invalid workflow file on
+# main). Override with the environment for a different pinned version --
+# never install the unpinned "latest" tag.
+: "${ACTIONLINT_VERSION:=v1.7.7}"
+
+# Resolved path to the actionlint binary this library will use, set by
+# ensure_actionlint. Empty until ensure_actionlint runs.
+ACTIONLINT_BIN="${ACTIONLINT_BIN:-}"
+
+# ensure_actionlint BIN_DIR
+# Uses an existing `actionlint` on PATH only if its `-version` output's
+# first line equals the pinned $ACTIONLINT_VERSION (an unpinned or
+# different PATH binary would make workflow-validity results
+# irreproducible). Otherwise installs the pinned $ACTIONLINT_VERSION with
+# `go install` into BIN_DIR (never the unpinned "latest" tag). Sets
+# $ACTIONLINT_BIN to the resolved binary path. Requires network access to
+# the Go module proxy only in the install path. Mirrors ensure_kubeconform
+# above; fails closed (via `fail`, no silent skip) if the pinned binary
+# cannot be resolved on PATH or installed.
+ensure_actionlint() {
+    local bin_dir="$1" on_path reported
+
+    if on_path=$(command -v actionlint 2>/dev/null); then
+        reported=$("$on_path" -version 2>/dev/null | command head -n1 | tr -d '[:space:]')
+        if [ "$reported" = "$ACTIONLINT_VERSION" ]; then
+            ACTIONLINT_BIN="$on_path"
+            note "using actionlint already on PATH: $ACTIONLINT_BIN (reports ${reported}, matches pin)"
+            return 0
+        fi
+        note "actionlint on PATH at $on_path reports '${reported:-<nothing>}', not the pinned ${ACTIONLINT_VERSION}; installing the pinned version instead"
+    fi
+
+    if [ -z "$bin_dir" ]; then
+        fail "ensure_actionlint: BIN_DIR argument is required when actionlint is not on PATH"
+        return 1
+    fi
+
+    mkdir -p "$bin_dir"
+    note "installing actionlint ${ACTIONLINT_VERSION} into $bin_dir"
+    if ! GOBIN="$bin_dir" go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"; then
+        fail "ensure_actionlint: go install failed for actionlint@${ACTIONLINT_VERSION}"
+        return 1
+    fi
+
+    ACTIONLINT_BIN="$bin_dir/actionlint"
+    if [ ! -x "$ACTIONLINT_BIN" ]; then
+        fail "ensure_actionlint: expected binary not found at $ACTIONLINT_BIN after install"
+        return 1
+    fi
+    reported=$("$ACTIONLINT_BIN" -version 2>/dev/null | command head -n1 | tr -d '[:space:]')
+    if [ "$reported" != "$ACTIONLINT_VERSION" ]; then
+        fail "ensure_actionlint: installed binary reports '${reported:-<nothing>}', expected ${ACTIONLINT_VERSION}"
+        return 1
+    fi
+    note "installed actionlint at $ACTIONLINT_BIN (reports ${reported})"
+}
+
 # print_gate_pins
 # Prints the reproducibility pins this gate relies on. test.sh calls this
 # in its header output so a run's log records exactly which kubeconform
-# version and schema commit were used.
+# version, schema commit, and actionlint version were used.
 print_gate_pins() {
     printf 'KUBECONFORM_VERSION=%s\n' "$KUBECONFORM_VERSION"
     printf 'KUBECONFORM_SCHEMA_COMMIT=%s\n' "$KUBECONFORM_SCHEMA_COMMIT"
     printf 'KUBECONFORM_SCHEMA_LOCATION=%s\n' "$KUBECONFORM_SCHEMA_LOCATION"
+    printf 'ACTIONLINT_VERSION=%s\n' "$ACTIONLINT_VERSION"
 }
 
 # --- deterministic SIGINT/cleanup regression (sections 29, 50) ---------------

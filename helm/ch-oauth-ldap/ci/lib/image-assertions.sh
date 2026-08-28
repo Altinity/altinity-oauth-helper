@@ -165,6 +165,21 @@
 #       determine"). Also a STATIC assertion that no `run:` body in the
 #       whole workflow contains the exact anti-pattern (an `UPPER_VAR=$(`
 #       assignment immediately followed by a `$?` read on the next line).
+#     - actionlint validity gate (added after a literal `${{ }}` inside a
+#       `run:` bash comment made build-ch-oauth-ldap.yml an invalid workflow
+#       file on main -- GitHub Actions evaluates `${{ ... }}` expressions
+#       anywhere inside a `run:` string, comments included, before bash ever
+#       runs, and an empty expression is a parse error): runs the pinned
+#       actionlint (ensure_actionlint in common.sh; fails closed, no silent
+#       skip, if it cannot be resolved) with `-no-color` against
+#       build-ch-oauth-ldap.yml and requires exit 0 with empty output; runs
+#       it AGAIN, informationally only, against build-ch-jwt-verify.yml
+#       (out of this scope -- never fails the gate on that file's findings,
+#       only notes them); and a NEGATIVE case that copies the real
+#       (already-valid) workflow, injects a literal `${{ }}` into a `run:`
+#       comment, and asserts actionlint FAILS on the copy -- proving this
+#       check actually inspects expressions inside comments rather than
+#       trivially passing everything.
 #     - a final `test ! -e "$REPO_ROOT/ch-oauth-ldap"` proving none of the
 #       above checks (nor anything else already on disk) left a compiled
 #       LDAP binary in the repository root.
@@ -185,6 +200,7 @@ fi
 _IA_DOCKERFILE=""
 _IA_SCRIPT=""
 _IA_WORKFLOW=""
+_IA_WORKFLOW_JWT=""
 
 # _ia_require_file LABEL PATH
 # Returns 0 (and notes nothing) if PATH exists and is a regular file.
@@ -1696,6 +1712,9 @@ _ia_workflow_assertions() {
     _ia_workflow_tag_immutability_fail_closed_static "$workflow"
     _ia_workflow_no_errexit_unsafe_capture_static "$workflow"
     _ia_workflow_tag_guard_behavioral "$workflow"
+    _ia_workflow_actionlint_check "$workflow"
+    _ia_workflow_actionlint_negative_case "$workflow"
+    _ia_workflow_actionlint_jwt_verify_informational "$_IA_WORKFLOW_JWT"
 }
 
 # _ia_workflow_no_errexit_unsafe_capture_static WORKFLOW
@@ -2026,6 +2045,117 @@ _ia_workflow_tag_immutability_fail_closed_static() {
 }
 
 # =============================================================================
+# actionlint validity gate -- added after a literal `${{ }}` inside a `run:`
+# bash comment made build-ch-oauth-ldap.yml an invalid workflow file on main.
+# GitHub Actions evaluates `${{ ... }}` expressions anywhere inside a `run:`
+# string -- comments included -- before bash ever runs; an empty expression
+# is a parse error, and any actual push-triggered run against the file fails
+# instantly with no job logs. actionlint catches this statically, so it is
+# gated here rather than relying on a human re-reading every `run:` comment.
+# =============================================================================
+
+# _ia_workflow_actionlint_check WORKFLOW
+# Runs the pinned actionlint (ensure_actionlint in common.sh must already
+# have resolved $ACTIONLINT_BIN -- this fails closed, never silently skips,
+# if it has not) with `-no-color` against the real, unmodified WORKFLOW and
+# requires exit 0 with empty stdout+stderr.
+_ia_workflow_actionlint_check() {
+    local workflow="$1"
+    local out
+
+    _ia_require_file ".github/workflows/build-ch-oauth-ldap.yml" "$workflow" || return
+
+    if [ -z "${ACTIONLINT_BIN:-}" ]; then
+        fail "actionlint: ACTIONLINT_BIN is not set -- ensure_actionlint must run (and succeed) before this check; no silent skip"
+        return
+    fi
+
+    if out=$("$ACTIONLINT_BIN" -no-color "$workflow" 2>&1); then
+        if [ -z "$out" ]; then
+            pass "actionlint: $workflow is valid (exit 0, no findings)"
+        else
+            fail "actionlint: $workflow exited 0 but reported findings (expected empty output): $out"
+        fi
+    else
+        fail "actionlint: $workflow FAILED validation: $out"
+    fi
+}
+
+# _ia_workflow_actionlint_jwt_verify_informational WORKFLOW_JWT
+# Runs the same pinned actionlint against build-ch-jwt-verify.yml, purely
+# informationally: that file is out of this fix's scope, so a finding there
+# is reported via `note` and never turns into a `fail`.
+_ia_workflow_actionlint_jwt_verify_informational() {
+    local workflow="$1"
+    local out
+
+    if [ ! -f "$workflow" ]; then
+        note "actionlint (informational): $workflow not found, skipping"
+        return
+    fi
+    if [ -z "${ACTIONLINT_BIN:-}" ]; then
+        note "actionlint (informational): ACTIONLINT_BIN not set, skipping the out-of-scope build-ch-jwt-verify.yml check"
+        return
+    fi
+
+    if out=$("$ACTIONLINT_BIN" -no-color "$workflow" 2>&1); then
+        if [ -z "$out" ]; then
+            note "actionlint (informational, out of scope): $workflow is valid (exit 0, no findings)"
+        else
+            note "actionlint (informational, out of scope): $workflow reported findings (NOT a gate failure -- this file is out of this fix's scope): $out"
+        fi
+    else
+        note "actionlint (informational, out of scope): $workflow FAILED validation (NOT a gate failure -- this file is out of this fix's scope): $out"
+    fi
+}
+
+# _ia_workflow_actionlint_negative_case WORKFLOW
+# Proves the check above actually inspects expressions inside `run:`
+# comments, rather than trivially passing every file: copies the real,
+# already-valid WORKFLOW, injects a literal `${{ }}` into a bash comment
+# immediately following the file's first `run: |` block scalar (at that
+# line's own indentation, so the injected line is valid YAML block-scalar
+# content and the ONLY defect is the reintroduced expression-parse error),
+# and asserts the pinned actionlint FAILS against the tampered copy.
+_ia_workflow_actionlint_negative_case() {
+    local workflow="$1"
+    local tampered="$RUN_TMP_DIR/actionlint-negative-case.yml"
+    local run_line content_line_no content_line indent out
+
+    _ia_require_file ".github/workflows/build-ch-oauth-ldap.yml" "$workflow" || return
+
+    if [ -z "${ACTIONLINT_BIN:-}" ]; then
+        fail "actionlint negative case: ACTIONLINT_BIN is not set -- ensure_actionlint must run (and succeed) before this check; no silent skip"
+        return
+    fi
+
+    run_line=$(command grep -nE '^[[:space:]]*run: \|[[:space:]]*$' "$workflow" | command head -n1 | command cut -d: -f1)
+    if [ -z "$run_line" ]; then
+        fail "actionlint negative case: could not find a 'run: |' block scalar in $workflow to inject into"
+        return
+    fi
+    content_line_no=$((run_line + 1))
+    content_line=$(command sed -n "${content_line_no}p" "$workflow")
+    indent=$(printf '%s' "$content_line" | command sed -E 's/^([[:space:]]*).*/\1/')
+
+    {
+        command sed -n "1,${run_line}p" "$workflow"
+        printf '%s# negative-case probe: literal ${{ }} in a run: comment\n' "$indent"
+        command sed -n "${content_line_no},\$p" "$workflow"
+    } >"$tampered"
+
+    if out=$("$ACTIONLINT_BIN" -no-color "$tampered" 2>&1); then
+        fail "actionlint negative case: expected actionlint to FAIL on a copy of $workflow with a literal \${{ }} injected into a run: comment (line $((content_line_no + 1)) of $tampered), but it exited 0 -- the check would not have caught the real defect"
+    else
+        if printf '%s' "$out" | command grep -qF '[expression]'; then
+            pass "actionlint negative case: actionlint correctly FAILS on a run: comment containing a literal \${{ }} (proves the check inspects expressions inside comments): $out"
+        else
+            fail "actionlint negative case: actionlint failed on the tampered copy, but not with the expected [expression] parse error -- got: $out"
+        fi
+    fi
+}
+
+# =============================================================================
 # Entry point
 # =============================================================================
 
@@ -2044,8 +2174,9 @@ run_image_assertions() {
     _IA_DOCKERFILE="$REPO_ROOT/Dockerfile.ch-oauth-ldap"
     _IA_SCRIPT="$REPO_ROOT/scripts/build-ch-oauth-ldap-image.sh"
     _IA_WORKFLOW="$REPO_ROOT/.github/workflows/build-ch-oauth-ldap.yml"
+    _IA_WORKFLOW_JWT="$REPO_ROOT/.github/workflows/build-ch-jwt-verify.yml"
 
-    note "run_image_assertions: Dockerfile=$_IA_DOCKERFILE script=$_IA_SCRIPT workflow=$_IA_WORKFLOW"
+    note "run_image_assertions: Dockerfile=$_IA_DOCKERFILE script=$_IA_SCRIPT workflow=$_IA_WORKFLOW workflow(informational)=$_IA_WORKFLOW_JWT"
 
     local before="${GATE_FAILURES:-0}"
 
