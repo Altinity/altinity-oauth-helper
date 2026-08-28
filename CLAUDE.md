@@ -28,10 +28,13 @@ no native Bearer/JWT auth path; Antalya does).
 | `integration/clickhouse/` | real-ClickHouse acceptance suite for `ch-oauth-ldap` — `run.sh` (4-service Docker fixture: synthetic IdP + helper + two ClickHouse nodes, preflight, sources `scenarios/*.sh` A–I), `run-all-builds.sh` (every build in `lib/expectations.sh`), `lib/expectations.sh` (per-ClickHouse-version expected outcomes for the two tracked upstream bugs, #78791/#79099 and #116840), `clickhouse/common/config.d/ldap.xml` (the working LDAP config `README.md` copies). Manual/local gate, not CI; see `integration/clickhouse/README.md` |
 | `cmd/synthetic-idp/` | a controllable in-process test IdP (imported from altinity-mcp) used by examples/local dev and the integration suite (`/sign` mints RS256 JWTs, repeatable `role=` → `roles` claim) — not part of the shipped image |
 | `helm/ch-jwt-verify/` | Helm chart — ConfigMaps (sidecar config, CH `http_authentication_servers` XML) + a reusable container fragment (`_helpers.tpl`) for sidecar mode, plus a standalone Deployment+Service mode; see `helm/ch-jwt-verify/README.md` |
+| `helm/ch-oauth-ldap/` | standalone Helm chart for the environment-level LDAP deployment — two-replica Deployment, internal-only `ClusterIP` Service on 389, default-on source-restricting NetworkPolicy, PDB, and the two ConfigMaps (helper config, CH LDAP XML); committed local gate is `helm/ch-oauth-ldap/test.sh` (render/negative-matrix/embedded-content/packaging checks, plus its own `ci/` fixtures) — see `helm/ch-oauth-ldap/README.md` |
 | `examples/` | consumer × deploy-style recipes (`_platform` is the shared Dex+Postgres+ClickHouse+sidecar base every consumer overlay layers on); `examples/README.md` tracks the working/planned/broken matrix |
 | `scripts/build-image.sh` | multi-arch (`amd64`+`arm64`) build & push for `ghcr.io/altinity/ch-jwt-verify`, legacy `DOCKER_BUILDKIT=0` |
+| `scripts/build-ch-oauth-ldap-image.sh` | multi-arch (`amd64`+`arm64`) build & push for `ghcr.io/altinity/ch-oauth-ldap`, mirrors `build-image.sh`'s legacy `DOCKER_BUILDKIT=0` convention; never compiles into the checkout |
 | `scripts/build-synthetic-idp-image.sh` | image build for the synthetic IdP used in examples |
-| `Dockerfile` / `Dockerfile.synthetic-idp` | consumed by the two build scripts above |
+| `Dockerfile` / `Dockerfile.synthetic-idp` / `Dockerfile.ch-oauth-ldap` | consumed by the three build scripts above (`Dockerfile.ch-oauth-ldap` by `scripts/build-ch-oauth-ldap-image.sh`) |
+| `.github/workflows/build-ch-oauth-ldap.yml` | push-to-main image publication for `ghcr.io/altinity/ch-oauth-ldap` (tag `ldap-<short-sha>`), mirroring `build-ch-jwt-verify.yml`'s structure |
 
 JWKS fetching, JWT validation, and identity-policy helpers (verified-email,
 allowed domains, `iss`/`aud` checks) live upstream in
@@ -46,10 +49,14 @@ fork that logic — extend the SDK instead when the need is generic (not
 - `go test ./...` — the test suite; `cmd/ch-jwt-verify/verify_test.go` spins
   up an in-process test IdP (RSA-signed JWTs against an httptest JWKS
   server) rather than depending on any shared fixture, since the sidecar is
-  independent of any e2e test elsewhere. There is no coverage gate, and
-  `.github/workflows/build-ch-jwt-verify.yml` only builds+pushes the image on
-  push to `main` (path-filtered to `cmd/ch-jwt-verify/**`, `go.mod`/`go.sum`,
-  `Dockerfile`) — it is not a PR-time test/lint gate. Run the gate yourself
+  independent of any e2e test elsewhere. There is no coverage gate. There
+  are **two** push-to-main image-publication workflows —
+  `.github/workflows/build-ch-jwt-verify.yml` (path-filtered to
+  `cmd/ch-jwt-verify/**`, `go.mod`/`go.sum`, `Dockerfile`) and
+  `.github/workflows/build-ch-oauth-ldap.yml` (path-filtered to
+  `cmd/ch-oauth-ldap/**`, `internal/**`, `third_party/**`, `go.mod`/`go.sum`,
+  `Dockerfile.ch-oauth-ldap`) — and **neither is a PR-time test/lint gate**;
+  both only build+push an image on push to `main`. Run the gate yourself
   before calling a change done; write tests for new behavior, especially
   around cache-key isolation and identity-policy edge cases, since those are
   the security-relevant surface.
@@ -57,6 +64,10 @@ fork that logic — extend the SDK instead when the need is generic (not
 - `./integration/clickhouse/run.sh` (or `run-all-builds.sh`) — the real-ClickHouse
   integration suite; manual and Docker-based, not run by any workflow. Run it
   when touching `cmd/ch-oauth-ldap`, `internal/ldap`, or ClickHouse-facing config.
+- `helm/ch-oauth-ldap/test.sh` — the `ch-oauth-ldap` chart's committed local
+  gate (render matrix, negative-render matrix, embedded-YAML/XML structural
+  checks, kubeconform, packaging hygiene). Like the Go gate, it is not run by
+  any workflow — run it yourself when touching `helm/ch-oauth-ldap/**`.
 - No Makefile, no linter config committed yet — if you add `golangci-lint`
   or similar, wire it into a real CI workflow in the same change, not just
   locally.
@@ -82,6 +93,20 @@ fork that logic — extend the SDK instead when the need is generic (not
   the standalone Deployment+Service mode added in `feat(helm)` is for
   scenarios where the caller explicitly accepts a different trust model
   (document why, in the chart README, when you touch it).
+- **`ch-oauth-ldap`'s environment-level trust model is a distinct, separately
+  accepted exception — it does not weaken the sidecar guidance above.**
+  Unlike `ch-jwt-verify`'s loopback-only sidecar, `ch-oauth-ldap` runs as its
+  own environment-level Deployment behind a `ClusterIP` Service, so the OAuth
+  bearer necessarily crosses a real network hop (ClickHouse → helper) as the
+  LDAP simple-bind password, in clear text (`ADR #16` deviation; named risk
+  owner Boris Tyshkevich / `@BorisTyshkevich`; see `README.md`). The
+  compensating controls are: the Service stays `ClusterIP`-only with no
+  public-exposure knobs, and the chart renders a default-on
+  source-restricting NetworkPolicy that fails closed on an allow-all/empty
+  ClickHouse selector — but a NetworkPolicy is reachability control, not
+  transport confidentiality, so don't describe it as one in docs or review.
+  Removing the exception means TLS on the LDAP listener or moving to a
+  loopback sidecar, not relaxing the NetworkPolicy default.
 - **Cache-key correctness is a security property, not a perf detail.** The
   `/verify` response cache key must stay bound to the identity the JWT
   authenticates as (see `e2be32a fix(ch-jwt-verify): bind verification cache

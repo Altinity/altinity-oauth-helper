@@ -3,6 +3,15 @@
 Read once per `/ship` run (step 1). Every item here was learned the hard way on this
 repo; when one bites anyway, update this file in the same change.
 
+## Claude Code tool shell
+
+- `grep`/`find` are **shadowed shell functions** in the Claude Code tool shell (not
+  the real binaries) — observed misbehaving ad hoc in this environment. Use
+  `command grep`/`command find`, or the absolute `/usr/bin/grep`, when running either
+  ad hoc from the tool shell. This shadowing does **not** propagate into child bash
+  scripts (e.g. a script invoked via `bash foo.sh`, or CI) — those see the real
+  `grep`/`find` on `PATH` and need no workaround.
+
 ## Go build/test and the gate
 
 - No lifecycle-script gate to worry about (no `package.json`/`.npmrc` in this repo) —
@@ -44,12 +53,17 @@ exercising the relevant recipe under `examples/`:
   locally the first time on this repo; simplify if bare `gh issue view` turns out fine
   here. Never `$(cat …)`/`sed` inside a quoted heredoc to build a body.
 - **CI waits must key on the head SHA**: `gh run list --limit 1` right after a push
-  reports the *previous* head's run. Match on `headSha`. This repo's only workflow
-  (`build-ch-jwt-verify.yml`) triggers on push to `main` (path-filtered to
-  `cmd/ch-jwt-verify/**`/`go.mod`/`go.sum`/`Dockerfile`) and publishes an image — it
-  never runs against a PR, so there is no PR-time CI to wait on yet; the local gate is
-  the real pre-merge check. If a PR-time gate is added later, apply this SHA-keying
-  rule to it.
+  reports the *previous* head's run. Match on `headSha`. This repo has **two**
+  push-to-main image-publication workflows — `build-ch-jwt-verify.yml`
+  (path-filtered to `cmd/ch-jwt-verify/**`/`go.mod`/`go.sum`/`Dockerfile`) and
+  `build-ch-oauth-ldap.yml` (path-filtered to `cmd/ch-oauth-ldap/**`/`internal/**`/
+  `third_party/**`/`go.mod`/`go.sum`/`Dockerfile.ch-oauth-ldap`) — and **neither is a
+  PR-time test gate**; both only build+publish an image on push to `main`, so there
+  is no PR-time CI to wait on. Local/phase gates (`go build/vet/test ./...`,
+  `helm/ch-oauth-ldap/test.sh`) remain the real pre-merge proof. The `headSha`-keying
+  rule above applies to both workflows if you ever do wait on one of them (e.g. to
+  confirm a post-merge publish actually ran) — never assume `gh run list --limit 1`
+  without SHA-matching for either.
 - A present-but-expired `GITHUB_TOKEN` breaks `git push` and `gh` identically — it
   looks like a network/allowlist failure but isn't; tell the user.
 
