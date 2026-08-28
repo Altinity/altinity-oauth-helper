@@ -12,7 +12,8 @@
 #
 # run.sh sources every integration/clickhouse/scenarios/*.sh file in
 # lexical (glob) order, but only AFTER:
-#   1. the mechanical Docker health gate has passed for all four services;
+#   1. the mechanical Docker health gate has passed for every service in
+#      PHASE3_SERVICES;
 #   2. RBAC/data bootstrap (bootstrap/common.sql, then origin.sql/
 #      remote.sql) has been applied;
 #   3. the full scenario-A infrastructure/compatibility preflight
@@ -47,12 +48,15 @@
 #     `10-ephemeral-user.sh` (B), `20-dynamic-roles.sh` (C),
 #     `30-username-mismatch.sh` (D), `40-invalid-expired.sh` (E),
 #     `50-role-refresh.sh` (F), `60-local-precedence.sh` (G),
-#     `70-distributed-propagation.sh` (H, the base-table authorization
-#     oracle), `75-distributed-propagation-view.sh` (H's expected-fail
-#     sibling: a view-based oracle tracking an independent ClickHouse
-#     defect — see lib/expectations.sh), `80-leak-scan.sh` (I, which must
-#     run last so every earlier scenario's retained credentials are in the
-#     registry). Leave gaps for new scenarios.
+#     `65-ldap-search-limits.sh` (phase-5 G' — LDAP Search-limit
+#     compatibility, sorted between G and H; never renumber H/H'/I to make
+#     room for a new letter), `70-distributed-propagation.sh` (H, the
+#     base-table authorization oracle), `75-distributed-propagation-view.sh`
+#     (H's expected-fail sibling: a view-based oracle tracking an
+#     independent ClickHouse defect — see lib/expectations.sh),
+#     `80-leak-scan.sh` (I, which must run last so every earlier scenario's
+#     retained credentials are in the registry). Leave gaps for new
+#     scenarios.
 #   - a scenario probing a known, tracked upstream ClickHouse behavioral
 #     difference between builds (see lib/expectations.sh) should source
 #     that file (same pattern as lib/oauth.sh: sourced by the scenario
@@ -147,13 +151,13 @@
 #   network_has_container NET NAME  returns 0 if Docker network NET
 #                                     currently has a container named NAME
 #                                     attached, 1 otherwise
-#   wait_for_health [DEADLINE_SECS]  poll all four services' Docker health
-#                                     status (default deadline 120s); 0
-#                                     once all report "healthy"; 1 (after
-#                                     calling capture_diagnostics) on
-#                                     timeout
-#   capture_diagnostics              dump `compose ps` and all four
-#                                     services' logs into
+#   wait_for_health [DEADLINE_SECS]  poll every PHASE3_SERVICES entry's
+#                                     Docker health status (default
+#                                     deadline 120s); 0 once all report
+#                                     "healthy"; 1 (after calling
+#                                     capture_diagnostics) on timeout
+#   capture_diagnostics              dump `compose ps` and every
+#                                     PHASE3_SERVICES entry's logs into
 #                                     $RUN_TMP_DIR/diagnostics for a
 #                                     timeout/failure post-mortem
 
@@ -161,7 +165,20 @@ PHASE3_IDP_PORT="${PHASE3_IDP_PORT:-18080}"
 PHASE3_CH_HTTP_PORT="${PHASE3_CH_HTTP_PORT:-18123}"
 CH_HTTP_STATUS=""
 
-PHASE3_SERVICES=(synthetic-idp ch-oauth-ldap clickhouse-origin clickhouse-remote)
+# Guards PHASE3_SERVICES' default initialization against a second `source`
+# of this file within the same shell silently resetting a caller's
+# reassignment — e.g. run-ha.sh sources this file once, then reassigns
+# PHASE3_SERVICES to its HA-shaped service list; a later, unrelated
+# re-source elsewhere in the same shell (this file has no re-source of its
+# own today, but this mirrors lib/leakscan.sh's own LEAKSCAN_SH_LOADED
+# discipline exactly, for the same reason: nothing here should ever depend
+# on being sourced exactly once to stay correct) must not put it back to
+# the phase-3 default. Function definitions below are always safe to
+# redefine, so only this variable initialization is guarded.
+if [ -z "${COMMON_SH_LOADED:-}" ]; then
+    COMMON_SH_LOADED=1
+    PHASE3_SERVICES=(synthetic-idp ch-oauth-ldap clickhouse-origin clickhouse-remote)
+fi
 
 log() {
     printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
@@ -316,7 +333,7 @@ wait_for_health() {
         done
 
         if [ "$all_ok" -eq 1 ]; then
-            log "all four services report healthy"
+            log "all ${#PHASE3_SERVICES[@]} services report healthy"
             return 0
         fi
 

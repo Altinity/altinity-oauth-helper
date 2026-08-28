@@ -44,6 +44,18 @@
 #
 # ...and a ChatGPT review finding beyond those two passes:
 #
+#   T11 (issue #19 phase 5, plan §17.1-17.3): a daemon-free shim test of
+#   run.sh's bring_up_fixture_fallback (service-set/config parity with
+#   compose.yml, --alias on every hand-connect, correct auth-net/cluster-net
+#   aliases, and that only ch-oauth-ldap/clickhouse-remote are disconnected
+#   from the shared network); array-driven leak-scan completeness tests
+#   (normal defaults still yield exactly the legacy six required files; a
+#   missing/empty artifact for an HA-shaped LEAKSCAN_COMPOSE_SERVICES/
+#   LEAKSCAN_NODES/LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS set is a hard failure);
+#   and a sourcing-guard idempotence test proving a second `source` of
+#   lib/common.sh or lib/leakscan.sh does not reset a caller's
+#   PHASE3_SERVICES/LEAKSCAN_NODES/LEAKSCAN_COMPOSE_SERVICES reassignment.
+#
 #   8. Findings 6 and 7 above only moved the trap earlier relative to
 #      RUN_TMP_DIR/ENV_FILE — they never closed the window BEFORE
 #      RUN_TMP_DIR itself exists. `mktemp -d` ran, then `chmod`, then
@@ -87,7 +99,18 @@
 # and 9's tests below run the real run.sh (findings 7, 8, and 9: a working
 # copy of it, see those tests' own comments) as a subprocess but with a
 # stub `docker` shim placed first on PATH, so they stay just as
-# daemon-free as everything else in this file.
+# daemon-free as everything else in this file. The T11 bring_up_fixture_
+# fallback test uses the same technique with a more elaborate stub `docker`
+# that also recognizes `compose ps -q`/`up`/`network create`/`connect`/
+# `disconnect` well enough to let that function run to completion and
+# record what it did.
+#
+# After the inline test cases below, this file also sources every
+# integration/clickhouse/tests/cases/*.sh file (an empty glob is fine —
+# unlike scenarios/*.sh, cases/ starts out empty and later sub-tasks add
+# files there rather than growing this file indefinitely), so
+# `bash lib-tests.sh` stays the single entry point for this suite's shell
+# unit tests.
 #
 # Run directly:
 #   bash integration/clickhouse/tests/lib-tests.sh
@@ -803,6 +826,582 @@ STUB
     pass "$test_name"
 }
 assert_run_sh_sigint_during_rundir_mkdir_cleans_up
+
+# ── T11: bring_up_fixture_fallback shim test (plan §17.3) ─────────────────
+#
+# The functions below extract facts from a docker-compose YAML file's text
+# well enough to compare run.sh's generated fallback template against the
+# real compose.yml, without needing a real `docker compose config`/
+# `docker-compose config` call (which would need PHASE3_CLUSTER_SECRET and
+# DOCKER_NETWORK resolved the same way for both files, and would mix in
+# whichever compose engine happens to be installed on the test host). Both
+# files use the identical 2/4/6-space indent convention (compose.yml is
+# hand-written that way; the fallback's printf calls in run.sh emit the
+# same indentation on purpose), so the same extraction logic applies to
+# both unchanged.
+
+# extract_compose_service_names FILE — the top-level service keys under
+# "services:" (2-space indent, ending in ':'), one per line, until
+# "networks:" or EOF.
+extract_compose_service_names() {
+    awk '
+        /^services:/ { in_services = 1; next }
+        /^networks:/ { in_services = 0 }
+        in_services && /^  [A-Za-z0-9_-]+:$/ {
+            line = $0
+            sub(/^  /, "", line)
+            sub(/:$/, "", line)
+            print line
+        }
+    ' "$1"
+}
+
+# extract_compose_service_block FILE SERVICE — SERVICE's own lines
+# (strictly between its "  SERVICE:" header and the next 2-space-indent
+# service header or "networks:"), indentation preserved.
+extract_compose_service_block() {
+    local file="$1" svc="$2"
+    awk -v header="  ${svc}:" '
+        $0 == header { grab = 1; next }
+        grab && /^  [A-Za-z0-9_-]+:$/ { grab = 0 }
+        grab && /^networks:/ { grab = 0 }
+        grab { print }
+    ' "$file"
+}
+
+# compose_scalar BLOCK KEY — the value of a "    KEY: value" line (4-space
+# indent) within BLOCK, e.g. "image" or "command".
+compose_scalar() {
+    printf '%s\n' "$1" | awk -v key="    $2:" '
+        index($0, key) == 1 {
+            line = $0
+            sub(key, "", line)
+            sub(/^ */, "", line)
+            print line
+            exit
+        }
+    '
+}
+
+# compose_nested_scalar BLOCK KEY — the value of a "      KEY: value" line
+# (6-space indent, one level deeper than compose_scalar), e.g. the "test:"
+# line under a service's "healthcheck:".
+compose_nested_scalar() {
+    printf '%s\n' "$1" | awk -v key="      $2:" '
+        index($0, key) == 1 {
+            line = $0
+            sub(key, "", line)
+            sub(/^ */, "", line)
+            print line
+            exit
+        }
+    '
+}
+
+# compose_sub_list BLOCK KEY — every "      - item" bullet line (6-space
+# indent) under a "    KEY:" heading (4-space indent) within BLOCK,
+# stopping at the next 4-space or 2-space heading.
+compose_sub_list() {
+    printf '%s\n' "$1" | awk -v key="    $2:" '
+        $0 == key { grab = 1; next }
+        grab && /^    [A-Za-z]/ { grab = 0 }
+        grab && /^  [A-Za-z]/ { grab = 0 }
+        grab && /^      - / { print }
+    '
+}
+
+# compose_volume_dst_mode_list BLOCK — compose_sub_list BLOCK volumes,
+# stripped down to "DST:MODE" per bullet (dropping the bind-mount SOURCE,
+# which legitimately differs between compose.yml's relative "./..." paths
+# and the fallback's absolute $SCRIPT_DIR/$repo_root-based ones — neither
+# source ever contains a literal ':', so "everything after the first
+# colon" is exactly "DST:MODE" either way), sorted.
+compose_volume_dst_mode_list() {
+    compose_sub_list "$1" volumes | while IFS= read -r line; do
+        line="${line#- }"
+        printf '%s\n' "${line#*:}"
+    done | sort
+}
+
+# normalize_compose_image VALUE — compose.yml's two ClickHouse-node
+# services keep their image as compose's own `${PHASE3_CH_IMAGE:-DEFAULT}`
+# variable reference (resolved by the compose engine at up-time), while
+# run.sh's fallback template bakes in the already-resolved literal value
+# via printf (see bring_up_fixture_fallback) — semantically the same image
+# whenever PHASE3_CH_IMAGE is unset, as it is for this test, but textually
+# different. Strip the `${PHASE3_CH_IMAGE:-...}` wrapper down to its
+# DEFAULT so both forms compare equal; a plain literal (every other
+# service's image) passes through unchanged.
+normalize_compose_image() {
+    local v="$1"
+    case "$v" in
+        '${PHASE3_CH_IMAGE:-'*'}')
+            v="${v#\$\{PHASE3_CH_IMAGE:-}"
+            v="${v%\}}"
+            ;;
+    esac
+    printf '%s' "$v"
+}
+
+# compose_env_keys BLOCK — the KEY names (never the values — the two
+# files' PHASE3_CLUSTER_SECRET require-error MESSAGE text legitimately
+# differs) of every "      KEY: value" line under a service's
+# "    environment:" heading, sorted.
+compose_env_keys() {
+    printf '%s\n' "$1" | awk '
+        $0 == "    environment:" { grab = 1; next }
+        grab && /^    [A-Za-z]/ { grab = 0 }
+        grab && /^  [A-Za-z]/ { grab = 0 }
+        grab && /^      [A-Za-z0-9_]+:/ {
+            line = $0
+            sub(/^      /, "", line)
+            sub(/:.*/, "", line)
+            print line
+        }
+    ' | sort
+}
+
+# test_bring_up_fixture_fallback — runs the REAL run.sh as a subprocess
+# with PHASE3_TEST_INVOKE_FALLBACK=1 (see run.sh's own comment on that
+# hook) and a stub `docker` shim on PATH that records every Docker/Compose
+# operation bring_up_fixture_fallback issues and answers just enough of
+# `compose version/up/ps -q`, `network inspect/create/connect/disconnect`,
+# and `inspect -f '{{.Name}}'` for that function to run to completion with
+# no real daemon involved, then asserts: the generated fallback compose
+# file's service set and per-service image/command/ports/healthcheck/
+# volumes/environment-keys match compose.yml; every `docker network
+# connect` call carries `--alias`; the auth-net/cluster-net aliases are
+# exactly the services the plan requires; and only ch-oauth-ldap and
+# clickhouse-remote are ever disconnected from the shared network.
+test_bring_up_fixture_fallback() {
+    local prefix="bring_up_fixture_fallback"
+    local stub_dir fresh_tmp call_log compose_copy out rc shared_net
+
+    stub_dir="$(mktemp -d "$RUN_TMP_DIR/fallback-stub-bin.XXXXXX")"
+    cat >"$stub_dir/docker" <<'STUB'
+#!/usr/bin/env bash
+# Records selected Docker CLI invocations to $DOCKER_CALL_LOG and returns
+# fixed, deterministic responses so bring_up_fixture_fallback (run.sh) can
+# run to completion with no real Docker daemon involved. See
+# test_bring_up_fixture_fallback (lib-tests.sh) for what each response
+# encodes and asserts.
+log_call() { printf '%s\n' "$*" >>"$DOCKER_CALL_LOG"; }
+
+if [ "$1" = "compose" ]; then
+    shift
+    # compose() (lib/common.sh) always prepends "-p PROJECT -f FILE
+    # --env-file FILE" before the real subcommand; skip those three
+    # flag/value pairs to find it.
+    rest=()
+    skip=0
+    for a in "$@"; do
+        if [ "$skip" -eq 1 ]; then
+            skip=0
+            continue
+        fi
+        case "$a" in
+            -p|-f|--env-file)
+                skip=1
+                continue
+                ;;
+        esac
+        rest+=("$a")
+    done
+    case "${rest[0]:-}" in
+        version)
+            exit 0
+            ;;
+        up)
+            log_call "compose up"
+            exit 0
+            ;;
+        ps)
+            # rest = (ps -q SERVICE)
+            log_call "compose ps -q ${rest[2]:-}"
+            printf 'cid-%s\n' "${rest[2]:-}"
+            exit 0
+            ;;
+        *)
+            log_call "compose ${rest[*]:-}"
+            exit 0
+            ;;
+    esac
+fi
+
+if [ "$1" = "network" ]; then
+    case "$2" in
+        inspect)
+            # Always report "does not exist" so bring_up_fixture_fallback's
+            # `docker network inspect || create` branch always creates.
+            exit 1
+            ;;
+        create)
+            log_call "network create net=$3"
+            exit 0
+            ;;
+        connect)
+            # docker network connect --alias ALIAS NET CNAME — require the
+            # literal --alias flag at $3 rather than assuming it by
+            # position, so a caller that drops --alias (leaving $3=NET,
+            # $4=CNAME) is recorded distinguishably instead of being
+            # mis-parsed into a line that still happens to contain the
+            # substring "alias=".
+            if [ "$3" = "--alias" ]; then
+                log_call "network connect alias=$4 net=$5 cname=$6"
+            else
+                log_call "network connect NO-ALIAS-FLAG args=$*"
+            fi
+            exit 0
+            ;;
+        disconnect)
+            # docker network disconnect NET CNAME
+            log_call "network disconnect net=$3 cname=$4"
+            exit 0
+            ;;
+        *)
+            log_call "network $*"
+            exit 0
+            ;;
+    esac
+fi
+
+if [ "$1" = "inspect" ]; then
+    # docker inspect -f '{{.Name}}' CID — CID is our own synthetic
+    # "cid-<service>" minted by the `compose ps -q` branch above.
+    cid="${*: -1}"
+    printf '/fake-container-%s\n' "${cid#cid-}"
+    exit 0
+fi
+
+log_call "UNHANDLED: $*"
+exit 0
+STUB
+    chmod +x "$stub_dir/docker"
+
+    fresh_tmp="$(mktemp -d "$RUN_TMP_DIR/fallback-run-tmp.XXXXXX")"
+    call_log="$fresh_tmp/docker-calls.log"
+    compose_copy="$fresh_tmp/fallback-compose-copy.yml"
+    : >"$call_log"
+    shared_net="ch-phase3-libtest-shared"
+
+    out="$(PATH="$stub_dir:$PATH" \
+        TMPDIR="$fresh_tmp" \
+        DOCKER_NETWORK="$shared_net" \
+        DOCKER_CALL_LOG="$call_log" \
+        PHASE3_TEST_INVOKE_FALLBACK=1 \
+        PHASE3_TEST_FALLBACK_COMPOSE_COPY="$compose_copy" \
+        bash "$SCRIPT_DIR/run.sh" 2>&1)"
+    rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        fail "$prefix: hook completes daemon-free" "expected exit 0, got $rc. Output: $out"
+        rm -rf "$stub_dir" "$fresh_tmp"
+        return
+    fi
+    pass "$prefix: hook completes daemon-free"
+
+    if [ ! -s "$compose_copy" ]; then
+        fail "$prefix: generated fallback compose captured" "no non-empty file at $compose_copy. Output: $out"
+        rm -rf "$stub_dir" "$fresh_tmp"
+        return
+    fi
+    pass "$prefix: generated fallback compose captured"
+
+    # ---- service set parity ----
+    local real_services fb_services
+    real_services="$(extract_compose_service_names "$SCRIPT_DIR/compose.yml" | sort)"
+    fb_services="$(extract_compose_service_names "$compose_copy" | sort)"
+    if [ "$real_services" = "$fb_services" ]; then
+        pass "$prefix: generated service set matches compose.yml"
+    else
+        fail "$prefix: generated service set matches compose.yml" "compose.yml=[$real_services] fallback=[$fb_services]"
+    fi
+
+    # ---- per-service config parity ----
+    local svc real_block fb_block mismatch=0 detail="" real_v fb_v
+    for svc in synthetic-idp ch-oauth-ldap clickhouse-origin clickhouse-remote; do
+        real_block="$(extract_compose_service_block "$SCRIPT_DIR/compose.yml" "$svc")"
+        fb_block="$(extract_compose_service_block "$compose_copy" "$svc")"
+
+        real_v="$(normalize_compose_image "$(compose_scalar "$real_block" image)")"
+        fb_v="$(normalize_compose_image "$(compose_scalar "$fb_block" image)")"
+        [ "$real_v" = "$fb_v" ] || { mismatch=1; detail="$detail image[$svc]:'$real_v'!='$fb_v' "; }
+
+        real_v="$(compose_scalar "$real_block" command)"
+        fb_v="$(compose_scalar "$fb_block" command)"
+        [ "$real_v" = "$fb_v" ] || { mismatch=1; detail="$detail command[$svc]:'$real_v'!='$fb_v' "; }
+
+        real_v="$(compose_sub_list "$real_block" ports | sort)"
+        fb_v="$(compose_sub_list "$fb_block" ports | sort)"
+        [ "$real_v" = "$fb_v" ] || { mismatch=1; detail="$detail ports[$svc]:'$real_v'!='$fb_v' "; }
+
+        real_v="$(compose_nested_scalar "$real_block" test)"
+        fb_v="$(compose_nested_scalar "$fb_block" test)"
+        [ "$real_v" = "$fb_v" ] || { mismatch=1; detail="$detail healthcheck[$svc]:'$real_v'!='$fb_v' "; }
+
+        real_v="$(compose_volume_dst_mode_list "$real_block")"
+        fb_v="$(compose_volume_dst_mode_list "$fb_block")"
+        [ "$real_v" = "$fb_v" ] || { mismatch=1; detail="$detail volumes[$svc]:'$real_v'!='$fb_v' "; }
+
+        real_v="$(compose_env_keys "$real_block")"
+        fb_v="$(compose_env_keys "$fb_block")"
+        [ "$real_v" = "$fb_v" ] || { mismatch=1; detail="$detail env-keys[$svc]:'$real_v'!='$fb_v' "; }
+    done
+    if [ "$mismatch" -eq 0 ]; then
+        pass "$prefix: per-service image/command/ports/healthcheck/volumes/env-keys match compose.yml"
+    else
+        fail "$prefix: per-service image/command/ports/healthcheck/volumes/env-keys match compose.yml" "$detail"
+    fi
+
+    # ---- every network connect carries --alias ----
+    local connect_lines total_connects
+    connect_lines="$(grep '^network connect ' "$call_log" || true)"
+    total_connects="$(printf '%s\n' "$connect_lines" | grep -c . || true)"
+    if [ "$total_connects" -eq 5 ] && ! printf '%s\n' "$connect_lines" | grep -q 'NO-ALIAS-FLAG'; then
+        pass "$prefix: every docker network connect carries --alias"
+    else
+        fail "$prefix: every docker network connect carries --alias" "expected 5 connect calls all with alias=; got: $connect_lines"
+    fi
+
+    # ---- auth-net aliases ----
+    local auth_ok=1 auth_svc
+    for auth_svc in synthetic-idp ch-oauth-ldap clickhouse-origin; do
+        grep -qF "network connect alias=$auth_svc net=ch-phase3-auth-net cname=fake-container-$auth_svc" "$call_log" || auth_ok=0
+    done
+    if [ "$auth_ok" -eq 1 ]; then
+        pass "$prefix: auth-net aliases are synthetic-idp/ch-oauth-ldap/clickhouse-origin"
+    else
+        fail "$prefix: auth-net aliases are synthetic-idp/ch-oauth-ldap/clickhouse-origin" "call log: $(cat "$call_log")"
+    fi
+
+    # ---- cluster-net aliases ----
+    local cluster_ok=1 cluster_svc
+    for cluster_svc in clickhouse-origin clickhouse-remote; do
+        grep -qF "network connect alias=$cluster_svc net=ch-phase3-cluster-net cname=fake-container-$cluster_svc" "$call_log" || cluster_ok=0
+    done
+    if [ "$cluster_ok" -eq 1 ]; then
+        pass "$prefix: cluster-net aliases are clickhouse-origin/clickhouse-remote"
+    else
+        fail "$prefix: cluster-net aliases are clickhouse-origin/clickhouse-remote" "call log: $(cat "$call_log")"
+    fi
+
+    # ---- only ch-oauth-ldap + clickhouse-remote disconnected from shared ----
+    local disc_ok=1
+    grep -qF "network disconnect net=$shared_net cname=fake-container-ch-oauth-ldap" "$call_log" || disc_ok=0
+    grep -qF "network disconnect net=$shared_net cname=fake-container-clickhouse-remote" "$call_log" || disc_ok=0
+    if grep -qF "network disconnect net=$shared_net cname=fake-container-synthetic-idp" "$call_log"; then disc_ok=0; fi
+    if grep -qF "network disconnect net=$shared_net cname=fake-container-clickhouse-origin" "$call_log"; then disc_ok=0; fi
+    if [ "$disc_ok" -eq 1 ]; then
+        pass "$prefix: only ch-oauth-ldap and clickhouse-remote are disconnected from the shared network"
+    else
+        fail "$prefix: only ch-oauth-ldap and clickhouse-remote are disconnected from the shared network" "call log: $(cat "$call_log")"
+    fi
+
+    rm -rf "$stub_dir" "$fresh_tmp"
+}
+test_bring_up_fixture_fallback
+
+# ── T11: array-driven leak-scan completeness (plan §17.2) ─────────────────
+
+test_leakscan_completeness_normal_defaults() {
+    local dir out rc
+    dir="$(mktemp -d "$RUN_TMP_DIR/leakscan-normal.XXXXXX")"
+    printf 'x\n' >"$dir/compose-ch-oauth-ldap.log"
+    printf 'x\n' >"$dir/compose-clickhouse-origin.log"
+    printf 'x\n' >"$dir/compose-clickhouse-remote.log"
+    printf 'x\n' >"$dir/clickhouse-origin-clickhouse-server.log"
+    printf 'x\n' >"$dir/clickhouse-remote-clickhouse-server.log"
+    printf 'x\n' >"$dir/run-transcript.log"
+    printf '' >"$dir/clickhouse-origin-clickhouse-server.err.log"
+    printf '' >"$dir/clickhouse-remote-clickhouse-server.err.log"
+    printf 'x\n' >"$dir/auth-failure-01.txt"
+
+    out="$(leakscan_require_artifacts_complete "$dir" 2>&1)"
+    rc=$?
+    rm -rf "$dir"
+    if [ "$rc" -ne 0 ]; then
+        fail "leakscan completeness: normal defaults unchanged (happy path)" "expected exit 0, got $rc. Output: $out"
+        return
+    fi
+    case "$out" in
+        *"6 required"*"0 extra"*) pass "leakscan completeness: normal defaults unchanged (happy path)" ;;
+        *) fail "leakscan completeness: normal defaults unchanged (happy path)" "expected the legacy six-artifact/zero-extra corpus size in the log: $out" ;;
+    esac
+}
+test_leakscan_completeness_normal_defaults
+
+test_leakscan_completeness_normal_defaults_missing_file_dies() {
+    local dir out rc
+    dir="$(mktemp -d "$RUN_TMP_DIR/leakscan-normal-missing.XXXXXX")"
+    printf 'x\n' >"$dir/compose-ch-oauth-ldap.log"
+    printf 'x\n' >"$dir/compose-clickhouse-origin.log"
+    # compose-clickhouse-remote.log deliberately omitted.
+    printf 'x\n' >"$dir/clickhouse-origin-clickhouse-server.log"
+    printf 'x\n' >"$dir/clickhouse-remote-clickhouse-server.log"
+    printf 'x\n' >"$dir/run-transcript.log"
+    printf '' >"$dir/clickhouse-origin-clickhouse-server.err.log"
+    printf '' >"$dir/clickhouse-remote-clickhouse-server.err.log"
+    printf 'x\n' >"$dir/auth-failure-01.txt"
+
+    out="$(leakscan_require_artifacts_complete "$dir" 2>&1)"
+    rc=$?
+    rm -rf "$dir"
+    if [ "$rc" -eq 0 ]; then
+        fail "leakscan completeness: normal defaults still catch a missing legacy artifact" "expected die (nonzero exit), got 0. Output: $out"
+        return
+    fi
+    case "$out" in
+        *"compose-clickhouse-remote.log"*) pass "leakscan completeness: normal defaults still catch a missing legacy artifact" ;;
+        *) fail "leakscan completeness: normal defaults still catch a missing legacy artifact" "die() message did not name the missing file: $out" ;;
+    esac
+}
+test_leakscan_completeness_normal_defaults_missing_file_dies
+
+# build_ha_leakscan_corpus DIR — writes every file the HA-shaped arrays
+# below (run_ha_leakscan_completeness) require, all non-empty. The
+# "compose-ch-oauth-ldap.log" entry stands for the HAProxy frontend, which
+# the plan's HA topology keeps under the same "ch-oauth-ldap" compose
+# service name the normal fixture uses for the single helper (see §17.2).
+build_ha_leakscan_corpus() {
+    local dir="$1" f
+    for f in compose-ch-oauth-ldap.log compose-ch-oauth-ldap-a.log compose-ch-oauth-ldap-b.log \
+        compose-clickhouse-origin.log compose-clickhouse-remote.log \
+        clickhouse-origin-clickhouse-server.log clickhouse-remote-clickhouse-server.log \
+        clickhouse-origin-clickhouse-server.err.log clickhouse-remote-clickhouse-server.err.log \
+        run-transcript.log session-probe.log auth-failure-01.txt; do
+        printf 'synthetic artifact content\n' >"$dir/$f"
+    done
+}
+
+# run_ha_leakscan_completeness DIR — runs leakscan_require_artifacts_complete
+# against DIR with the plan's HA-shaped arrays, in a subshell so the array
+# reassignment never escapes into this test file's own shell. Sets
+# CAPTURE_OUT/CAPTURE_RC.
+run_ha_leakscan_completeness() {
+    local dir="$1"
+    CAPTURE_OUT="$(
+        LEAKSCAN_COMPOSE_SERVICES=(ch-oauth-ldap ch-oauth-ldap-a ch-oauth-ldap-b clickhouse-origin clickhouse-remote)
+        LEAKSCAN_NODES=(clickhouse-origin clickhouse-remote)
+        LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS=(session-probe.log)
+        leakscan_require_artifacts_complete "$dir" 2>&1
+    )"
+    CAPTURE_RC=$?
+}
+
+test_leakscan_completeness_ha_shaped_happy_path() {
+    local dir
+    dir="$(mktemp -d "$RUN_TMP_DIR/leakscan-ha-happy.XXXXXX")"
+    build_ha_leakscan_corpus "$dir"
+    run_ha_leakscan_completeness "$dir"
+    rm -rf "$dir"
+    if [ "$CAPTURE_RC" -ne 0 ]; then
+        fail "leakscan completeness: HA-shaped arrays accept a complete corpus" "expected exit 0, got $CAPTURE_RC. Output: $CAPTURE_OUT"
+        return
+    fi
+    case "$CAPTURE_OUT" in
+        *"9 required"*"1 extra"*) pass "leakscan completeness: HA-shaped arrays accept a complete corpus" ;;
+        *) fail "leakscan completeness: HA-shaped arrays accept a complete corpus" "expected a 9-required/1-extra corpus size in the log: $CAPTURE_OUT" ;;
+    esac
+}
+test_leakscan_completeness_ha_shaped_happy_path
+
+# assert_ha_leakscan_fails FILENAME MODE — builds a complete HA corpus,
+# then removes (MODE=missing) or truncates (MODE=empty) FILENAME, and
+# asserts leakscan_require_artifacts_complete dies naming that file — the
+# plan's "missing/empty A/B/HAProxy/probe artifact is a hard failure"
+# requirement (§17.2/§25).
+assert_ha_leakscan_fails() {
+    local filename="$1" mode="$2" dir test_name
+    dir="$(mktemp -d "$RUN_TMP_DIR/leakscan-ha-neg.XXXXXX")"
+    build_ha_leakscan_corpus "$dir"
+    case "$mode" in
+        missing) rm -f "$dir/$filename" ;;
+        empty) : >"$dir/$filename" ;;
+    esac
+    run_ha_leakscan_completeness "$dir"
+    rm -rf "$dir"
+    test_name="leakscan completeness: HA-shaped arrays fail on $mode $filename"
+    if [ "$CAPTURE_RC" -eq 0 ]; then
+        fail "$test_name" "expected die (nonzero exit), got 0. Output: $CAPTURE_OUT"
+        return
+    fi
+    case "$CAPTURE_OUT" in
+        *"$filename"*) pass "$test_name" ;;
+        *) fail "$test_name" "die() message did not name '$filename': $CAPTURE_OUT" ;;
+    esac
+}
+
+for _ha_neg_file in compose-ch-oauth-ldap-a.log compose-ch-oauth-ldap-b.log compose-ch-oauth-ldap.log session-probe.log; do
+    assert_ha_leakscan_fails "$_ha_neg_file" missing
+    assert_ha_leakscan_fails "$_ha_neg_file" empty
+done
+unset _ha_neg_file
+
+# ── T11: sourcing-guard idempotence (plan §17.1) ──────────────────────────
+
+test_common_sh_sourcing_guard_preserves_reassignment() {
+    local rc
+    (
+        PHASE3_SERVICES=(guard-test-a guard-test-b)
+        # shellcheck source=../lib/common.sh
+        source "$SCRIPT_DIR/lib/common.sh"
+        [ "${PHASE3_SERVICES[*]}" = "guard-test-a guard-test-b" ]
+    )
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        pass "lib/common.sh: re-sourcing does not reset a reassigned PHASE3_SERVICES"
+    else
+        fail "lib/common.sh: re-sourcing does not reset a reassigned PHASE3_SERVICES" "PHASE3_SERVICES was reset by the second source"
+    fi
+}
+test_common_sh_sourcing_guard_preserves_reassignment
+
+test_leakscan_sh_sourcing_guard_preserves_reassignment() {
+    local rc
+    (
+        LEAKSCAN_NODES=(guard-node-a guard-node-b guard-node-c)
+        LEAKSCAN_COMPOSE_SERVICES=(guard-svc-a guard-svc-b)
+        LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS=(guard-extra.log)
+        # shellcheck source=../lib/leakscan.sh
+        source "$SCRIPT_DIR/lib/leakscan.sh"
+        [ "${LEAKSCAN_NODES[*]}" = "guard-node-a guard-node-b guard-node-c" ] \
+            && [ "${LEAKSCAN_COMPOSE_SERVICES[*]}" = "guard-svc-a guard-svc-b" ] \
+            && [ "${LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS[*]}" = "guard-extra.log" ]
+    )
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        pass "lib/leakscan.sh: re-sourcing does not reset reassigned LEAKSCAN_NODES/LEAKSCAN_COMPOSE_SERVICES/LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS"
+    else
+        fail "lib/leakscan.sh: re-sourcing does not reset reassigned LEAKSCAN_NODES/LEAKSCAN_COMPOSE_SERVICES/LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS" "one or more arrays were reset by the second source"
+    fi
+}
+test_leakscan_sh_sourcing_guard_preserves_reassignment
+
+# ── T11: cases/ auto-discovery hook ────────────────────────────────────────
+#
+# T12b (and later sub-tasks) add self-contained case files under
+# integration/clickhouse/tests/cases/*.sh rather than growing this file
+# indefinitely. Each is sourced — not exec'd — so it sees every function
+# and variable already defined above (SCRIPT_DIR, RUN_TMP_DIR, pass/fail/
+# run_and_capture, the sourced lib/*.sh functions), exactly like a
+# scenarios/*.sh file sees run.sh's; a case file signals its own failures
+# via fail(), which is already reflected in $FAILURES below. Unlike
+# scenarios/*.sh, an empty cases/ directory is the expected steady state
+# until a case-adding sub-task lands, so nullglob makes a zero-file glob a
+# normal, explicitly-logged outcome rather than an error.
+shopt -s nullglob
+case_files=("$SCRIPT_DIR"/tests/cases/*.sh)
+shopt -u nullglob
+if [ "${#case_files[@]}" -eq 0 ]; then
+    printf 'cases/ hook: no integration/clickhouse/tests/cases/*.sh files found (0 files) — nothing to auto-discover yet\n'
+else
+    printf 'cases/ hook: sourcing %d file(s) from integration/clickhouse/tests/cases/\n' "${#case_files[@]}"
+    for f in "${case_files[@]}"; do
+        printf 'cases/ hook: sourcing %s\n' "$f"
+        # shellcheck disable=SC1090
+        source "$f"
+    done
+fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
 
