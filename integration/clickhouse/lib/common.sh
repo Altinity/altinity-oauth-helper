@@ -194,9 +194,23 @@ compose() {
     $COMPOSE_CMD -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
 }
 
+#   container_name_for SERVICE       prints the actual container name
+#                                     compose assigned to SERVICE, via
+#                                     `compose ps -q` + `docker inspect`
+#                                     rather than `compose ps --format`:
+#                                     classic standalone docker-compose
+#                                     (v1) never supported `ps --format`
+#                                     (only the v2 plugin/rewrite does),
+#                                     and this suite's README explicitly
+#                                     claims support for either.
 container_name_for() {
     local service="$1"
-    compose ps --format '{{.Name}}' "$service" 2>/dev/null | head -n1
+    local cid
+    cid="$(compose ps -q "$service" 2>/dev/null | head -n1)"
+    [ -n "$cid" ] || return 0
+    # `docker inspect -f '{{.Name}}'` carries a leading '/'; strip it to
+    # match what `compose ps --format '{{.Name}}'` used to print.
+    docker inspect -f '{{.Name}}' "$cid" 2>/dev/null | sed 's#^/##'
 }
 
 sha256_hex() {

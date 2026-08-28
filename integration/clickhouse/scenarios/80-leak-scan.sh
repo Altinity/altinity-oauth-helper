@@ -34,15 +34,26 @@ log "scenario I: retained-token registry has ${#OAUTH_RETAINED_TOKEN_NAMES[@]} e
 log "scenario I: leak-scanner self-test (plant one real JWT into a synthetic artifact, require detection)"
 leakscan_self_test "${OAUTH_RETAINED_TOKEN_NAMES[0]}"
 
-# ── Collect real artifacts ────────────────────────────────────────────────
+# ── Probe FIRST, then snapshot ────────────────────────────────────────────
 # The artifact directory is created HERE (not inside
 # leakscan_collect_artifacts) so that function runs in this shell and its
 # `die` calls abort the suite for real — see lib/leakscan.sh.
-log "scenario I: collecting real artifacts (helper/origin/remote compose logs, on-disk ClickHouse server/error logs, runner transcript, HTTP auth-failure bodies)"
+#
+# Order matters: leakscan_capture_auth_failure_bodies fires a genuinely NEW
+# HTTP Basic-auth request per retained credential, which can itself add
+# lines to the helper's and both ClickHouse nodes' logs. Taking the compose
+# logs / on-disk server logs / run transcript snapshot BEFORE issuing these
+# probes would let whatever the probes themselves cause ClickHouse to log
+# escape the very corpus this scenario scans — so the probes run first, and
+# the snapshot is taken only once they have all completed.
 PHASE3_I_ARTIFACT_DIR="$(mktemp -d "$RUN_TMP_DIR/leakscan-artifacts.XXXXXX")"
 chmod 700 "$PHASE3_I_ARTIFACT_DIR"
-leakscan_collect_artifacts "$PHASE3_I_ARTIFACT_DIR"
+
+log "scenario I: issuing auth-failure probes for all ${#OAUTH_RETAINED_TOKEN_NAMES[@]} retained tokens (before the final snapshot below)"
 leakscan_capture_auth_failure_bodies "$PHASE3_I_ARTIFACT_DIR" "${OAUTH_RETAINED_TOKEN_NAMES[@]}"
+
+log "scenario I: collecting real artifacts (helper/origin/remote compose logs, on-disk ClickHouse server/error logs, runner transcript) — taken AFTER the probes above so their own log side-effects are included"
+leakscan_collect_artifacts "$PHASE3_I_ARTIFACT_DIR"
 
 # ── Completeness gate ─────────────────────────────────────────────────────
 # A scan over a missing or empty artifact is trivially "clean" and proves

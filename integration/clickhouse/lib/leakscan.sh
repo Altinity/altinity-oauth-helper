@@ -62,7 +62,16 @@
 #       failure every time regardless of which scenario originally minted
 #       the credential. Each response body is written to its own file
 #       under DEST_DIR. This is the plan's "captured HTTP authentication-
-#       failure bodies" artifact.
+#       failure bodies" artifact. Per ch_http_query_as's own contract
+#       (lib/common.sh) a non-zero return means a curl TRANSPORT failure,
+#       never a query/auth outcome — this function checks that return code
+#       AND requires $CH_HTTP_STATUS != "200" before accepting the body as
+#       a genuine artifact, `die`-ing otherwise (a transport failure or an
+#       unexpected 200 — e.g. a cache-key/identity-policy regression that
+#       let the mismatched probe username authenticate — must never be
+#       silently accepted as "the intended failure body", since neither
+#       exercises the failure-path leak surface this artifact exists to
+#       scan). Never echoes the captured body in a `die` message.
 #   leakscan_require_artifacts_complete DEST_DIR
 #       The completeness gate: `die`s unless every artifact the scan is
 #       about to trust actually exists AND is non-empty — the three compose
@@ -159,15 +168,26 @@ leakscan_collect_artifacts() {
 leakscan_capture_auth_failure_bodies() {
     local dest_dir="$1"
     shift
-    local name value body_file idx=0
+    local name value body_file idx=0 rc status
     for name in "$@"; do
         value="${!name:-}"
         [ -n "$value" ] || continue
         idx=$((idx + 1))
         body_file="$dest_dir/auth-failure-$(printf '%02d' "$idx").txt"
+        set +e
         ch_http_query_as "$LEAKSCAN_PROBE_USERNAME" "$value" "SELECT 1" \
-            >"$body_file" 2>&1 || true
+            >"$body_file" 2>&1
+        rc=$?
+        set -e
+        status="$CH_HTTP_STATUS"
         chmod 600 "$body_file"
+        # Never interpolate the captured body into this die() message —
+        # only the artifact PATH, matching oauth_body_diagnostics'
+        # discipline elsewhere in this suite.
+        [ "$rc" -eq 0 ] \
+            || die "leak-scan: auth-failure probe for retained credential '$name' failed at the curl transport level (rc=$rc) — an infrastructure failure, not the intended ClickHouse-side authentication-failure response, so it cannot be trusted as part of the leak-scan corpus; see $body_file for captured diagnostics"
+        [ "$status" != "200" ] \
+            || die "leak-scan: auth-failure probe for retained credential '$name' UNEXPECTEDLY SUCCEEDED (HTTP 200) against mismatched probe username '$LEAKSCAN_PROBE_USERNAME' — the credential authenticated as an unrelated identity instead of failing generically, which points at a cache-key/identity-policy regression, not a usable auth-failure artifact; investigate before trusting this leak-scan run"
     done
 }
 

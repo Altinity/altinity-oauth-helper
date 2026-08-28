@@ -95,6 +95,35 @@
 #                                         (scenario D), so callers must
 #                                         not compare CH_LAST_BODY against
 #                                         a specific error string either.
+#   oauth_body_diagnostics               prints a SAFE, credential-free
+#                                         summary of $CH_LAST_BODY (byte
+#                                         length, sha256 digest, and the
+#                                         path of a private mode-0600 copy
+#                                         written under $RUN_TMP_DIR) —
+#                                         never the raw body itself. Every
+#                                         oauth_expect_*/
+#                                         expect_remote_access_denied
+#                                         failure below interpolates THIS
+#                                         into its die() message instead of
+#                                         $CH_LAST_BODY directly: die()
+#                                         logs via log(), and run.sh tees
+#                                         that into BOTH the private
+#                                         $RUN_LOG under $RUN_TMP_DIR AND
+#                                         the caller's own inherited
+#                                         stdout/stderr — a stream that
+#                                         survives this run's own
+#                                         $RUN_TMP_DIR cleanup and that
+#                                         scenario I's leak scan never gets
+#                                         a chance to check, because a
+#                                         `die` aborts the suite before
+#                                         scenario I (which runs last) ever
+#                                         runs. If a regression under test
+#                                         ever echoes a JWT/password back
+#                                         in an HTTP error body, that is
+#                                         exactly the value CH_LAST_BODY
+#                                         would hold — so it must never be
+#                                         interpolated directly into a
+#                                         log/die call.
 #
 # ── Retained-token registry ────────────────────────────────────────────────
 # Acceptance scenario I (the JWT-leak scan, scenarios/80-leak-scan.sh)
@@ -237,19 +266,19 @@ oauth_run() {
 oauth_expect_status() {
     local expected="$1" label="$2"
     [ "$CH_LAST_STATUS" = "$expected" ] \
-        || die "$label: expected HTTP $expected, got $CH_LAST_STATUS (body: $CH_LAST_BODY)"
+        || die "$label: expected HTTP $expected, got HTTP $CH_LAST_STATUS ($(oauth_body_diagnostics))"
 }
 
 oauth_expect_exact_body() {
     local expected="$1" label="$2"
     [ "$CH_LAST_BODY" = "$expected" ] \
-        || die "$label: expected body exactly '$expected', got '$CH_LAST_BODY'"
+        || die "$label: expected body exactly '$expected'; actual ($(oauth_body_diagnostics))"
 }
 
 oauth_expect_not_contains() {
     local forbidden="$1" label="$2"
     case "$CH_LAST_BODY" in
-    *"$forbidden"*) die "$label: body unexpectedly contains '$forbidden' (body: $CH_LAST_BODY)" ;;
+    *"$forbidden"*) die "$label: body unexpectedly contains '$forbidden' ($(oauth_body_diagnostics))" ;;
     esac
 }
 
@@ -260,5 +289,18 @@ oauth_expect_not_contains() {
 oauth_expect_auth_failure() {
     local label="$1"
     [ "$CH_LAST_STATUS" != "200" ] \
-        || die "$label: expected authentication/query failure, got HTTP 200 with body '$CH_LAST_BODY'"
+        || die "$label: expected authentication/query failure, got HTTP 200 ($(oauth_body_diagnostics))"
+}
+
+# oauth_body_diagnostics — see contract above. Never echoes $CH_LAST_BODY;
+# prints only length/digest/artifact-path metadata about it.
+oauth_body_diagnostics() {
+    local artifact len digest
+    artifact="$(mktemp "$RUN_TMP_DIR/body-diag.XXXXXX")"
+    chmod 600 "$artifact"
+    printf '%s' "$CH_LAST_BODY" >"$artifact"
+    len=$(printf '%s' "$CH_LAST_BODY" | wc -c | tr -d '[:space:]')
+    digest=$(printf '%s' "$CH_LAST_BODY" | sha256_hex)
+    printf 'body: %s bytes, sha256=%s, saved to %s — deleted like everything else under RUN_TMP_DIR at run end; inspect it from another shell while this run is still alive if you need the raw content' \
+        "$len" "$digest" "$artifact"
 }

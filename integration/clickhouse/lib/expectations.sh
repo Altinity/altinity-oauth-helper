@@ -272,15 +272,22 @@ PHASE3_REMOTE_DENIAL_MARKER="Received from clickhouse-remote:9000"
 # expect_remote_access_denied LABEL — see contract above.
 expect_remote_access_denied() {
     local label="$1"
+    # Uses oauth_body_diagnostics (lib/oauth.sh, sourced before this file by
+    # every scenario file that needs both — see that function's own
+    # contract) instead of interpolating $CH_LAST_BODY directly: die()'s
+    # message is tee'd into the caller's own inherited stdout/stderr by
+    # run.sh, a stream that survives this run's cleanup and that scenario
+    # I's leak scan never gets a chance to check once a die() has aborted
+    # the suite.
     [ "$CH_LAST_STATUS" = "500" ] \
-        || die "$label: expected a remote ACCESS_DENIED failure shape (HTTP 500), got HTTP $CH_LAST_STATUS (body: $CH_LAST_BODY)"
+        || die "$label: expected a remote ACCESS_DENIED failure shape (HTTP 500), got HTTP $CH_LAST_STATUS ($(oauth_body_diagnostics))"
     case "$CH_LAST_BODY" in
     *ACCESS_DENIED*) : ;;
-    *) die "$label: expected body to contain ACCESS_DENIED, got: $CH_LAST_BODY" ;;
+    *) die "$label: expected body to contain ACCESS_DENIED ($(oauth_body_diagnostics))" ;;
     esac
     case "$CH_LAST_BODY" in
     *"$PHASE3_REMOTE_DENIAL_MARKER"*) : ;;
-    *) die "$label: expected the denial to have been raised on the REMOTE node (body must contain '$PHASE3_REMOTE_DENIAL_MARKER') — an origin-side denial, a transport failure, or a SQL error proves nothing about role propagation. Got: $CH_LAST_BODY" ;;
+    *) die "$label: expected the denial to have been raised on the REMOTE node (body must contain '$PHASE3_REMOTE_DENIAL_MARKER') — an origin-side denial, a transport failure, or a SQL error proves nothing about role propagation ($(oauth_body_diagnostics))" ;;
     esac
 }
 
