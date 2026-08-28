@@ -61,16 +61,33 @@
 #      RUN_TMP_DIR"/"ENV_FILE before trap" orderings: the trap now precedes
 #      RUN_TMP_DIR's own creation, not merely ENV_FILE's.
 #
+# ...and a review-pass-1 (second round) finding on top of finding 8:
+#
+#   9. Finding 8 closed the window BEFORE the trap existed, but left a
+#      narrower one AFTER it: `RUN_TMP_DIR="$(mktemp -d ...)"` still runs
+#      mktemp as a separate process, so a SIGINT landing between mktemp's
+#      own mkdir(2) creating the directory and this shell finishing the
+#      command substitution and assigning the path into RUN_TMP_DIR left
+#      RUN_TMP_DIR unset in cleanup() (its `[ -n "${RUN_TMP_DIR:-}" ]`
+#      guard skips the rm -rf), leaking the just-created directory even
+#      though the trap was already live (reproduced: exit 130, directory
+#      survives). The fix pre-computes a collision-resistant candidate
+#      path and assigns it into RUN_TMP_DIR BEFORE calling `mkdir -m 700`
+#      on it (with collision retry, since `mkdir`, unlike `mktemp -d`,
+#      isn't itself atomic-with-name-choice) — a plain variable assignment
+#      is a single in-process bash statement, so cleanup() knows the path
+#      no matter when a signal lands relative to the external `mkdir` call.
+#
 # This does NOT bring up the real four-service fixture — that remains
 # run.sh's job (see integration/clickhouse/README.md: "manual, local
 # gate"). It DOES source the real lib/*.sh files, so it needs the same
 # `docker`/`docker-compose` CLI *presence* on PATH that lib/common.sh's own
 # sourcing-time detect_compose_cmd already requires (no daemon needed —
-# every Docker/compose call in these tests is stubbed) — findings 6, 7, and
-# 8's tests below run the real run.sh (findings 7 and 8: a working copy of
-# it, see those tests' own comments) as a subprocess but with a stub
-# `docker` shim placed first on PATH, so they stay just as daemon-free as
-# everything else in this file.
+# every Docker/compose call in these tests is stubbed) — findings 6, 7, 8,
+# and 9's tests below run the real run.sh (findings 7, 8, and 9: a working
+# copy of it, see those tests' own comments) as a subprocess but with a
+# stub `docker` shim placed first on PATH, so they stay just as
+# daemon-free as everything else in this file.
 #
 # Run directly:
 #   bash integration/clickhouse/tests/lib-tests.sh
@@ -471,13 +488,14 @@ assert_run_sh_early_die_cleans_up \
 # nonzero and — the regression this guards — leaves no ch-phase3-run.*
 # directory behind.
 #
-# NOTE (finding 8, below): `trap cleanup EXIT` now precedes RUN_TMP_DIR's
+# NOTE (findings 8/9, below): `trap cleanup EXIT` now precedes RUN_TMP_DIR's
 # own creation (see run.sh), so the injection point this test targets no
 # longer sits between RUN_TMP_DIR and ENV_FILE — it sits before either
 # exists. That still exercises a real case (cleanup() firing with NEITHER
 # set) and this test is kept for that reason, but it no longer covers the
-# window between `mktemp -d` and the trap install that finding 8 fixes;
-# assert_run_sh_sigint_right_after_mktemp_cleans_up below covers that one
+# window around RUN_TMP_DIR's own creation that findings 8 and 9 fix;
+# assert_run_sh_sigint_right_after_rundir_created_cleans_up and
+# assert_run_sh_sigint_during_rundir_mkdir_cleans_up below cover those
 # specifically.
 assert_run_sh_sigint_right_after_trap_install_cleans_up() {
     local test_name="run.sh cleans up RUN_TMP_DIR on SIGINT delivered right after the cleanup trap is installed"
@@ -566,34 +584,34 @@ assert_run_sh_sigint_right_after_trap_install_cleans_up
 # The pre-trap interrupt window: before this fix, `trap cleanup EXIT` was
 # installed only after RUN_TMP_DIR was `mktemp -d`'d and `chmod`'d AND
 # ENV_FILE was created/`chmod 600`'d, so a SIGINT anywhere in that whole
-# interval — including immediately after `mktemp -d` allocates RUN_TMP_DIR —
-# exited with NO trap registered at all, leaking the just-created
-# `ch-phase3-run.*` directory outright. Neither test above catches this:
-# assert_run_sh_early_die_cleans_up only exercises die() paths that fire
-# well after the trap is installed, and
+# interval — including immediately after RUN_TMP_DIR's directory is
+# allocated — exited with NO trap registered at all, leaking the
+# just-created `ch-phase3-run.*` directory outright. Neither test above
+# catches this: assert_run_sh_early_die_cleans_up only exercises die()
+# paths that fire well after the trap is installed, and
 # assert_run_sh_sigint_right_after_trap_install_cleans_up injects its delay
 # strictly AFTER the (now much earlier) trap line, which today lands before
 # RUN_TMP_DIR even exists.
 #
-# assert_run_sh_sigint_right_after_mktemp_cleans_up mirrors that test's
-# technique exactly — a working copy of run.sh, symlinked back to the real
-# lib/ and compose.yml, run under `set -m` so a process-group SIGINT can be
-# delivered deterministically — but injects its `sleep` immediately after
-# the `mktemp -d "$TMPDIR/ch-phase3-run.XXXXXX")"` line instead, matched via
-# `index($0, "ch-phase3-run.XXXXXX")` rather than an exact-string match
-# (that line contains shell metacharacters an exact match would make
-# brittle). It then asserts run.sh exits nonzero and — the regression this
-# guards — leaves no ch-phase3-run.* directory behind, proving the trap
-# (which, per the fix, now precedes this mktemp call) was already live at
-# the moment RUN_TMP_DIR was created. Sabotage-checked against the pre-fix
-# ordering (trap moved back below mktemp/ENV_FILE in a scratch copy): this
-# test fails there (directory leaked, confirming it actually exercises the
-# fix) and was restored/discarded, not left in the tree.
-assert_run_sh_sigint_right_after_mktemp_cleans_up() {
-    local test_name="run.sh cleans up RUN_TMP_DIR on SIGINT delivered right after RUN_TMP_DIR is created (before ENV_FILE exists)"
+# assert_run_sh_sigint_right_after_rundir_created_cleans_up mirrors that
+# test's technique exactly — a working copy of run.sh, symlinked back to
+# the real lib/ and compose.yml, run under `set -m` so a process-group
+# SIGINT can be delivered deterministically — but injects its `sleep`
+# immediately after the loop's `unset _run_tmp_candidate _run_tmp_attempt`
+# line (i.e. right when RUN_TMP_DIR's directory has just been created and
+# the loop is about to `break`), matched via `index()` on that exact
+# substring rather than a regex (no shell metacharacters to escape). It
+# then asserts run.sh exits nonzero and — the regression this guards —
+# leaves no ch-phase3-run.* directory behind, proving the trap (which
+# precedes this loop entirely) was already live at the moment RUN_TMP_DIR
+# was created. Sabotage-checked against the pre-finding-8 ordering (trap
+# moved back below the loop/ENV_FILE in a scratch copy): fails there
+# (directory leaked), confirming it actually exercises the fix.
+assert_run_sh_sigint_right_after_rundir_created_cleans_up() {
+    local test_name="run.sh cleans up RUN_TMP_DIR on SIGINT delivered right after its directory is created (before ENV_FILE exists)"
     local stub_dir fresh_tmp work_dir out rc leftover leaked run_pid
 
-    stub_dir="$(mktemp -d "$RUN_TMP_DIR/run-sigint-mktemp-stub-bin.XXXXXX")"
+    stub_dir="$(mktemp -d "$RUN_TMP_DIR/run-sigint-rundir-stub-bin.XXXXXX")"
     cat >"$stub_dir/docker" <<'STUB'
 #!/usr/bin/env bash
 # Always succeeds — see assert_run_sh_early_die_cleans_up's identical stub
@@ -603,7 +621,7 @@ exit 0
 STUB
     chmod +x "$stub_dir/docker"
 
-    fresh_tmp="$(mktemp -d "$RUN_TMP_DIR/run-sigint-mktemp-tmp.XXXXXX")"
+    fresh_tmp="$(mktemp -d "$RUN_TMP_DIR/run-sigint-rundir-tmp.XXXXXX")"
 
     work_dir="$fresh_tmp/run-sh-copy"
     mkdir -p "$work_dir"
@@ -611,13 +629,13 @@ STUB
     ln -s "$SCRIPT_DIR/compose.yml" "$work_dir/compose.yml"
     awk '
         { print }
-        index($0, "ch-phase3-run.XXXXXX") > 0 && !done {
-            print "sleep 5  # lib-tests.sh test-injected delay, see assert_run_sh_sigint_right_after_mktemp_cleans_up"
+        index($0, "unset _run_tmp_candidate _run_tmp_attempt") > 0 && !done {
+            print "sleep 5  # lib-tests.sh test-injected delay, see assert_run_sh_sigint_right_after_rundir_created_cleans_up"
             done = 1
         }
     ' "$SCRIPT_DIR/run.sh" >"$work_dir/run.sh"
     if ! grep -q 'test-injected delay' "$work_dir/run.sh"; then
-        fail "$test_name" "internal test error: failed to inject the test delay into the run.sh copy — did the mktemp line allocating RUN_TMP_DIR change?"
+        fail "$test_name" "internal test error: failed to inject the test delay into the run.sh copy — did the RUN_TMP_DIR creation loop change?"
         rm -rf "$stub_dir" "$fresh_tmp"
         return
     fi
@@ -636,9 +654,9 @@ STUB
     set +m
 
     # Generous margin for the process to source lib/common.sh, install the
-    # trap, and reach the injected `sleep 5` right after `mktemp -d`
-    # allocates RUN_TMP_DIR — every step before it is either a pure bash
-    # builtin or one stubbed, instant-exit `docker` call.
+    # trap, and reach the injected `sleep 5` right after RUN_TMP_DIR's
+    # directory is created — every step before it is either a pure bash
+    # builtin or one stubbed, instant-exit `docker`/`openssl` call.
     sleep 1
     # Signal the whole process group (`-$run_pid`: with monitor mode above,
     # the backgrounded job is its own group leader, so its pgid equals its
@@ -672,7 +690,119 @@ STUB
     fi
     pass "$test_name"
 }
-assert_run_sh_sigint_right_after_mktemp_cleans_up
+assert_run_sh_sigint_right_after_rundir_created_cleans_up
+
+# ── Finding 9: SIGINT delivered WHILE the `mkdir` creating RUN_TMP_DIR is ──
+# ── still running (directory already exists on disk, external command ────
+# ── has not yet returned) must still clean up ──────────────────────────────
+#
+# The narrower gap finding 8 left open: `RUN_TMP_DIR="$(mktemp -d ...)"`
+# still ran mktemp as a separate process, so a SIGINT landing between
+# mktemp's own mkdir(2) syscall creating the directory and this shell
+# finishing the command substitution and assigning the path left
+# RUN_TMP_DIR unset in cleanup() — the trap was live (finding 8), but it
+# had nothing to remove yet, so the just-created directory still leaked
+# (reproduced: exit 130, directory survives). assert_run_sh_sigint_right_
+# after_rundir_created_cleans_up above cannot catch this: its injected
+# sleep fires only after RUN_TMP_DIR is already known, which is exactly the
+# state finding 9 did not previously guarantee.
+#
+# The fix assigns RUN_TMP_DIR to a pre-computed candidate path BEFORE
+# calling `mkdir` on it (see run.sh), so RUN_TMP_DIR is known even while
+# the external `mkdir` command is still running. This test proves that
+# specific ordering rather than merely re-running the finding-8 scenario:
+# it runs the REAL, unmodified run.sh (no awk injection into run.sh itself)
+# with a stub `mkdir` placed first on PATH that, only for a
+# `ch-phase3-run.*` target, invokes the real `mkdir` (so the directory is
+# genuinely created on disk) and THEN sleeps 5s before returning — landing
+# the SIGINT while the directory already exists but the `mkdir` command
+# itself has not yet handed control back to run.sh. Any other `mkdir` call
+# (e.g. run.sh's own `mkdir -p "$TMPDIR"`) passes straight through to the
+# real binary via `command -p mkdir`, untouched.
+#
+# Sabotage-checked against an ordering that assigns RUN_TMP_DIR only AFTER
+# `mkdir` succeeds (`if mkdir -m 700 "$candidate"; then RUN_TMP_DIR=...`,
+# the shape finding 9 forbids) in a scratch copy: with that ordering, bash
+# is still blocked waiting for the stubbed `mkdir` process (mid-sleep) to
+# exit when SIGINT arrives, so the `if`'s body — and therefore the
+# RUN_TMP_DIR assignment — never runs; cleanup() sees RUN_TMP_DIR unset and
+# the directory the stub already created on disk leaks. The real ordering
+# below does not have this problem because the assignment happens as its
+# own statement strictly before `mkdir` is ever invoked.
+assert_run_sh_sigint_during_rundir_mkdir_cleans_up() {
+    local test_name="run.sh cleans up RUN_TMP_DIR on SIGINT delivered while the mkdir creating it is still running"
+    local stub_dir fresh_tmp out rc leftover leaked run_pid dir_existed
+
+    stub_dir="$(mktemp -d "$RUN_TMP_DIR/run-sigint-mkdir-stub-bin.XXXXXX")"
+    cat >"$stub_dir/docker" <<'STUB'
+#!/usr/bin/env bash
+# Always succeeds — see assert_run_sh_early_die_cleans_up's identical stub
+# above for why this keeps detect_compose_cmd and cleanup()'s later
+# `compose down` both daemon-free.
+exit 0
+STUB
+    chmod +x "$stub_dir/docker"
+
+    cat >"$stub_dir/mkdir" <<'STUB'
+#!/usr/bin/env bash
+# Pass every call through to the real mkdir untouched EXCEPT one targeting
+# run.sh's own ch-phase3-run.* directory, which we let actually happen
+# (via `command -p`, so this stub itself isn't found again) and then hold
+# open with a sleep — simulating a SIGINT landing after the directory
+# exists on disk but before this external `mkdir` process has returned
+# control to run.sh.
+for arg in "$@"; do
+    case "$arg" in
+        *ch-phase3-run.*)
+            command -p mkdir "$@"
+            rc=$?
+            sleep 5
+            exit "$rc"
+            ;;
+    esac
+done
+exec command -p mkdir "$@"
+STUB
+    chmod +x "$stub_dir/mkdir"
+
+    fresh_tmp="$(mktemp -d "$RUN_TMP_DIR/run-sigint-mkdir-tmp.XXXXXX")"
+
+    # Monitor mode (job control) — see the identical comment on
+    # assert_run_sh_sigint_right_after_rundir_created_cleans_up above for
+    # why this is required to deliver a real process-group SIGINT.
+    set -m
+    PATH="$stub_dir:$PATH" TMPDIR="$fresh_tmp" bash "$SCRIPT_DIR/run.sh" >"$fresh_tmp/out.log" 2>&1 &
+    run_pid=$!
+    set +m
+
+    # Generous margin for the process to source lib/common.sh, install the
+    # trap, and reach the stubbed `mkdir`'s post-creation sleep — every
+    # step before it is either a pure bash builtin or a stubbed,
+    # instant-exit `docker`/`openssl` call.
+    sleep 1
+    kill -INT -- "-$run_pid" 2>/dev/null
+
+    wait "$run_pid"
+    rc=$?
+    out="$(cat "$fresh_tmp/out.log" 2>/dev/null)"
+
+    leftover=("$fresh_tmp"/ch-phase3-run.*)
+    dir_existed=0
+    [ -e "${leftover[0]}" ] && dir_existed=1
+    leaked="$dir_existed"
+    rm -rf "$stub_dir" "$fresh_tmp"
+
+    if [ "$rc" -eq 0 ]; then
+        fail "$test_name" "expected run.sh to exit nonzero after SIGINT, got 0. Output: $out"
+        return
+    fi
+    if [ "$leaked" -eq 1 ]; then
+        fail "$test_name" "RUN_TMP_DIR '${leftover[0]}' survived a SIGINT delivered while its mkdir was still running — RUN_TMP_DIR was not known to cleanup() at that point. Output: $out"
+        return
+    fi
+    pass "$test_name"
+}
+assert_run_sh_sigint_during_rundir_mkdir_cleans_up
 
 # ── Summary ────────────────────────────────────────────────────────────────
 

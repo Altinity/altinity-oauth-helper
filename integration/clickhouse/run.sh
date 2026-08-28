@@ -116,8 +116,46 @@ trap cleanup EXIT
 # is already installed and live — see the comment above cleanup() for why
 # that ordering, and not the reverse, is what closes the pre-trap interrupt
 # window.
-RUN_TMP_DIR="$(mktemp -d "$TMPDIR/ch-phase3-run.XXXXXX")"
-chmod 700 "$RUN_TMP_DIR"
+#
+# RUN_TMP_DIR itself is deliberately NOT `"$(mktemp -d ...)"`: mktemp runs
+# as a separate process, so there is an unavoidable gap between the moment
+# its mkdir(2) syscall creates the directory and the moment this shell
+# finishes the command substitution and assigns the path into RUN_TMP_DIR.
+# A SIGINT landing in exactly that gap terminates the script with the EXIT
+# trap already live, but cleanup()'s `[ -n "${RUN_TMP_DIR:-}" ]` guard
+# still sees it unset, so the directory mktemp already created leaks
+# (reproduced: exit 130 + an orphaned `ch-phase3-run.*` directory).
+#
+# Close it by pre-computing a collision-resistant candidate path and
+# assigning it into RUN_TMP_DIR BEFORE calling `mkdir` on it, rather than
+# capturing mktemp's own choice of name after the fact. The assignment
+# itself is a single in-process bash statement — bash only acts on a
+# pending signal between simple commands, never mid-statement — so by the
+# time the external `mkdir` runs, cleanup() already has the path regardless
+# of whether mkdir has created the directory yet, is interrupted mid-
+# syscall, or never gets to run at all. Because the name is no longer
+# handed out atomically by mktemp, `mkdir` (not `mktemp -d`) can fail with
+# EEXIST on a genuine collision; retry with a fresh candidate rather than
+# assuming the first name is free. On a collision RUN_TMP_DIR is cleared
+# before the next attempt, so cleanup() never targets a path this run did
+# not itself create — the sole residual risk is a SIGINT landing in the
+# narrow window where RUN_TMP_DIR briefly names an as-yet-uncreated
+# candidate that a concurrent run then also picks, which needs a 16-hex-
+# character (64-bit) suffix collision at the same instant as the signal,
+# several orders of magnitude less likely than the window this fix closes.
+RUN_TMP_DIR=""
+for _run_tmp_attempt in {1..10}; do
+    _run_tmp_candidate="$TMPDIR/ch-phase3-run.$(gen_secret 8)"
+    RUN_TMP_DIR="$_run_tmp_candidate"
+    if mkdir -m 700 "$RUN_TMP_DIR" 2>/dev/null; then
+        unset _run_tmp_candidate _run_tmp_attempt
+        break
+    fi
+    RUN_TMP_DIR=""
+done
+if [ -z "$RUN_TMP_DIR" ]; then
+    die "failed to create a unique run directory under $TMPDIR (ch-phase3-run.*) after 10 attempts"
+fi
 
 ENV_FILE="$RUN_TMP_DIR/compose.env"
 : >"$ENV_FILE"
