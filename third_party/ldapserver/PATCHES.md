@@ -38,9 +38,11 @@ Concretely, a single unauthenticated 6-byte header —
 `make([]byte, 2147483647)` for that one connection, before any credential is
 checked. Nothing bounds how many connections can do this concurrently.
 
-The fix adds `maxMessageBodyLength` (1 MiB — see the comment at its
-declaration in `packet.go` for why that's generous for this consumer's
-Bind/Search-only traffic) and enforces it in `readTagAndLength`, after both
+The fix adds `maxMessageBodyLength` (1 MiB when this fix was first introduced;
+**64 KiB is the current value** — see "Aggregate pre-auth memory across
+connections was unbounded" below for why it was later reduced, and the
+comment at `maxMessageBodyLength`'s declaration in `packet.go` for the full,
+up-to-date reasoning) and enforces it in `readTagAndLength`, after both
 the short-form and long-form branches have produced a final `ret.Length`,
 and unconditionally before returning — i.e. strictly before
 `readLdapMessageBytes` ever passes that length to `readBytes`' allocation.

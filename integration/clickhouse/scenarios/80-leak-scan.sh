@@ -6,11 +6,18 @@
 # lib/oauth.sh's OAUTH_RETAINED_TOKEN_NAMES registry already holds every
 # signed JWT this run minted: Alice reader/unprovisioned (scenario B),
 # Bob mismatch (D), expired Alice (E), reconnect A and B (F),
-# local-precedence (G), and distributed (H, both oracles) — the seven the
-# plan names in "Acceptance scenario I" plus the view-oracle token — and,
-# beyond the plan's minimum, the runtime-generated plaintext password of
-# the local-precedence user (scenario G retains CH_LOCAL_ADMIN_PASSWORD),
-# which travels the same HTTP Basic path and is just as much a credential.
+# local-precedence (G), distributed (H, both oracles) — the seven the
+# plan names in "Acceptance scenario I" plus the view-oracle token — and
+# (phase 5) scenario G' — LDAP Search-limit compatibility
+# (scenarios/65-ldap-search-limits.sh) — limit@example.com's one token
+# carrying 257 mapped role names, retained the instant it is minted, before
+# scenario G' issues its single fresh authentication attempt. No special
+# case is needed here for it: this file already consumes every name in
+# OAUTH_RETAINED_TOKEN_NAMES regardless of how many scenarios registered
+# one or how many roles any single token carries. And, beyond the plan's
+# minimum, the runtime-generated plaintext password of the local-precedence
+# user (scenario G retains CH_LOCAL_ADMIN_PASSWORD), which travels the same
+# HTTP Basic path and is just as much a credential.
 #
 # Order matters here (see the plan's "Leak-scanner self-test"): the
 # self-test MUST run and MUST detect its own deliberate plant before this

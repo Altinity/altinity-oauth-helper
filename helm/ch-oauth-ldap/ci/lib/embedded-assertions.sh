@@ -45,6 +45,14 @@
 # schema checks, Dockerfile/script/workflow assertions, or documentation
 # checks. This file only proves the *embedded* config.yaml/ldap.xml payload
 # is structurally correct once a render has already succeeded.
+#
+# Also asserts (issue #19 phase 5 §8.2/A4): the embedded ldap.xml's
+# <search_limit> equals 256 AND equals the value parsed straight out of the
+# real integration fixture (integration/clickhouse/clickhouse/common/
+# config.d/ldap.xml, read-only here — owned by the integration suite), so
+# the chart/fixture/README's three copies of this ClickHouse-default value
+# cannot silently diverge. The README fence comparison itself is a separate
+# docs-contract concern, not this checker's job.
 
 # --- sourced-only guard -----------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
@@ -139,6 +147,7 @@ type clickhouseXML struct {
 			BindDN               string `xml:"bind_dn"`
 			VerificationCooldown int    `xml:"verification_cooldown"`
 			EnableTLS            string `xml:"enable_tls"`
+			SearchLimit          int    `xml:"search_limit"`
 		} `xml:"oauth_helper"`
 	} `xml:"ldap_servers"`
 	UserDirectories struct {
@@ -414,6 +423,21 @@ func main() {
 		failf("ldap.xml enable_tls = %q, want \"no\"", cx.LDAPServers.OauthHelper.EnableTLS)
 	}
 
+	// search_limit (issue #19 phase 5 A4): the chart's third copy of this
+	// ClickHouse-default value must equal 256 AND stay byte-identical to
+	// the real integration fixture's own copy, so the chart/fixture/README
+	// copies cannot silently diverge (the README fence comparison itself
+	// is out of this checker's scope; it belongs to the docs contract).
+	if cx.LDAPServers.OauthHelper.SearchLimit != 256 {
+		failf("ldap.xml search_limit = %d, want 256", cx.LDAPServers.OauthHelper.SearchLimit)
+	} else if fixtureLimit, ferr := readFixtureSearchLimit(); ferr != nil {
+		failf("reading integration fixture ldap.xml search_limit: %v", ferr)
+	} else if fixtureLimit != 256 {
+		failf("integration fixture ldap.xml search_limit = %d, want 256 (chart/fixture copies diverged)", fixtureLimit)
+	} else {
+		passf("ldap.xml search_limit == 256 (matches integration fixture)")
+	}
+
 	if cx.UserDirectories.LDAP.Server == "oauth_helper" {
 		passf("ldap.xml user_directories/ldap/server == \"oauth_helper\"")
 	} else {
@@ -515,6 +539,29 @@ func checkMap(label string, v interface{}) {
 		return
 	}
 	failf("%s is not a map: %#v (%T)", label, v, v)
+}
+
+// fixtureLDAPXMLPath is relative to $REPO_ROOT, which _ea_run_verifier
+// always makes the working directory (plan A5) — so this resolves
+// correctly regardless of where the render/expectation files themselves
+// live under $RUN_TMP_DIR.
+const fixtureLDAPXMLPath = "integration/clickhouse/clickhouse/common/config.d/ldap.xml"
+
+// readFixtureSearchLimit parses the real integration fixture's own
+// <search_limit> value out of integration/clickhouse/clickhouse/common/
+// config.d/ldap.xml (owned/maintained elsewhere; read-only here) using the
+// same clickhouseXML struct as the rendered chart XML, so the chart's
+// embedded copy and the real fixture's copy can never silently diverge.
+func readFixtureSearchLimit() (int, error) {
+	raw, err := os.ReadFile(fixtureLDAPXMLPath)
+	if err != nil {
+		return 0, err
+	}
+	var fx clickhouseXML
+	if err := xml.Unmarshal(raw, &fx); err != nil {
+		return 0, fmt.Errorf("parsing %s: %w", fixtureLDAPXMLPath, err)
+	}
+	return fx.LDAPServers.OauthHelper.SearchLimit, nil
 }
 
 func report() {

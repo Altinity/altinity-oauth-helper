@@ -129,11 +129,20 @@
 # Acceptance scenario I (the JWT-leak scan, scenarios/80-leak-scan.sh)
 # needs every generated credential this phase mints — reader/unprovisioned,
 # mismatch, expired, both reconnect tokens, local-precedence (both the
-# external JWT and the runtime-generated local password), and both
-# distributed tokens — so it can fixed-string-scan the captured artifacts
-# for each one. Every scenario file retains its credentials by NAME the
-# moment it mints or receives them, so the leak-scan scenario can consume
-# them without re-deriving or re-minting anything.
+# external JWT and the runtime-generated local password), both
+# distributed tokens, and (phase 5) scenario G's 257-role Search-limit
+# token — so it can fixed-string-scan the captured artifacts for each one.
+# Every scenario file retains its credentials by NAME the moment it mints
+# or receives them, so the leak-scan scenario can consume them without
+# re-deriving or re-minting anything.
+#
+# Phase 5's scenario G' (integration/clickhouse/scenarios/
+# 65-ldap-search-limits.sh) is not special-cased anywhere in this file: it
+# mints its one token via the same oauth_mint helper below (the 257
+# repeated `role=` params it passes are just a longer argument list to the
+# same function) and calls oauth_retain on it immediately after minting,
+# exactly like every other scenario — the mechanism here is scenario-count-
+# and role-count-agnostic by design.
 #
 # The registry stores VARIABLE NAMES, never values: OAUTH_RETAINED_TOKEN_NAMES
 # is a plain (unexported) indexed array of the names of other unexported

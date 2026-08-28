@@ -3,13 +3,22 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/altinity/go-mcp-oauth-sdk/oauth"
 )
+
+// operatorGuideYAMLPath is the exact file docs/ch-oauth-ldap-operator-guide.md
+// (plan-19p5.md §21.1/§21.3) copies its YAML fence from verbatim. Keeping the
+// path as a named constant means every test below and the future docs
+// contract test (§21.4) can point at the same file without repeating the
+// literal path.
+const operatorGuideYAMLPath = "testdata/operator-guide.yaml"
 
 // validConfig returns a *Config that satisfies every validateConfig rule,
 // so individual tests can copy it and break exactly one rule at a time.
@@ -371,4 +380,166 @@ ldap:
 
 	vc := cfg.toVerificationConfig()
 	require.Equal(t, 5*time.Minute, vc.NegativeTTL)
+}
+
+// --- operator-guide.yaml (plan-19p5.md §21.3/§21.4, A3) ---
+
+// TestOperatorGuideYAML_LoadsThroughProductionLoadConfig loads
+// testdata/operator-guide.yaml through the exact production LoadConfig entry
+// point (config.go:101) and asserts every field the file sets, plus the
+// derived verification/roles/ldap conversions. docs/ch-oauth-ldap-operator-
+// guide.md's YAML fence (§21.3) is a verbatim copy of this file, so this test
+// is the proof that the guide's example configuration actually
+// parses/validates/converts under production code, not merely under eyeball
+// review.
+func TestOperatorGuideYAML_LoadsThroughProductionLoadConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := LoadConfig(operatorGuideYAMLPath)
+	require.NoError(t, err)
+
+	// oauth: expected_issuer + jwks_url both set, multiple
+	// expected_audiences, username_claim, groups_claim, verifier/cache
+	// settings.
+	require.Equal(t, "https://tenant.example.auth0.com/", cfg.OAuth.ExpectedIssuer)
+	require.Equal(t, "https://tenant.example.auth0.com/.well-known/jwks.json", cfg.OAuth.JWKSURL)
+	require.Equal(t, []string{"clickhouse", "mcp"}, cfg.OAuth.ExpectedAudiences)
+	require.Equal(t, "email", cfg.OAuth.UsernameClaim)
+	require.Equal(t, "roles", cfg.OAuth.GroupsClaim)
+	require.Equal(t, 60*time.Second, cfg.OAuth.VerifierLeeway)
+	require.Empty(t, cfg.OAuth.RequiredScopes)
+	require.Equal(t, 5*time.Minute, cfg.OAuth.JWKSCacheLifetime)
+	require.Equal(t, 30*time.Second, cfg.OAuth.TokenCacheLifetime)
+
+	// identity: username_match, require_email_verified,
+	// allowed_email_domains, denied_usernames.
+	require.Equal(t, "lowercase_equal", cfg.Identity.UsernameMatch)
+	require.True(t, cfg.Identity.RequireEmailVerified)
+	require.Equal(t, []string{"example.com"}, cfg.Identity.AllowedEmailDomains)
+	require.Empty(t, cfg.Identity.AllowedHostedDomains)
+	require.Equal(t, []string{"default", "admin"}, cfg.Identity.DeniedUsernames)
+
+	// roles: roles_mapping, a restrictive roles_filter, a valid non-empty
+	// roles_transform.
+	require.Equal(t, map[string]string{
+		"idp-readers":   "ch_readonly",
+		"idp-engineers": "ch_engineer",
+	}, cfg.Roles.RolesMapping)
+	require.Equal(t, "^ch_[A-Za-z0-9_]+$", cfg.Roles.RolesFilter)
+	require.Equal(t, "s/^ch_//", cfg.Roles.RolesTransform)
+
+	// ldap: listen/user_base_dn/group_base_dn/user_rdn_attribute/role_cn_prefix.
+	require.Equal(t, ":389", cfg.LDAP.Listen)
+	require.Equal(t, "ou=users,dc=altinity,dc=internal", cfg.LDAP.UserBaseDN)
+	require.Equal(t, "ou=groups,dc=altinity,dc=internal", cfg.LDAP.GroupBaseDN)
+	require.Equal(t, "uid", cfg.LDAP.UserRDNAttribute)
+	require.Equal(t, "clickhouse_", cfg.LDAP.RoleCNPrefix)
+
+	// Conversions: LoadConfig's validateConfig already exercised real
+	// verification.New/roles.New/ldap DN-parser construction (and returned
+	// no error above), but assert the exact converted values too, so a
+	// future accidental field-mapping regression in toVerificationConfig/
+	// toRolesConfig/toLDAPConfig is caught by this same file rather than
+	// only by the narrower field-by-field mapping tests above.
+	vc := cfg.toVerificationConfig()
+	require.Equal(t, "https://tenant.example.auth0.com/", vc.ExpectedIssuer)
+	require.Equal(t, "https://tenant.example.auth0.com/.well-known/jwks.json", vc.JWKSURL)
+	require.Equal(t, []string{"clickhouse", "mcp"}, vc.ExpectedAudiences)
+	require.Equal(t, 60*time.Second, vc.VerifierLeeway)
+	require.Equal(t, 5*time.Minute, vc.JWKSCacheTTL)
+	require.Equal(t, 30*time.Second, vc.PositiveTTL)
+	require.Equal(t, defaultNegativeVerificationTTL, vc.NegativeTTL)
+	require.Equal(t, "email", vc.Identity.UsernameClaim)
+	require.Equal(t, "lowercase_equal", vc.Identity.MatchMode)
+	require.Equal(t, []string{"default", "admin"}, vc.Identity.DeniedUsernames)
+	require.Equal(t, oauth.IdentityPolicy{
+		RequireEmailVerified: true,
+		AllowedEmailDomains:  []string{"example.com"},
+		AllowedHostedDomains: []string{},
+	}, vc.Identity.ClaimPolicy)
+
+	rc := cfg.toRolesConfig()
+	require.Equal(t, "roles", rc.GroupsClaim)
+	require.Equal(t, "^ch_[A-Za-z0-9_]+$", rc.Filter)
+	require.Equal(t, "s/^ch_//", rc.Transform)
+
+	lc := cfg.toLDAPConfig()
+	require.Equal(t, ":389", lc.Listen)
+	require.Equal(t, "clickhouse_", lc.RoleCNPrefix)
+}
+
+// TestOperatorGuideYAML_StrictKnownFields is the test-only strictness A3
+// requires: decode the exact same file with
+// yaml.NewDecoder(...).KnownFields(true) directly against the production
+// Config struct, and require no error. Production LoadConfig itself uses a
+// lenient yaml.Unmarshal (config.go:102) and is deliberately not changed by
+// this sub-task — this test adds strictness only as a documentation-
+// provenance check on this one file, proving every key the guide's YAML
+// fence uses is actually a real, spelled-correctly Config field rather than
+// a silently-ignored typo. §21.4's docs contract test cites this test as the
+// proof for every YAML fence copied from this file.
+func TestOperatorGuideYAML_StrictKnownFields(t *testing.T) {
+	t.Parallel()
+
+	f, err := os.Open(operatorGuideYAMLPath)
+	require.NoError(t, err)
+	defer f.Close()
+
+	dec := yaml.NewDecoder(f)
+	dec.KnownFields(true)
+
+	var cfg Config
+	require.NoError(t, dec.Decode(&cfg))
+
+	// Sanity: KnownFields(true) alone would also pass on an empty file (no
+	// keys to reject), so also confirm the strict decode actually populated
+	// the struct — otherwise a truncated/renamed testdata file could pass
+	// this test vacuously.
+	require.Equal(t, "https://tenant.example.auth0.com/", cfg.OAuth.ExpectedIssuer)
+	require.Equal(t, ":389", cfg.LDAP.Listen)
+
+	t.Run("injected_unknown_key_fails_strict_decode_but_not_production_LoadConfig", func(t *testing.T) {
+		t.Parallel()
+
+		original, err := os.ReadFile(operatorGuideYAMLPath)
+		require.NoError(t, err)
+
+		// Inject a plausible-looking but nonexistent key inside the oauth
+		// block, simulating an operator typo (e.g. "jwks_uri" instead of
+		// "jwks_url") that a purely lenient decode would silently swallow.
+		// Anchoring on "oauth:\n" (present exactly once, at file scope in
+		// operator-guide.yaml) rather than prepending a second top-level
+		// "oauth:" mapping avoids relying on YAML's unspecified duplicate-
+		// key behavior.
+		const anchor = "oauth:\n"
+		originalStr := string(original)
+		require.Contains(t, originalStr, anchor)
+		mutated := []byte(strings.Replace(originalStr, anchor, anchor+"  unknown_typo_field: true\n", 1))
+
+		dir := t.TempDir()
+		path := filepath.Join(dir, "operator-guide-with-typo.yaml")
+		require.NoError(t, os.WriteFile(path, mutated, 0o600))
+
+		// Strict decode against the production Config struct must reject
+		// the unknown key.
+		mf, err := os.Open(path)
+		require.NoError(t, err)
+		defer mf.Close()
+		strictDec := yaml.NewDecoder(mf)
+		strictDec.KnownFields(true)
+		var strictCfg Config
+		strictErr := strictDec.Decode(&strictCfg)
+		require.Error(t, strictErr)
+		require.ErrorContains(t, strictErr, "unknown_typo_field")
+
+		// Documented contrast: production LoadConfig (config.go:101-105)
+		// uses a lenient yaml.Unmarshal and therefore does NOT fail on this
+		// same mutated file — it silently ignores the unknown key. This
+		// sub-task does not change config.go/main.go; this assertion exists
+		// only to make that leniency an explicit, tested fact rather than
+		// an implicit assumption.
+		leniantCfg, err := LoadConfig(path)
+		require.NoError(t, err, "production LoadConfig is documented-lenient and must not fail on an unknown key")
+		require.Equal(t, "https://tenant.example.auth0.com/", leniantCfg.OAuth.ExpectedIssuer)
+	})
 }

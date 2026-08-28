@@ -108,6 +108,56 @@ func (p *testIdP) mintJWT(t *testing.T, claims map[string]interface{}) string {
 	return token
 }
 
+// mintJWTWithKid is mintJWT's counterpart for the debug-log redaction matrix
+// below: mintJWT always signs with the IdP's own configured kid — exactly
+// the value present in its /jwks response — so it can never exercise the
+// unknown-kid rejection path (github.com/altinity/go-mcp-oauth-sdk@v0.2.0's
+// parseAndFetchKeys, oauth/jwt.go). This mints a well-formed, correctly
+// signed token whose `kid` header is instead an arbitrary caller-supplied
+// value, so JWKS lookup-by-kid genuinely misses.
+func (p *testIdP) mintJWTWithKid(t *testing.T, kid string, claims map[string]interface{}) string {
+	t.Helper()
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: p.privKey},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
+	)
+	require.NoError(t, err)
+
+	final := map[string]interface{}{
+		"iss": p.issuer,
+		"aud": p.audience,
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+	}
+	for k, v := range claims {
+		final[k] = v
+	}
+	token, err := josejwt.Signed(signer).Claims(final).Serialize()
+	require.NoError(t, err)
+	return token
+}
+
+// rawCompactJWTWithHeader hand-constructs a compact-serialized JWT with an
+// arbitrary header map, bypassing jose.Signer (which only accepts header
+// values from its own known-shape enums and would refuse to build a token
+// carrying attacker-marker content in them). go-jose's jwt.ParseSigned
+// sanitizes and validates the header before any signature verification
+// happens, so the third segment's content is irrelevant here — it is never
+// inspected once the header itself has already been rejected.
+func rawCompactJWTWithHeader(header, claims map[string]interface{}) string {
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		panic(err)
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(headerBytes) + "." +
+		base64.RawURLEncoding.EncodeToString(payload) + "." +
+		base64.RawURLEncoding.EncodeToString([]byte("not-a-real-signature"))
+}
+
 // baseConfig uses the canonical plural expected_audiences form; legacy
 // singular audience compatibility gets its own explicit tests below.
 func baseConfig(p *testIdP) *Config {
@@ -1066,6 +1116,341 @@ func TestVerifyRejectionLogRedactsCredentialShapedRequestedUsername(t *testing.T
 	require.NotContains(t, logged, "SECRET-PAYLOAD-MARKER")
 	require.NotContains(t, logged, "SECRET-SIG-MARKER")
 	require.Contains(t, logged, "redacted", "the log line should show that redaction happened, not silently drop the field")
+}
+
+// ---------------------------------------------------------------------------
+// §5.7 / A2: captured-debug-log redaction matrix for verify.go:139's
+// `log.Debug().Err(err).Str("user", identity.RedactUsername(user)).Msg(...)`
+// rejection sink.
+//
+// Rule (coordinator-approved amendment A2): these tests raise zerolog's
+// process-global level to Trace and swap the process-global log.Logger to a
+// buffer for their duration, restoring both afterward — captureDebugLog
+// below does exactly that. None of the TestVerifyDebugLogRedaction_* test
+// functions call t.Parallel(), and none may ever be changed to: swapping
+// those two process globals races any concurrently-running parallel sibling
+// that also logs, exactly as documented on
+// TestVerifyRejectionLogRedactsCredentialShapedRequestedUsername above,
+// which this whole group extends across a full JWT/identity failure matrix
+// rather than the single bad-signature-shaped case that test covers.
+// ---------------------------------------------------------------------------
+
+// captureDebugLog is the serialized capture helper: it raises zerolog's
+// global level to Trace (verify.go's rejection sink logs at Debug, which is
+// a no-op unless the effective level admits it) and swaps the process-global
+// log.Logger for a buffer, registering a t.Cleanup that restores both the
+// level and the logger. Callers must not call t.Parallel() — see the header
+// comment above this helper.
+func captureDebugLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+
+	prevLevel := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	prevLogger := log.Logger
+	log.Logger = zerolog.New(&buf)
+
+	t.Cleanup(func() {
+		log.Logger = prevLogger
+		zerolog.SetGlobalLevel(prevLevel)
+	})
+	return &buf
+}
+
+// verifyDebugRedactionUserMarker and verifyDebugRedactionUser are the fixed
+// credential-shaped requested username used by every case below: a
+// three-segment, dot-separated, all-non-empty string — exactly the shape
+// identity.RedactUsername treats as unsafe to log verbatim (see
+// internal/identity/policy.go's looksCredentialShaped) — so every case in
+// this matrix re-proves the redaction TestVerifyRejectionLogRedactsCredentialShapedRequestedUsername
+// covers for a single rejection cause, across the full failure surface
+// instead.
+const (
+	verifyDebugRedactionUserMarker = "SECRET-USER-MARKER"
+	verifyDebugRedactionUser       = verifyDebugRedactionUserMarker + ".mid-segment.trailer"
+)
+
+// assertVerifyDebugLogRedacted sends one /verify request for token under the
+// fixed credential-shaped verifyDebugRedactionUser, capturing the debug log
+// for the duration of the call, and asserts the invariants every case in
+// this matrix must satisfy: the HTTP body/status stay the existing fixed
+// generic rejection: no raw token, requested-username value, or
+// caller-supplied marker reaches the captured debug event; and the event
+// still shows that redaction happened (rather than silently dropping the
+// field). It returns the captured log text so callers can layer
+// case-specific assertions (e.g. a required sanitized-SDK-text substring) on
+// top.
+func assertVerifyDebugLogRedacted(t *testing.T, v *Verifier, token string, extraMarkers ...string) string {
+	t.Helper()
+	buf := captureDebugLog(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("Authorization", basicHeader(verifyDebugRedactionUser, token))
+	rr := httptest.NewRecorder()
+	v.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+	require.Equal(t, errAuthenticationFailed.Error()+"\n", rr.Body.String(),
+		"HTTP body must remain the fixed generic rejection regardless of failure cause")
+
+	logged := buf.String()
+	require.NotContains(t, logged, token, "captured debug event must not contain the raw token")
+	require.NotContains(t, logged, verifyDebugRedactionUser, "captured debug event must not contain the raw requested username")
+	require.NotContains(t, logged, verifyDebugRedactionUserMarker, "captured debug event must not contain the requested-username marker")
+	require.Contains(t, logged, "redacted", "captured debug event must show the requested username was redacted, not silently drop the field")
+	for _, marker := range extraMarkers {
+		require.NotContains(t, logged, marker, "captured debug event must not contain marker %q", marker)
+	}
+	return logged
+}
+
+// TestVerifyDebugLogRedaction_MalformedHeaderMarker covers a JWT whose
+// header itself fails to parse (an `alg` value outside the SDK's accepted
+// signature-algorithm set): github.com/altinity/go-mcp-oauth-sdk@v0.2.0's
+// parseAndFetchKeys (oauth/jwt.go) wraps go-jose's parse error, which would
+// otherwise interpolate the raw attacker-controlled header content, and
+// ValidateStrictJWT (oauth/strict_jwt.go:308) sanitizes that whole class to
+// the fixed text "unable to parse or validate JWT header" before it ever
+// reaches this sidecar's debug sink. Asserting that exact substring (rather
+// than only marker-absence) means a future SDK change that starts echoing
+// header text back into the error would fail this test even though no
+// marker string happens to match.
+func TestVerifyDebugLogRedaction_MalformedHeaderMarker(t *testing.T) {
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	const algMarker = "SECRET-ALG-MARKER"
+	token := rawCompactJWTWithHeader(
+		map[string]interface{}{"typ": "JWT", "alg": algMarker},
+		map[string]interface{}{
+			"iss": p.issuer, "aud": p.audience,
+			"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
+			"sub": "u-1",
+		},
+	)
+
+	logged := assertVerifyDebugLogRedacted(t, v, token, algMarker)
+	require.Contains(t, logged, "unable to parse or validate JWT header",
+		"the SDK's fixed sanitized text must appear in the debug event")
+}
+
+// TestVerifyDebugLogRedaction_UnknownKidMarker covers a well-formed,
+// correctly signed JWT whose `kid` header names a key absent from the IdP's
+// JWKS. parseAndFetchKeys' one-shot rotation refetch still misses it, and
+// its "no JWK found for kid %q" error — which embeds that raw kid value —
+// is sanitized by ValidateStrictJWT (oauth/strict_jwt.go:321) to the fixed
+// text "failed to resolve a JWK for the token's key id" before reaching this
+// sidecar's debug sink.
+func TestVerifyDebugLogRedaction_UnknownKidMarker(t *testing.T) {
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	const kidMarker = "SECRET-KID-MARKER"
+	token := p.mintJWTWithKid(t, kidMarker, map[string]interface{}{
+		"sub": "u-1", "email": "alice@example.com", "email_verified": true,
+	})
+
+	logged := assertVerifyDebugLogRedacted(t, v, token, kidMarker)
+	require.Contains(t, logged, "failed to resolve a JWK for the token's key id",
+		"the SDK's fixed sanitized text must appear in the debug event")
+}
+
+// TestVerifyDebugLogRedaction_BadSignature covers a token signed by a
+// different IdP's key (same kid, so it's selected as a verification
+// candidate, but the signature does not verify against it) — mirroring
+// TestVerifierHTTPBodyNeverDisclosesFailureReason's bad_signature case, but
+// additionally asserting the captured debug event.
+func TestVerifyDebugLogRedaction_BadSignature(t *testing.T) {
+	p := newTestIdP(t)
+	otherIdP := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	token := otherIdP.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "aud": p.audience, "iss": p.issuer,
+		"email": "alice@example.com", "email_verified": true,
+	})
+
+	assertVerifyDebugLogRedacted(t, v, token)
+}
+
+// TestVerifyDebugLogRedaction_IssuerMismatch covers ValidateStrictJWT's
+// byte-exact issuer check.
+func TestVerifyDebugLogRedaction_IssuerMismatch(t *testing.T) {
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	token := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "iss": "https://wrong-issuer.example.com",
+		"email": "alice@example.com", "email_verified": true,
+	})
+
+	assertVerifyDebugLogRedacted(t, v, token)
+}
+
+// TestVerifyDebugLogRedaction_AudienceMismatch covers ValidateStrictJWT's
+// byte-exact audience check.
+func TestVerifyDebugLogRedaction_AudienceMismatch(t *testing.T) {
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	token := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "aud": "wrong-audience",
+		"email": "alice@example.com", "email_verified": true,
+	})
+
+	assertVerifyDebugLogRedacted(t, v, token)
+}
+
+// TestVerifyDebugLogRedaction_Expired covers ValidateStrictJWT's exp check.
+func TestVerifyDebugLogRedaction_Expired(t *testing.T) {
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	token := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "email": "alice@example.com", "email_verified": true,
+		"exp": time.Now().Add(-time.Hour).Unix(),
+		"iat": time.Now().Add(-2 * time.Hour).Unix(),
+	})
+
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's own expiry sentinel
+	// (oauth.ErrTokenExpired, oauth/errors.go — checked ahead of
+	// strict_jwt.go's own missing/malformed-exp-claim case for an exp that
+	// parses fine but is simply in the past) so an unrelated failure
+	// earlier in the pipeline could never satisfy this test.
+	require.Contains(t, logged, "OAuth token expired",
+		"the SDK's oauth.ErrTokenExpired text must appear in the debug event")
+}
+
+// TestVerifyDebugLogRedaction_NotBefore covers ValidateStrictJWT's nbf check.
+func TestVerifyDebugLogRedaction_NotBefore(t *testing.T) {
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	token := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "email": "alice@example.com", "email_verified": true,
+		"nbf": time.Now().Add(time.Hour).Unix(),
+	})
+
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's nbf-check sentinel text
+	// (oauth/strict_jwt.go) so an unrelated failure earlier in the
+	// pipeline could never satisfy this test.
+	require.Contains(t, logged, "token not yet valid",
+		"the SDK's nbf-check error text must appear in the debug event")
+}
+
+// TestVerifyDebugLogRedaction_IssuedInFuture covers ValidateStrictJWT's iat
+// check.
+func TestVerifyDebugLogRedaction_IssuedInFuture(t *testing.T) {
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	token := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "email": "alice@example.com", "email_verified": true,
+		"iat": time.Now().Add(time.Hour).Unix(),
+	})
+
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's iat-check sentinel text
+	// (oauth/strict_jwt.go) so an unrelated failure earlier in the
+	// pipeline could never satisfy this test.
+	require.Contains(t, logged, "token issued in the future",
+		"the SDK's iat-check error text must appear in the debug event")
+}
+
+// TestVerifyDebugLogRedaction_UsernameMismatch covers internal/identity's
+// requested-username-vs-claim mismatch: the token is otherwise fully valid,
+// but its email claim is not verifyDebugRedactionUser, so identity.Bind
+// rejects it before ever returning a Principal.
+func TestVerifyDebugLogRedaction_UsernameMismatch(t *testing.T) {
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+
+	token := p.mintJWT(t, map[string]interface{}{
+		"sub": "u-1", "email": "alice@example.com", "email_verified": true,
+	})
+
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to internal/identity's own username-mismatch
+	// sentinel (ErrUsernameMismatch) so an unrelated failure earlier in the
+	// pipeline could never satisfy this test.
+	require.Contains(t, logged, "requested username does not match verified claim",
+		"identity.ErrUsernameMismatch's text must appear in the debug event")
+}
+
+// TestVerifyDebugLogRedaction_DeniedUsername covers internal/identity's
+// deny-list: username_claim is switched to sub (set to
+// verifyDebugRedactionUser itself, so the match step passes) and that exact
+// value is configured as denied — isolating the rejection to the deny-list
+// check specifically, rather than an upstream username mismatch.
+func TestVerifyDebugLogRedaction_DeniedUsername(t *testing.T) {
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.Identity.UsernameClaim = "sub"
+	cfg.Identity.MatchMode = "exact"
+	cfg.Identity.RequireEmailVerified = false
+	cfg.Identity.DeniedUsernames = []string{verifyDebugRedactionUser}
+	v := newTestVerifier(t, cfg)
+
+	token := p.mintJWT(t, map[string]interface{}{"sub": verifyDebugRedactionUser})
+
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to internal/identity's own reserved-username
+	// sentinel (ErrReservedUsername) so an unrelated failure earlier in the
+	// pipeline could never satisfy this test.
+	require.Contains(t, logged, "requested username is reserved and cannot be claimed externally",
+		"identity.ErrReservedUsername's text must appear in the debug event")
+}
+
+// TestVerifyDebugLogRedaction_UnverifiedEmail covers the SDK's generic
+// verified-email identity-claim policy: username_claim is switched to sub
+// (set to verifyDebugRedactionUser, so the match step passes) so the
+// rejection is isolated to the unverified-email check specifically.
+func TestVerifyDebugLogRedaction_UnverifiedEmail(t *testing.T) {
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.Identity.UsernameClaim = "sub"
+	cfg.Identity.MatchMode = "exact"
+	v := newTestVerifier(t, cfg)
+
+	token := p.mintJWT(t, map[string]interface{}{
+		"sub":   verifyDebugRedactionUser,
+		"email": "alice@example.com", "email_verified": false,
+	})
+
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's own sentinel (oauth.ErrEmailNotVerified,
+	// returned unwrapped by internal/identity.Policy.Bind) so an unrelated
+	// failure earlier in the pipeline could never satisfy this test.
+	require.Contains(t, logged, "OAuth email is not verified",
+		"oauth.ErrEmailNotVerified's text must appear in the debug event")
+}
+
+// TestVerifyDebugLogRedaction_DisallowedDomain covers the SDK's generic
+// email-domain identity-claim policy: username_claim is switched to sub
+// (set to verifyDebugRedactionUser, so the match step passes, and email
+// verification passes) so the rejection is isolated to the domain check
+// specifically.
+func TestVerifyDebugLogRedaction_DisallowedDomain(t *testing.T) {
+	p := newTestIdP(t)
+	cfg := baseConfig(p)
+	cfg.Identity.UsernameClaim = "sub"
+	cfg.Identity.MatchMode = "exact"
+	cfg.Identity.AllowedEmailDomains = []string{"allowed.example.com"}
+	v := newTestVerifier(t, cfg)
+
+	token := p.mintJWT(t, map[string]interface{}{
+		"sub":   verifyDebugRedactionUser,
+		"email": "alice@not-allowed.example.com", "email_verified": true,
+	})
+
+	logged := assertVerifyDebugLogRedacted(t, v, token)
+	// Pin the rejection cause to the SDK's own sentinel (oauth.ErrUnauthorizedDomain,
+	// returned unwrapped by internal/identity.Policy.Bind) so an unrelated
+	// failure earlier in the pipeline could never satisfy this test.
+	require.Contains(t, logged, "OAuth identity domain is not allowed",
+		"oauth.ErrUnauthorizedDomain's text must appear in the debug event")
 }
 
 // TestJWKSHealthTracking asserts the underlying go-mcp-oauth-sdk Verifier records

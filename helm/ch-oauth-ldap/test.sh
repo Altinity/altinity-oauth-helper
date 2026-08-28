@@ -24,8 +24,9 @@
 #   * §54  the standard Go gate (build/vet/test) plus cross-compilation;
 #   * §55  the OLD helm/ch-jwt-verify chart's lint/template smoke, proving
 #          this phase did not disturb it;
-#   * §56  a base-ref-aware proof that every non-goal path is untouched,
-#          both in committed history and in the current working tree;
+#   * §56  a base-ref-aware proof that a ch-oauth-ldap change leaves the
+#          ch-jwt-verify sidecar surface untouched, both in committed
+#          history and in the current working tree;
 #   * §50/§29 this script's OWN deterministic SIGINT regression, run
 #          against a real, unmodified copy of itself.
 #
@@ -411,17 +412,35 @@ run_old_chart_smoke
 
 # ==============================================================================
 # §56 -- base-ref-aware untouched-path proof.
+#
+# This gate's real invariant is narrower than "no Go changes": a
+# ch-oauth-ldap change must never touch the ch-jwt-verify SIDECAR surface,
+# since that sidecar is the only cryptographic gate on its auth path (see
+# CLAUDE.md's "Sidecar trust model is load-bearing"). It previously also
+# listed cmd/, internal/, third_party/, integration/, and .gitignore, which
+# was correct only for the phase-4 PR that introduced this gate (a chart-only
+# change with literally no Go diff) -- as a standing repository gate that set
+# was wrong, since any real ch-oauth-ldap change legitimately touches those
+# paths (e.g. cmd/ch-jwt-verify/verify_test.go, internal/securitytest,
+# integration fixtures). Scoped down to just the sidecar's own files/dirs.
+#
+# cmd/ch-jwt-verify/ is included (production Go included, *_test.go files
+# excluded via the ":(exclude)" pathspec below): the sidecar's PRODUCTION
+# code must never move for a ch-oauth-ldap change, but its TESTS may -- e.g.
+# phase 5 adds a shared redaction-proof matrix that legitimately touches
+# cmd/ch-jwt-verify/verify_test.go. Both `git diff --stat` (committed
+# history) and `git status --porcelain` (working tree) below are checked
+# against this same pathspec set.
 # ==============================================================================
 
 UNTOUCHED_PATHS=(
-    ".gitignore"
     ".github/workflows/build-ch-jwt-verify.yml"
     "helm/ch-jwt-verify/"
-    "cmd/"
-    "internal/"
-    "third_party/"
-    "integration/"
+    "Dockerfile"
+    "scripts/build-image.sh"
     "examples/"
+    "cmd/ch-jwt-verify/"
+    ":(exclude)cmd/ch-jwt-verify/*_test.go"
 )
 
 run_untouched_path_proof() {
@@ -444,21 +463,21 @@ run_untouched_path_proof() {
             note "untouched-paths: merge-base($base_ref, HEAD)=$merge_base"
             diff_out=$(cd "$REPO_ROOT" && git diff --stat "$merge_base" HEAD -- "${UNTOUCHED_PATHS[@]}")
             if [ -z "$diff_out" ]; then
-                pass "untouched-paths: git diff --stat $merge_base..HEAD is empty over the committed non-goal path set"
+                pass "untouched-paths: git diff --stat $merge_base..HEAD is empty over the committed ch-jwt-verify sidecar surface"
             else
-                fail "untouched-paths: git diff --stat $merge_base..HEAD is NOT empty over the committed non-goal path set: $diff_out"
+                fail "untouched-paths: git diff --stat $merge_base..HEAD is NOT empty over the committed ch-jwt-verify sidecar surface: $diff_out"
             fi
         fi
     else
-        skip "untouched-paths: BASE_REF '$base_ref' does not resolve to a commit in this checkout; committed non-goal scope could not be proven from local history here (a shallow checkout must not be treated as a false implementation failure -- obtain the real base comparison before certification)"
+        skip "untouched-paths: BASE_REF '$base_ref' does not resolve to a commit in this checkout; committed sidecar-surface scope could not be proven from local history here (a shallow checkout must not be treated as a false implementation failure -- obtain the real base comparison before certification)"
     fi
 
     local status_out
     status_out=$(cd "$REPO_ROOT" && git status --porcelain -- "${UNTOUCHED_PATHS[@]}")
     if [ -z "$status_out" ]; then
-        pass "untouched-paths: working tree has no staged/unstaged/untracked changes under the committed non-goal path set"
+        pass "untouched-paths: working tree has no staged/unstaged/untracked changes under the ch-jwt-verify sidecar surface"
     else
-        fail "untouched-paths: working tree HAS changes under the committed non-goal path set: $status_out"
+        fail "untouched-paths: working tree HAS changes under the ch-jwt-verify sidecar surface: $status_out"
     fi
 
     _gate_delta_report "untouched-paths" "$before" "$GATE_FAILURES"
