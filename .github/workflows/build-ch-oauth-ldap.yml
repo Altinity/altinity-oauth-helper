@@ -1,0 +1,135 @@
+name: Build & push ch-oauth-ldap image
+
+# Mirrors build-ch-jwt-verify.yml's structure (per-arch cross-compile, build+push,
+# multi-arch manifest under ghcr.io/altinity/ch-oauth-ldap) but with stricter
+# context rules from the phase-4 plan: the binary is compiled directly into a
+# $RUNNER_TEMP-owned per-arch directory (never into the checkout), and the
+# Docker build context is that owned temp directory (never `.`). Only an
+# immutable `<prefix>-<7-char-sha>` tag is ever pushed; `main`/`latest` are
+# never used as tags.
+#
+# Read-only post-publication note (plan §26): the first time this workflow
+# publishes an image, do NOT assume the GHCR package's repository linkage,
+# its exact manifest contents, or whether anonymous/unauthenticated pulls
+# succeed. Those must be verified read-only against the actual GHCR package
+# after publication, and reported as observed. This workflow and this repo
+# never mutate GHCR package visibility automatically — that remains an
+# explicit, separate, human-driven registry action.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/ch-oauth-ldap/**"
+      - "internal/**"
+      - "third_party/**"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile.ch-oauth-ldap"
+      - ".github/workflows/build-ch-oauth-ldap.yml"
+  workflow_dispatch:
+    inputs:
+      tag_prefix:
+        description: "Tag prefix (final tag: <prefix>-<short-sha>)"
+        required: false
+        default: "ldap"
+
+concurrency:
+  group: build-ch-oauth-ldap-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: altinity/ch-oauth-ldap
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: vars
+        # The dispatch input reaches the shell only through `env:` (never
+        # inlined into `run:`), and is shape-checked before use.
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+        run: |
+          prefix="${TAG_PREFIX:-ldap}"
+          if ! [[ "$prefix" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}$ ]]; then
+            echo "invalid tag_prefix" >&2
+            exit 1
+          fi
+          echo "tag=${prefix}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create owned build context
+        run: mkdir -p "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}"
+
+      - name: Cross-compile static binary into owned temp context
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build \
+            -ldflags="-s -w -X main.version=${TAG}" \
+            -o "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/ch-oauth-ldap" \
+            ./cmd/ch-oauth-ldap
+          # COPY preserves the context mode and the image runs as UID 65532:
+          # the binary must be 0755 (see Dockerfile.ch-oauth-ldap).
+          chmod 0755 "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/ch-oauth-ldap"
+
+      - name: Copy Dockerfile into owned temp context
+        run: cp Dockerfile.ch-oauth-ldap "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/Dockerfile"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.arch }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push per-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ runner.temp }}/ch-oauth-ldap-${{ matrix.arch }}
+          file: ${{ runner.temp }}/ch-oauth-ldap-${{ matrix.arch }}/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.tag }}-${{ matrix.arch }}
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble multi-arch manifest
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          FULL="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          docker buildx imagetools create -t "${FULL}:${TAG}" \
+            "${FULL}:${TAG}-amd64" \
+            "${FULL}:${TAG}-arm64"
+          echo "Pushed ${FULL}:${TAG} (amd64+arm64)"

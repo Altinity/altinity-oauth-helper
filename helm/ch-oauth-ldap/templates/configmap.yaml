@@ -1,0 +1,21 @@
+{{- include "ch-oauth-ldap.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-config" (include "ch-oauth-ldap.fullname" .) | quote }}
+  labels: {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
+data:
+  # Mounted read-only at /etc/ch-oauth-ldap/config.yaml (see
+  # templates/deployment.yaml). The payload is built as one string by the
+  # ch-oauth-ldap.configYAML helper (templates/_helpers.tpl), which mirrors
+  # cmd/ch-oauth-ldap/config.go's Config exactly: the four top-level
+  # families oauth/identity/roles/ldap, plus the chart-fixed `listen` the
+  # binary passes straight to net.Listen. Every value-derived scalar goes
+  # through `quote`; lists/maps through `toYaml`; the one boolean renders as
+  # a real YAML boolean (validate rule 20 rejects a string there).
+  #
+  # Serialized with `toYaml` so the whole payload is a single YAML scalar
+  # by construction — no value can terminate it and inject into this
+  # manifest. Do not replace this with a hand-written `config.yaml: |`
+  # block scalar.
+  config.yaml: {{ include "ch-oauth-ldap.configYAML" . | toYaml | indent 4 | trim }}

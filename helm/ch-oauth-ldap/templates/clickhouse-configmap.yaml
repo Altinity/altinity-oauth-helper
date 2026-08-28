@@ -1,0 +1,22 @@
+{{- include "ch-oauth-ldap.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-clickhouse-config" (include "ch-oauth-ldap.fullname" .) | quote }}
+  labels: {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
+data:
+  # Mount into ClickHouse's config.d/ (outside this chart's scope — CH is
+  # not deployed here) to register this release's helper as an LDAP user
+  # directory. Structure, fixed server id `oauth_helper`, port 389,
+  # verification_cooldown 0, enable_tls no, and the direct (unnested)
+  # <role_mapping> under <ldap> all mirror the proven working fixture at
+  # integration/clickhouse/clickhouse/common/config.d/ldap.xml.
+  #
+  # The payload is built as one string by the ch-oauth-ldap.ldapXML helper
+  # (templates/_helpers.tpl) and serialized here with `toYaml`, so it is a
+  # single YAML scalar by construction: no value can terminate the scalar
+  # and inject a sibling key or a further resource into this manifest,
+  # regardless of what characters it contains (validate rule 16 separately
+  # rejects line breaks in every XML-bound value). Do not replace this with
+  # a hand-written `ldap.xml: |` block scalar.
+  ldap.xml: {{ include "ch-oauth-ldap.ldapXML" . | toYaml | indent 4 | trim }}
