@@ -2,9 +2,18 @@ package message
 
 import "fmt"
 
-//             or              [1] SET SIZE (1..MAX) OF filter Filter,
+// or              [1] SET SIZE (1..MAX) OF filter Filter,
 func readFilterOr(bytes *Bytes) (filteror FilterOr, err error) {
-	err = bytes.ReadSubBytes(classContextSpecific, TagFilterOr, filteror.readComponents)
+	// See readFilterAnd's identical guard (filter_and.go) and
+	// maxFilterNestingDepth (filter.go).
+	if bytes.filterDepth >= maxFilterNestingDepth {
+		err = LdapError{fmt.Sprintf("readFilterOr: filter nesting exceeds maximum depth %d", maxFilterNestingDepth)}
+		return
+	}
+	err = bytes.ReadSubBytes(classContextSpecific, TagFilterOr, func(sub *Bytes) error {
+		sub.filterDepth = bytes.filterDepth + 1
+		return filteror.readComponents(sub)
+	})
 	if err != nil {
 		err = LdapError{fmt.Sprintf("readFilterOr:\n%s", err.Error())}
 		return
@@ -30,7 +39,7 @@ func (filteror *FilterOr) readComponents(bytes *Bytes) (err error) {
 	return
 }
 
-//             or              [1] SET SIZE (1..MAX) OF filter Filter,
+// or              [1] SET SIZE (1..MAX) OF filter Filter,
 func (f FilterOr) write(bytes *Bytes) (size int) {
 	for i := len(f) - 1; i >= 0; i-- {
 		size += f[i].write(bytes)
@@ -42,7 +51,7 @@ func (filter FilterOr) getFilterTag() int {
 	return TagFilterOr
 }
 
-//             or              [1] SET SIZE (1..MAX) OF filter Filter,
+// or              [1] SET SIZE (1..MAX) OF filter Filter,
 func (f FilterOr) size() (size int) {
 	for _, filter := range f {
 		size += filter.size()
