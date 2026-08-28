@@ -8,8 +8,11 @@ data:
   # Mount into ClickHouse's config.d/ (outside this chart's scope — CH is
   # not deployed here) to register this release's helper as an LDAP user
   # directory. Structure, fixed server id `oauth_helper`, port 389,
-  # verification_cooldown 0, enable_tls no, and the direct (unnested)
-  # <role_mapping> under <ldap> all mirror the proven working fixture at
+  # verification_cooldown 0, enable_tls no, search_limit 256 (issue #19
+  # phase 5 §8.2/A4 — ClickHouse's own parser default, made explicit; the
+  # chart gate asserts this copy matches the fixture byte-for-byte), and
+  # the direct (unnested) <role_mapping> under <ldap> all mirror the proven
+  # working fixture at
   # integration/clickhouse/clickhouse/common/config.d/ldap.xml.
   #
   # The payload is built as one string by the ch-oauth-ldap.ldapXML helper

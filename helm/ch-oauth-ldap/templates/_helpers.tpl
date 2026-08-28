@@ -431,6 +431,19 @@ with a newline so the decoded payload is byte-identical to the former
             <bind_dn>{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.user_rdn_attribute }}={user_name},{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.user_base_dn }}</bind_dn>
             <verification_cooldown>0</verification_cooldown>
             <enable_tls>no</enable_tls>
+            {{- /*
+            search_limit=256 (issue #19 phase 5 §8.2, coordinator amendment
+            A4): the third copy of this setting, kept byte-identical to
+            integration/clickhouse/clickhouse/common/config.d/ldap.xml and
+            the root README's copied excerpt. It is ClickHouse 24.8's own
+            LDAP-directory-parser default (the value it already passes to
+            ldap_search_ext_s when the key is absent) made explicit and
+            actionable here, not a new restriction — behavior-neutral. The
+            chart gate's embedded-assertions Go verifier asserts this value
+            equals 256 AND equals the value parsed from that same real
+            fixture, so the three copies cannot silently diverge.
+            */}}
+            <search_limit>256</search_limit>
         </oauth_helper>
     </ldap_servers>
 
