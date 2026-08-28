@@ -11,7 +11,10 @@
 #     tag-prefix defaults to "ldap". Final tag: <tag-prefix>-<short-sha>,
 #     e.g. ldap-49ecb42. Per-arch tags get -amd64 / -arm64 suffix. Only ever
 #     immutable <prefix>-<sha> tags are published — never a mutable "main"
-#     or "latest" alias.
+#     or "latest" alias. Refuses to run at all against a dirty working tree
+#     (tracked OR untracked changes) — the tag is derived from `git
+#     rev-parse HEAD` but the build compiles the live tree, so a dirty tree
+#     would let the same tag point at more than one manifest.
 #
 # Env overrides:
 #   REPO     — repo root (auto-detected from this script's location).
@@ -55,6 +58,23 @@ if [[ ! -f "$REPO/Dockerfile.ch-oauth-ldap" ]]; then
 fi
 
 cd "$REPO"
+
+# A published `ldap-<sha>` tag must always identify exactly one manifest
+# (helm/ch-oauth-ldap/README.md's "Treat every ldap-<sha> tag as immutable"
+# guarantee). SHA below is derived only from `git rev-parse HEAD`, but
+# build_one compiles the LIVE working tree, not a commit export — so a
+# modified tracked file, or an added-but-uncommitted untracked .go file
+# under cmd/ch-oauth-ldap or internal/ldap, would change the compiled image
+# without moving the tag, silently breaking that guarantee. Refuse outright
+# rather than publish a tag that could point at more than one manifest.
+# `git status --porcelain` reports staged, unstaged, AND untracked changes
+# (never files matched by .gitignore), so this one check covers all three.
+DIRTY_STATUS="$(git status --porcelain)"
+if [[ -n "$DIRTY_STATUS" ]]; then
+    echo "refusing to publish: working tree at $REPO is not clean — a ldap-<sha> tag must always identify exactly one manifest (see helm/ch-oauth-ldap/README.md), so canonical publication requires a clean tree. Commit or stash tracked changes; remove (or .gitignore) untracked files. Dirty paths:" >&2
+    echo "$DIRTY_STATUS" >&2
+    exit 1
+fi
 
 SHA=$(git rev-parse --short=7 HEAD)
 TAG="${TAG_PREFIX}-${SHA}"

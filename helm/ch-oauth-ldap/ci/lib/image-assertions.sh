@@ -26,8 +26,12 @@
 #       depends on, OCI source metadata, non-root USER, EXPOSE 3389, the
 #       LDAP entrypoint, the world-executable-mode guard on the copied
 #       binary placed between `COPY` and `USER` (the image runs as UID
-#       65532, not the root owner of the file), and UID/GID equality
-#       between the Dockerfile's `USER` and the chart's rendered
+#       65532, not the root owner of the file), a BEHAVIORAL check that the
+#       guard's own regex actually requires the others-execute bit (extracts
+#       the real regex from the Dockerfile and runs it, via `grep -Eq`,
+#       against sample modes including 0756 -- others=rw-, no execute --
+#       which an earlier `[5-7]` final digit wrongly accepted), and UID/GID
+#       equality between the Dockerfile's `USER` and the chart's rendered
 #       `runAsUser`/`runAsGroup` (rendered from $CHART_DIR with
 #       $CHART_DIR/ci/valid-values.yaml).
 #     - scripts/build-ch-oauth-ldap-image.sh (plan sections 49, A2): `bash
@@ -47,6 +51,16 @@
 #       script -- never a special test mode -- interrupted during its
 #       run-directory `mkdir` itself, strictly before any `go build`/`docker`
 #       step runs, so the real script's docker/push path is never exercised.
+#       REPO is pointed at a throwaway clean git repo for this one (never
+#       the real checkout, whose tree is routinely dirty exactly when a
+#       developer runs this gate), so the dirty-tree guard below never
+#       intercepts it before the mkdir this regression targets.
+#     - the real script's dirty-working-tree regression: the actual,
+#       unmodified script, pointed (via REPO=) at three throwaway git
+#       repos -- clean, a tracked-but-uncommitted change, and an untracked
+#       file -- proving canonical publication is refused in the latter two
+#       cases BEFORE any go build/docker step, and that a clean tree is not
+#       wrongly refused by the guard itself.
 #     - .github/workflows/build-ch-oauth-ldap.yml (plan sections 51, A7):
 #       image path, `main`-only push plus workflow_dispatch with
 #       tag_prefix reaching the shell only through `env:` (never inlined in
@@ -108,7 +122,46 @@ _ia_dockerfile_assertions() {
     assert_match "$dockerfile" 'ENTRYPOINT ["/bin/ch-oauth-ldap"]'
 
     _ia_dockerfile_binary_mode_guard "$dockerfile"
+    _ia_dockerfile_binary_mode_regex_behavior "$dockerfile"
     _ia_uid_gid_equality "$dockerfile"
+}
+
+# _ia_dockerfile_binary_mode_regex_behavior DOCKERFILE
+# The guard's own regex, not just its presence, must actually require the
+# others-execute bit: an earlier `[5-7]` final digit wrongly accepted mode
+# 6 (`rw-`, no execute) alongside 5 (`r-x`) and 7 (`rwx`). Extract the exact
+# regex the Dockerfile's `RUN stat ... | grep -Eq '...'` line applies (never
+# a hand-copied duplicate, which could silently drift out of sync with the
+# real guard) and run it, via the real `grep -Eq`, against sample modes.
+_ia_dockerfile_binary_mode_regex_behavior() {
+    local dockerfile="$1"
+    local guard_regex
+
+    guard_regex=$(command grep -F 'grep -Eq' "$dockerfile" | command head -n1 | command sed -E "s/.*grep -Eq '([^']*)'.*/\1/")
+    if [ -z "$guard_regex" ]; then
+        fail "$dockerfile: could not extract the binary-mode guard's grep -Eq regex for behavioral testing"
+        return
+    fi
+
+    # mode:expect pairs. 0756 is the exact regression this guards: others=6
+    # (rw-) has no execute bit, but the pre-fix `[5-7]` final digit matched
+    # 5, 6, AND 7, wrongly accepting it.
+    local cases=("0700:reject" "0755:accept" "0757:accept" "0756:reject" "0754:reject")
+    local c mode want got
+    for c in "${cases[@]}"; do
+        mode="${c%%:*}"
+        want="${c##*:}"
+        if printf '%s\n' "$mode" | command grep -Eq "$guard_regex"; then
+            got=accept
+        else
+            got=reject
+        fi
+        if [ "$got" = "$want" ]; then
+            pass "$dockerfile: binary-mode guard regex correctly ${want}s mode $mode"
+        else
+            fail "$dockerfile: binary-mode guard regex ${got}ed mode $mode, expected to $want it (regex: $guard_regex)"
+        fi
+    done
 }
 
 # _ia_dockerfile_binary_mode_guard DOCKERFILE
@@ -128,7 +181,7 @@ _ia_dockerfile_binary_mode_guard() {
     copy_line=$(command grep -nE '^COPY[[:space:]]+ch-oauth-ldap[[:space:]]+/bin/ch-oauth-ldap[[:space:]]*$' "$dockerfile" | command head -n1 | command cut -d: -f1)
     # Fixed-string match on the exact guard line (the regex it contains is
     # data here, not a pattern).
-    guard_line=$(command grep -nF "RUN stat -c '%a' /bin/ch-oauth-ldap | grep -Eq '^[0-7]?[0-7][0-7][5-7]\$'" "$dockerfile" | command head -n1 | command cut -d: -f1)
+    guard_line=$(command grep -nF "RUN stat -c '%a' /bin/ch-oauth-ldap | grep -Eq '^[0-7]?[0-7][0-7][57]\$'" "$dockerfile" | command head -n1 | command cut -d: -f1)
     user_line=$(command grep -nE '^USER[[:space:]]+65532:65532[[:space:]]*$' "$dockerfile" | command head -n1 | command cut -d: -f1)
 
     if [ -z "$copy_line" ]; then
@@ -252,6 +305,32 @@ _ia_script_static_assertions() {
     _ia_script_no_bare_dot_context "$script"
     _ia_script_arch_parity "$script"
     _ia_script_binary_mode "$script"
+    _ia_script_dirty_tree_guard_static "$script"
+}
+
+# _ia_script_dirty_tree_guard_static SCRIPT
+# Static complement to _ia_script_dirty_tree_guard's behavioral regression:
+# the refusal must be wired in ahead of `git rev-parse --short=7 HEAD`, so a
+# dirty tree is caught before SHA/TAG (and everything derived from them) is
+# even computed.
+_ia_script_dirty_tree_guard_static() {
+    local script="$1"
+    local porcelain_line rev_parse_line
+
+    assert_match "$script" 'git status --porcelain'
+
+    porcelain_line=$(command grep -nF 'git status --porcelain' "$script" | command head -n1 | command cut -d: -f1)
+    rev_parse_line=$(command grep -nE 'git rev-parse --short=7 HEAD' "$script" | command head -n1 | command cut -d: -f1)
+
+    if [ -z "$porcelain_line" ] || [ -z "$rev_parse_line" ]; then
+        fail "$script: could not locate both the dirty-tree check and 'git rev-parse --short=7 HEAD' to order them"
+        return
+    fi
+    if [ "$porcelain_line" -lt "$rev_parse_line" ]; then
+        pass "$script: dirty-tree check (line $porcelain_line) precedes SHA computation (line $rev_parse_line)"
+    else
+        fail "$script: expected the dirty-tree check (line $porcelain_line) to precede SHA computation (line $rev_parse_line)"
+    fi
 }
 
 # _ia_script_binary_mode SCRIPT
@@ -401,7 +480,106 @@ _ia_script_arch_parity() {
 _ia_script_sigint_regression() {
     local script="$1"
     _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
-    gate_sigint_regression "SIGINT regression" "$script" "ch-oauth-ldap-image." "$RUN_TMP_DIR/sigint-image"
+
+    # The dirty-tree guard added below (_ia_script_dirty_tree_guard) makes
+    # the real script refuse to proceed past `git status --porcelain`,
+    # strictly before the run-directory `mkdir` this regression targets --
+    # so REPO must point at a clean, disposable git repo rather than the
+    # real checkout, whose working tree is routinely dirty precisely when a
+    # developer is running this gate (mid-edit, before committing). This
+    # regression is only about the mkdir/SIGINT/cleanup sequence and needs
+    # nothing from the real checkout beyond the one placeholder file the
+    # script requires to exist up front; the guard's own early-exit
+    # behavior is exercised separately by _ia_script_dirty_tree_guard.
+    if ! command -v git >/dev/null 2>&1; then
+        fail "SIGINT regression: git not on PATH (needed for the clean throwaway REPO)"
+        return
+    fi
+    local sigint_repo="$RUN_TMP_DIR/sigint-image-repo"
+    _ia_dtg_new_repo "$sigint_repo"
+
+    REPO="$sigint_repo" gate_sigint_regression "SIGINT regression" "$script" "ch-oauth-ldap-image." "$RUN_TMP_DIR/sigint-image"
+}
+
+# _ia_dtg_new_repo DIR
+# Helper for _ia_script_dirty_tree_guard: a minimal, standalone git repo
+# (never the real checkout) containing only the one file the real script
+# requires to exist before it will `cd` into REPO and reach the guard.
+_ia_dtg_new_repo() {
+    local dir="$1"
+    command mkdir -p "$dir"
+    git -C "$dir" init -q
+    git -C "$dir" config user.email gate@example.invalid
+    git -C "$dir" config user.name gate
+    printf 'FROM scratch\n' >"$dir/Dockerfile.ch-oauth-ldap"
+    git -C "$dir" add -A
+    git -C "$dir" commit -q -m init
+}
+
+# _ia_script_dirty_tree_guard SCRIPT
+# Runs the REAL, unmodified script (never a special test mode) against
+# three throwaway git repos, proving the review finding's fix: a modified
+# tracked file, or an untracked file, must be refused BEFORE any
+# go build/docker step -- and a genuinely clean tree must not be refused by
+# the guard itself. REPO is pointed at each throwaway repo, never the real
+# checkout; ARCHES is left at its default (amd64 arm64) rather than "" (bash
+# parameter expansion's `:-` treats an empty override the same as unset), so
+# the clean-tree case is left to fail the FIRST `go build` for an unrelated
+# reason (no cmd/ch-oauth-ldap package in the throwaway repo, no go.mod) --
+# fast, and needs no network or Docker. The assertion for that case is
+# therefore scoped to "the guard's own refusal text is absent", not "the
+# script exited 0"; only the tracked/untracked cases require exit-nonzero.
+_ia_script_dirty_tree_guard() {
+    local script="$1"
+    _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
+
+    if ! command -v git >/dev/null 2>&1; then
+        fail "dirty-tree guard: git not on PATH"
+        return
+    fi
+
+    local base="$RUN_TMP_DIR/dirty-tree-guard"
+    local refusal_marker="refusing to publish"
+    command mkdir -p "$base/tmp"
+
+    local clean_dir="$base/clean" tracked_dir="$base/tracked" untracked_dir="$base/untracked"
+    _ia_dtg_new_repo "$clean_dir"
+    _ia_dtg_new_repo "$tracked_dir"
+    _ia_dtg_new_repo "$untracked_dir"
+
+    # tracked-dirty: modify the already-committed file without committing.
+    printf 'FROM scratch\n# dirty\n' >"$tracked_dir/Dockerfile.ch-oauth-ldap"
+    # untracked-dirty: add a brand-new file, never `git add`ed.
+    printf 'stray\n' >"$untracked_dir/stray.txt"
+
+    local status
+
+    REPO="$clean_dir" TMPDIR="$base/tmp" bash "$script" \
+        >"$base/clean.out" 2>"$base/clean.err"
+    status=$?
+    if command grep -qF "$refusal_marker" "$base/clean.err"; then
+        fail "dirty-tree guard: clean tree in $clean_dir was refused by the dirty-tree guard (exit $status): $(command head -n3 "$base/clean.err")"
+    else
+        pass "dirty-tree guard: clean tree in $clean_dir is not refused by the dirty-tree guard (exit $status came from something else, e.g. no cmd/ch-oauth-ldap package to build -- expected in this throwaway repo)"
+    fi
+
+    REPO="$tracked_dir" TMPDIR="$base/tmp" bash "$script" \
+        >"$base/tracked.out" 2>"$base/tracked.err"
+    status=$?
+    if [ "$status" -ne 0 ] && command grep -qF "$refusal_marker" "$base/tracked.err"; then
+        pass "dirty-tree guard: tracked-but-uncommitted change in $tracked_dir is refused (exit $status)"
+    else
+        fail "dirty-tree guard: tracked-but-uncommitted change in $tracked_dir was NOT refused as expected (exit $status) -- a modified tracked source file could be baked into a tag silently: $(command head -n3 "$base/tracked.err")"
+    fi
+
+    REPO="$untracked_dir" TMPDIR="$base/tmp" bash "$script" \
+        >"$base/untracked.out" 2>"$base/untracked.err"
+    status=$?
+    if [ "$status" -ne 0 ] && command grep -qF "$refusal_marker" "$base/untracked.err"; then
+        pass "dirty-tree guard: untracked file in $untracked_dir is refused (exit $status)"
+    else
+        fail "dirty-tree guard: untracked file in $untracked_dir was NOT refused as expected (exit $status) -- an added untracked source file could be baked into a tag silently: $(command head -n3 "$base/untracked.err")"
+    fi
 }
 
 # =============================================================================
@@ -492,6 +670,7 @@ run_image_assertions() {
     _ia_dockerfile_assertions
     _ia_script_static_assertions
     _ia_script_sigint_regression "$_IA_SCRIPT"
+    _ia_script_dirty_tree_guard "$_IA_SCRIPT"
     _ia_workflow_assertions
 
     if [ -e "$REPO_ROOT/ch-oauth-ldap" ]; then

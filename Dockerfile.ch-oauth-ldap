@@ -33,7 +33,7 @@ RUN test -x /bin/sleep
 # (`COPY --chmod` is not used because the legacy DOCKER_BUILDKIT=0 builder
 # rejects it.)
 COPY ch-oauth-ldap /bin/ch-oauth-ldap
-RUN stat -c '%a' /bin/ch-oauth-ldap | grep -Eq '^[0-7]?[0-7][0-7][5-7]$'
+RUN stat -c '%a' /bin/ch-oauth-ldap | grep -Eq '^[0-7]?[0-7][0-7][57]$'
 
 LABEL org.opencontainers.image.source="https://github.com/Altinity/altinity-oauth-helper"
 
