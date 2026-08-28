@@ -16,11 +16,14 @@ ClickHouse-facing configuration done.
   binary — `lib/common.sh` auto-detects whichever is available.
 - `curl` on the host. **No host `clickhouse-client` is needed** — all
   administrative SQL runs inside the containers via `compose exec`.
-- `$TMPDIR` must be set to a writable directory that is **not** `/tmp` (see the
-  guard at the top of `run.sh`: this sandbox blocks `/tmp` bind mounts for
-  Docker). All per-run private state — the generated interserver secret, the
-  run transcript, temp credential files — lives under `$TMPDIR/ch-phase3-run.*`
-  with mode 0700 and is removed by `run.sh`'s `EXIT` trap.
+- `$TMPDIR`, if set, must point at a writable directory that is **not** `/tmp`
+  (see the guard at the top of `run.sh`: this sandbox blocks `/tmp` bind
+  mounts for Docker). If unset, `run.sh` defaults it to `$HOME/tmp` and
+  creates that directory — most Linux dev/CI hosts leave `TMPDIR` unset, so
+  this is the common case, not an error. All per-run private state — the
+  generated interserver secret, the run transcript, temp credential files —
+  lives under `$TMPDIR/ch-phase3-run.*` with mode 0700 and is removed by
+  `run.sh`'s `EXIT` trap.
 - Network access to pull `altinity/clickhouse-server` images and the Go module
   proxy (the helper/IdP image is built from source on first run).
 
@@ -95,14 +98,14 @@ Host ports default to `18123` (origin HTTP) and `18080` (IdP); override with
 
 | Scenario | File | Proves |
 |---|---|---|
-| A — preflight | `run.sh` | Pinned `version()` on both nodes, host→origin and origin→remote reachability, passwordless `default` denied, `push_external_roles_in_interserver_queries` present and `=1` with no fixture override, Alice absent, roles present, network membership exactly as designed, IdP/helper healthy. 12 points. |
+| A — preflight | `run.sh` | Pinned `version()` on both nodes, host→origin and origin→remote reachability, passwordless `default` denied, `push_external_roles_in_interserver_queries` present and `=1` with no fixture override, Alice absent, roles present, network membership exactly as designed, IdP/helper healthy, remote's `phase3` grants exclusive to `ch_distributed_reader`, Alice has no local role grants. 14 points (A.1–A.14). |
 | B — ephemeral user | `10-ephemeral-user.sh` | An undefined user authenticates with username + JWT via LDAP; `currentUser()` is the visible username. |
 | C — dynamic roles | `20-dynamic-roles.sh` | `currentRoles()` reflects the mapped **local** roles; a mapped-but-unprovisioned role name confers nothing (ClickHouse stays the authority). |
 | D — username mismatch | `30-username-mismatch.sh` | Bob's valid token presented as Alice is rejected. |
 | E — invalid/expired | `40-invalid-expired.sh` | Malformed and correctly-signed-but-expired tokens are rejected. |
 | F — role refresh | `50-role-refresh.sh` | A new token with different groups, on a new authentication, yields the new role set with nothing stale. |
 | G — local precedence | `60-local-precedence.sh` | A locally defined user (`admin@example.com`, not the helper-denied literal `admin`) wins over LDAP: her real password works, a valid external JWT does not. |
-| H — distributed propagation (base-table oracle) | `70-distributed-propagation.sh` | With `push_external_roles_in_interserver_queries=0` the remote read is denied; with `=1` it succeeds and remote `system.query_log` shows `user = initial_user = alice@example.com`; the helper saw exactly two new Binds (remote never re-authenticated). Outcome is per build — see below. |
+| H — distributed propagation (base-table oracle) | `70-distributed-propagation.sh` | With `push_external_roles_in_interserver_queries=0` the remote read is denied; with `=1` it succeeds and remote `system.query_log` shows `user = initial_user = alice@example.com`; the helper saw exactly `2 + OAUTH_RETRY_EXTRA_ATTEMPTS` new Binds — 2 in the common case, plus one per transient-transport retry the scenario itself made (remote never independently re-authenticated). Outcome is per build — see below. |
 | H' — view canary (expected fail) | `75-distributed-propagation-view.sh` | The same propagation through a **normal VIEW** on the remote side. Currently fails on every ClickHouse line tested (ClickHouse #116840); kept as an expected-fail canary so it flips loudly when upstream fixes it. |
 | I — JWT leak scan | `80-leak-scan.sh` | Scanner self-test (plant a real token, require detection), then every retained token is asserted absent from all three services' logs, both nodes' on-disk server logs, the runner transcript, and captured HTTP error bodies. |
 

@@ -33,13 +33,23 @@
 #      instead of leaking it (contradicting the README's "deleted by the
 #      EXIT trap on every exit path" claim).
 #
+# ...and review pass 2's findings:
+#
+#   7. run.sh's ENV_FILE must be assigned BEFORE `trap cleanup EXIT` is
+#      installed, not merely before the PHASE3_CH_IMAGE die()s — cleanup()
+#      calls compose(), which expands `--env-file "$ENV_FILE"`
+#      unconditionally, so a SIGINT landing between the old trap-install
+#      point and the old ENV_FILE assignment died on "ENV_FILE: unbound
+#      variable" inside cleanup() itself, before `rm -rf "$RUN_TMP_DIR"`.
+#
 # This does NOT bring up the real four-service fixture — that remains
 # run.sh's job (see integration/clickhouse/README.md: "manual, local
 # gate"). It DOES source the real lib/*.sh files, so it needs the same
 # `docker`/`docker-compose` CLI *presence* on PATH that lib/common.sh's own
 # sourcing-time detect_compose_cmd already requires (no daemon needed —
-# every Docker/compose call in these tests is stubbed) — finding 6's tests
-# below run the real run.sh as a subprocess but with a stub `docker` shim
+# every Docker/compose call in these tests is stubbed) — finding 6 and 7's
+# tests below run the real run.sh (finding 7: a working copy of it, see
+# that test's own comment) as a subprocess but with a stub `docker` shim
 # placed first on PATH, so they stay just as daemon-free as everything
 # else in this file.
 #
@@ -385,13 +395,20 @@ STUB
     out="$(PATH="$stub_dir:$PATH" PHASE3_CH_IMAGE="$image" TMPDIR="$fresh_tmp" bash "$SCRIPT_DIR/run.sh" 2>&1)"
     rc=$?
     leftover=("$fresh_tmp"/ch-phase3-run.*)
+    # Record whether a leak actually happened BEFORE the rm -rf below
+    # touches fresh_tmp — checking `-e` on the leftover path afterward
+    # would always read false regardless of the real outcome, since the
+    # rm -rf already deleted anything the glob matched (a false-negative
+    # bug review pass 2 found in this exact test).
+    local leaked=0
+    [ -e "${leftover[0]}" ] && leaked=1
     rm -rf "$stub_dir" "$fresh_tmp"
 
     if [ "$rc" -eq 0 ]; then
         fail "$test_name" "expected run.sh to die (nonzero exit) for image '$image', got 0. Output: $out"
         return
     fi
-    if [ -e "${leftover[0]}" ]; then
+    if [ "$leaked" -eq 1 ]; then
         fail "$test_name" "RUN_TMP_DIR '${leftover[0]}' survived the early die() — the cleanup trap did not run before exit. Output: $out"
         return
     fi
@@ -410,6 +427,110 @@ assert_run_sh_early_die_cleans_up \
     "run.sh cleans up RUN_TMP_DIR on an early die from an untagged PHASE3_CH_IMAGE" \
     "untagged-image-no-colon" \
     "has no tag"
+
+# ── Review pass 2, finding 1: SIGINT delivered right after the trap is ────
+# ── installed must not abort cleanup on an unset ENV_FILE ─────────────────
+#
+# Before this fix, ENV_FILE was assigned AFTER `trap cleanup EXIT` (past
+# RUN_LOG and the `exec > >(tee ...)` redirection), so a signal landing in
+# that gap ran cleanup() with ENV_FILE still unset; cleanup()'s `compose
+# down` expands `--env-file "$ENV_FILE"`, and under `set -u` that is a
+# fatal "unbound variable" that aborts cleanup() itself before it reaches
+# `rm -rf "$RUN_TMP_DIR"` — a real, reproducible-with-SIGINT regression
+# (exit 130, RUN_TMP_DIR left on disk), even though it generates no
+# credential and even though the digest/untagged-image die() case above
+# (already covered) stays safe (ENV_FILE is set before those specific
+# die()s can fire). ENV_FILE is now assigned before the trap is installed
+# at all, so this exact gap no longer exists in the real script.
+#
+# assert_run_sh_sigint_right_after_trap_install_cleans_up runs a working
+# copy of run.sh — symlinked back to the real lib/ and compose.yml so its
+# own SCRIPT_DIR-relative sourcing still resolves — with one `sleep`
+# injected immediately after the real `trap cleanup EXIT` line, so a SIGINT
+# deterministically lands squarely where the old gap used to begin, rather
+# than racing a real, sub-millisecond window. It then asserts run.sh exits
+# nonzero and — the regression this guards — leaves no ch-phase3-run.*
+# directory behind.
+assert_run_sh_sigint_right_after_trap_install_cleans_up() {
+    local test_name="run.sh cleans up RUN_TMP_DIR on SIGINT delivered right after the cleanup trap is installed"
+    local stub_dir fresh_tmp work_dir out rc leftover leaked run_pid
+
+    stub_dir="$(mktemp -d "$RUN_TMP_DIR/run-sigint-stub-bin.XXXXXX")"
+    cat >"$stub_dir/docker" <<'STUB'
+#!/usr/bin/env bash
+# Always succeeds — see assert_run_sh_early_die_cleans_up's identical stub
+# above for why this keeps detect_compose_cmd and cleanup()'s later
+# `compose down` both daemon-free.
+exit 0
+STUB
+    chmod +x "$stub_dir/docker"
+
+    fresh_tmp="$(mktemp -d "$RUN_TMP_DIR/run-sigint-tmp.XXXXXX")"
+
+    work_dir="$fresh_tmp/run-sh-copy"
+    mkdir -p "$work_dir"
+    ln -s "$SCRIPT_DIR/lib" "$work_dir/lib"
+    ln -s "$SCRIPT_DIR/compose.yml" "$work_dir/compose.yml"
+    awk '
+        { print }
+        $0 == "trap cleanup EXIT" && !done {
+            print "sleep 5  # lib-tests.sh test-injected delay, see assert_run_sh_sigint_right_after_trap_install_cleans_up"
+            done = 1
+        }
+    ' "$SCRIPT_DIR/run.sh" >"$work_dir/run.sh"
+    if ! grep -q 'test-injected delay' "$work_dir/run.sh"; then
+        fail "$test_name" "internal test error: failed to inject the test delay into the run.sh copy — did the exact 'trap cleanup EXIT' line change?"
+        rm -rf "$stub_dir" "$fresh_tmp"
+        return
+    fi
+    chmod +x "$work_dir/run.sh"
+
+    # Monitor mode (job control), on just long enough to background the
+    # process: without it, a non-interactive script's background jobs stay
+    # in THIS script's own process group rather than becoming their own
+    # group leader, so there would be no separate group to signal below —
+    # a real terminal's Ctrl-C always delivers SIGINT to the whole
+    # foreground process group, which is what this test needs to
+    # reproduce.
+    set -m
+    PATH="$stub_dir:$PATH" TMPDIR="$fresh_tmp" bash "$work_dir/run.sh" >"$fresh_tmp/out.log" 2>&1 &
+    run_pid=$!
+    set +m
+
+    # Generous margin for the process to source lib/common.sh, allocate
+    # RUN_TMP_DIR, set ENV_FILE, and reach the injected `sleep 5` — every
+    # step before it is either a pure bash builtin or one stubbed,
+    # instant-exit `docker` call.
+    sleep 1
+    # Signal the whole process group (`-$run_pid`: with monitor mode above,
+    # the backgrounded job is its own group leader, so its pgid equals its
+    # pid), not just the bash PID — signalling only the bash PID leaves the
+    # foreground `sleep 5` child alive, and bash defers acting on the
+    # pending SIGINT until that child exits on its own, which would make
+    # this test take the full 5s and prove nothing about signal-time
+    # behavior.
+    kill -INT -- "-$run_pid" 2>/dev/null
+
+    wait "$run_pid"
+    rc=$?
+    out="$(cat "$fresh_tmp/out.log" 2>/dev/null)"
+
+    leftover=("$fresh_tmp"/ch-phase3-run.*)
+    leaked=0
+    [ -e "${leftover[0]}" ] && leaked=1
+    rm -rf "$stub_dir" "$fresh_tmp"
+
+    if [ "$rc" -eq 0 ]; then
+        fail "$test_name" "expected run.sh to exit nonzero after SIGINT, got 0. Output: $out"
+        return
+    fi
+    if [ "$leaked" -eq 1 ]; then
+        fail "$test_name" "RUN_TMP_DIR '${leftover[0]}' survived a SIGINT delivered right after the cleanup trap was installed — cleanup() aborted before its final rm -rf. Output: $out"
+        return
+    fi
+    pass "$test_name"
+}
+assert_run_sh_sigint_right_after_trap_install_cleans_up
 
 # ── Summary ────────────────────────────────────────────────────────────────
 

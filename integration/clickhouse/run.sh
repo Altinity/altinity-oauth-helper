@@ -55,15 +55,28 @@ COMPOSE_PROJECT_NAME="ch-phase3"
 RUN_TMP_DIR="$(mktemp -d "$TMPDIR/ch-phase3-run.XXXXXX")"
 chmod 700 "$RUN_TMP_DIR"
 
-# The cleanup trap is installed IMMEDIATELY after RUN_TMP_DIR is allocated
-# — before the tee, the env file, or the PHASE3_CH_IMAGE validation below,
-# every one of which can now (or in the future) call die() — so that no
-# exit path between here and the end of the script can ever leave
-# RUN_TMP_DIR behind. `trap` only fires for exits that occur after it is
-# registered; a die() reached before this line would otherwise skip
-# cleanup entirely, contradicting the README's "deleted by the EXIT trap
-# on every exit path" guarantee. cleanup() only touches RUN_TMP_DIR and
-# COMPOSE_PROJECT_NAME (already set above) plus compose/log from
+# ENV_FILE is established here, BEFORE the cleanup trap is installed below,
+# because cleanup() calls compose(), and compose() (lib/common.sh) expands
+# "--env-file $ENV_FILE" unconditionally. With `set -u` active, an EXIT
+# trap that fires while ENV_FILE is still unset (e.g. a SIGINT delivered in
+# the narrow window that used to exist between installing the trap and
+# assigning ENV_FILE) dies on "ENV_FILE: unbound variable" before reaching
+# `rm -rf "$RUN_TMP_DIR"`, leaking the run's temp directory on exactly the
+# kind of interrupt this trap exists to handle. Keep ENV_FILE's assignment
+# above the trap install, not just above the PHASE3_CH_IMAGE validation.
+ENV_FILE="$RUN_TMP_DIR/compose.env"
+: >"$ENV_FILE"
+chmod 600 "$ENV_FILE"
+
+# The cleanup trap is installed IMMEDIATELY after RUN_TMP_DIR/ENV_FILE are
+# established — before the tee or the PHASE3_CH_IMAGE validation below,
+# either of which can now (or in the future) call die() — so that no exit
+# path between here and the end of the script can ever leave RUN_TMP_DIR
+# behind. `trap` only fires for exits that occur after it is registered; a
+# die() reached before this line would otherwise skip cleanup entirely,
+# contradicting the README's "deleted by the EXIT trap on every exit path"
+# guarantee. cleanup() only touches RUN_TMP_DIR, ENV_FILE, and
+# COMPOSE_PROJECT_NAME (all already set above) plus compose/log from
 # lib/common.sh (already sourced) — nothing below this point that cleanup
 # itself depends on.
 cleanup() {
@@ -98,10 +111,6 @@ RUN_LOG="$RUN_TMP_DIR/run.log"
 # part of the "captured runner stdout/stderr" artifact acceptance scenario
 # I's JWT leak scan checks — nothing else in this file treats it specially.
 exec > >(tee -a "$RUN_LOG") 2>&1
-
-ENV_FILE="$RUN_TMP_DIR/compose.env"
-: >"$ENV_FILE"
-chmod 600 "$ENV_FILE"
 
 # PHASE3_CH_IMAGE selects which ClickHouse build this run targets, defaulted
 # to the issue's pinned 24.8 baseline. EXPECTED_CH_VERSION is derived from it
