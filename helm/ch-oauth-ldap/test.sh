@@ -13,7 +13,11 @@
 #                     config.yaml/ldap.xml verification;
 #   * §48/§49/§29/§51 (via ci/lib/image-assertions.sh) Dockerfile/script/
 #                     workflow static checks + the REAL script's own
-#                     SIGINT regression;
+#                     SIGINT regression + a pinned-actionlint validity gate
+#                     on build-ch-oauth-ldap.yml (with an informational-only
+#                     pass over build-ch-jwt-verify.yml and a negative case
+#                     proving the check inspects expressions inside `run:`
+#                     comments);
 #   * §52  helm package + archive-content proof (test.sh/ci/ excluded);
 #   * §53  documentation checks across both READMEs, CLAUDE.md, and the
 #          (skip-if-absent, per amendment A6) repo-footguns.md;
@@ -26,10 +30,11 @@
 #          against a real, unmodified copy of itself.
 #
 # Requires: Bash, Helm, Go, network access for kubeconform install/schema
-# fetch (unless KUBECONFORM_SCHEMA_LOCATION points at a local mirror), and
-# ordinary POSIX text utilities. Prefers `rg` (via ci/lib/common.sh's
-# matcher) but never requires it. Never requires yq, kubectl, a Docker
-# daemon, registry credentials, or a Kubernetes cluster.
+# fetch (unless KUBECONFORM_SCHEMA_LOCATION points at a local mirror) and for
+# actionlint install (unless a PATH `actionlint` already reports the pinned
+# ACTIONLINT_VERSION), and ordinary POSIX text utilities. Prefers `rg` (via
+# ci/lib/common.sh's matcher) but never requires it. Never requires yq,
+# kubectl, a Docker daemon, registry credentials, or a Kubernetes cluster.
 #
 # This script only reads chart/lib/doc/workflow files and writes under its
 # own $RUN_TMP_DIR (plus, transiently, the two cross-compiled binaries it
@@ -139,10 +144,15 @@ echo "===================================================================="
 # ==============================================================================
 # §A4 -- resolve/install the pinned kubeconform once, up front, and put its
 # bin dir on PATH so the assertion libraries' own ensure_kubeconform calls
-# find it already resolved instead of reinstalling.
+# find it already resolved instead of reinstalling. Same pattern for the
+# pinned actionlint (workflow-validity gate): resolve it once, up front, so
+# ci/lib/image-assertions.sh's actionlint checks find $ACTIONLINT_BIN
+# already set. Fails closed (via `fail`, no silent skip) if either pinned
+# tool cannot be resolved on PATH or installed.
 # ==============================================================================
 
 ensure_kubeconform "$RUN_TMP_DIR/bin"
+ensure_actionlint "$RUN_TMP_DIR/bin"
 export PATH="$RUN_TMP_DIR/bin:$PATH"
 
 # ==============================================================================
