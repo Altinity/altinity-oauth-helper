@@ -11,10 +11,28 @@
 #     tag-prefix defaults to "ldap". Final tag: <tag-prefix>-<short-sha>,
 #     e.g. ldap-49ecb42. Per-arch tags get -amd64 / -arm64 suffix. Only ever
 #     immutable <prefix>-<sha> tags are published — never a mutable "main"
-#     or "latest" alias. Refuses to run at all against a dirty working tree
-#     (tracked OR untracked changes) — the tag is derived from `git
-#     rev-parse HEAD` but the build compiles the live tree, so a dirty tree
-#     would let the same tag point at more than one manifest.
+#     or "latest" alias.
+#
+#     The tag is derived from `git rev-parse HEAD`, and the build compiles
+#     an EXPORTED copy of exactly that HEAD commit (via `git archive HEAD`
+#     into this script's own owned temp dir) — never $REPO's working tree.
+#     That export is the actual correctness mechanism for "one tag, one
+#     manifest": a bare `git status --porcelain` check (even strengthened
+#     with --untracked-files=all --ignored=matching) can still be fooled by
+#     `git config status.showUntrackedFiles no`, by a tracked file marked
+#     --assume-unchanged/--skip-worktree, or (without --ignored=matching) by
+#     a .gitignore'd .go file sitting in a package directory — all of which
+#     `go build` against the live tree would happily compile in anyway. The
+#     `git status` check below is kept only as a fast-fail UX convenience
+#     (a clearer message than a mid-build failure), not as the guarantee.
+#
+#     Before doing any build work, the script also refuses to publish a
+#     `<prefix>-<sha>` tag (or any of its per-arch sub-tags) that already
+#     exists in the registry — there is no force override. Republishing the
+#     same commit is not guaranteed to reproduce the same manifest byte for
+#     byte (the base image and toolchain can drift), so silently moving an
+#     already-published tag is refused outright rather than risking two
+#     different manifests behind one tag.
 #
 # Env overrides:
 #   REPO     — repo root (auto-detected from this script's location).
@@ -59,19 +77,25 @@ fi
 
 cd "$REPO"
 
-# A published `ldap-<sha>` tag must always identify exactly one manifest
-# (helm/ch-oauth-ldap/README.md's "Treat every ldap-<sha> tag as immutable"
-# guarantee). SHA below is derived only from `git rev-parse HEAD`, but
-# build_one compiles the LIVE working tree, not a commit export — so a
-# modified tracked file, or an added-but-uncommitted untracked .go file
-# under cmd/ch-oauth-ldap or internal/ldap, would change the compiled image
-# without moving the tag, silently breaking that guarantee. Refuse outright
-# rather than publish a tag that could point at more than one manifest.
-# `git status --porcelain` reports staged, unstaged, AND untracked changes
-# (never files matched by .gitignore), so this one check covers all three.
-DIRTY_STATUS="$(git status --porcelain)"
+# Fast-fail UX convenience only — NOT the correctness mechanism. This is a
+# cheap, early, clear-message check for the common case of an obviously
+# dirty tree. `--untracked-files=all` reports every untracked file
+# individually (not collapsed to its containing directory) and
+# `--ignored=matching` additionally reports .gitignore'd paths, so this is
+# the strongest a `git status` invocation can be made — but it can still be
+# bypassed: `git config status.showUntrackedFiles no` hides untracked files
+# from `git status` entirely (both flags above are overridden by that
+# config), and a tracked file marked `--assume-unchanged` or
+# `--skip-worktree` is hidden from `git status` regardless of any flag
+# combination, even though `go build` still happily compiles whatever bytes
+# are actually sitting on disk. The real guarantee — that the compiled
+# image reflects exactly `HEAD`, nothing else — comes from the `git archive
+# HEAD` export below, which reads committed object-database content and is
+# immune to all three bypasses. See the header comment for the full
+# rationale.
+DIRTY_STATUS="$(git status --porcelain --untracked-files=all --ignored=matching)"
 if [[ -n "$DIRTY_STATUS" ]]; then
-    echo "refusing to publish: working tree at $REPO is not clean — a ldap-<sha> tag must always identify exactly one manifest (see helm/ch-oauth-ldap/README.md), so canonical publication requires a clean tree. Commit or stash tracked changes; remove (or .gitignore) untracked files. Dirty paths:" >&2
+    echo "refusing to publish: working tree at $REPO is not clean (fast-fail convenience check — see script header) — a ldap-<sha> tag must always identify exactly one manifest (see helm/ch-oauth-ldap/README.md), so canonical publication requires a clean tree. Commit or stash tracked changes; remove (or .gitignore) untracked files. Dirty paths:" >&2
     echo "$DIRTY_STATUS" >&2
     exit 1
 fi
@@ -79,6 +103,36 @@ fi
 SHA=$(git rev-parse --short=7 HEAD)
 TAG="${TAG_PREFIX}-${SHA}"
 FULL="${REGISTRY}/${IMAGE}"
+
+# ARCHES is fixed into positional parameters once, here, and reused by both
+# the tag-existence guard immediately below and the per-arch build loop
+# further down — one source of truth for "the arches this run publishes."
+set -- $ARCHES
+
+# Finding 2 — immutability enforcement, checked before any build/push work
+# runs: refuse outright if this tag, or any of its per-arch sub-tags, has
+# already been published. Re-running against the same commit is NOT
+# guaranteed to reproduce the same manifest byte for byte
+# (Dockerfile.ch-oauth-ldap's `alpine:3.24` base floats within its minor
+# version, `apk add ca-certificates` is unpinned, and the Go toolchain can
+# drift), so silently overwriting an already-published tag risks moving it
+# to a different manifest. There is no force override: publish from a new
+# commit, or pass a different tag-prefix argument.
+EXISTING_TAGS=()
+if docker manifest inspect "${FULL}:${TAG}" >/dev/null 2>&1; then
+    EXISTING_TAGS+=("${FULL}:${TAG}")
+fi
+for arch in "$@"; do
+    if docker manifest inspect "${FULL}:${TAG}-${arch}" >/dev/null 2>&1; then
+        EXISTING_TAGS+=("${FULL}:${TAG}-${arch}")
+    fi
+done
+if [[ "${#EXISTING_TAGS[@]}" -gt 0 ]]; then
+    echo "refusing to publish: the following tag(s) already exist in the registry and would be silently moved to a possibly different manifest:" >&2
+    printf '    %s\n' "${EXISTING_TAGS[@]}" >&2
+    echo "publish from a new commit, or pass a different tag-prefix argument. There is no force override." >&2
+    exit 1
+fi
 
 # Per-run private state lives under $TMPDIR. Most Linux dev/CI hosts leave
 # TMPDIR unset, so default it to $HOME/tmp rather than refusing to run —
@@ -143,6 +197,24 @@ if [ -z "$RUN_TMP_DIR" ]; then
     exit 1
 fi
 
+# Finding 1 — the actual correctness mechanism. Export exactly the HEAD
+# commit's tree into this run's owned temp dir via `git archive`, strictly
+# before any docker preflight (the per-arch `docker pull`/`docker build`
+# below): `git archive` reads content straight from the git object
+# database keyed by the HEAD commit, so it is immune to
+# status.showUntrackedFiles, .gitignore, and --assume-unchanged/
+# --skip-worktree bits on $REPO's working tree — none of which the `git
+# status` convenience check above can fully see. Every subsequent build
+# step reads from $SRC_DIR, never from $REPO.
+SRC_DIR="$RUN_TMP_DIR/src"
+mkdir -p "$SRC_DIR"
+git archive --format=tar HEAD | tar -x -C "$SRC_DIR"
+
+if [[ ! -f "$SRC_DIR/Dockerfile.ch-oauth-ldap" ]]; then
+    echo "Dockerfile.ch-oauth-ldap is missing from the exported HEAD tree at $SRC_DIR — HEAD does not look like a valid ch-oauth-ldap checkout" >&2
+    exit 1
+fi
+
 # All other run state (per-arch build contexts) is created only now,
 # strictly after RUN_TMP_DIR exists and the trap already owns it.
 build_one() {
@@ -153,12 +225,16 @@ build_one() {
 
     mkdir -p "$ctx"
 
-    # Compile directly into the owned temporary context — never `-o
+    # Compile from the exported HEAD tree ($SRC_DIR), never from $REPO's
+    # working tree, directly into the owned temporary context — never `-o
     # ch-oauth-ldap` in the checkout, so no build artifact is ever left in
     # the repository root.
-    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
-        -ldflags="-s -w -X main.version=${TAG}" \
-        -o "$ctx/ch-oauth-ldap" ./cmd/ch-oauth-ldap
+    (
+        cd "$SRC_DIR" &&
+        CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+            -ldflags="-s -w -X main.version=${TAG}" \
+            -o "$ctx/ch-oauth-ldap" ./cmd/ch-oauth-ldap
+    )
 
     # `umask 077` above keeps the run directory private, but it also makes
     # `go build` write the binary 0700. `COPY` preserves the source mode, the
@@ -168,7 +244,7 @@ build_one() {
     # at build time.
     chmod 0755 "$ctx/ch-oauth-ldap"
 
-    cp "$REPO/Dockerfile.ch-oauth-ldap" "$ctx/Dockerfile"
+    cp "$SRC_DIR/Dockerfile.ch-oauth-ldap" "$ctx/Dockerfile"
     chmod 0644 "$ctx/Dockerfile"
 
     docker pull --platform "linux/$arch" "$ALPINE_BASE" >/dev/null
@@ -186,7 +262,8 @@ build_one() {
     docker push "${FULL}:${TAG}-${arch}"
 }
 
-set -- $ARCHES
+# Positional parameters ($@) were already set to $ARCHES above, before the
+# tag-existence guard, so no second `set --` is needed here.
 for arch in "$@"; do
     build_one "$arch"
 done
@@ -194,6 +271,9 @@ done
 if [[ "$#" -gt 1 ]]; then
     echo
     echo "==> manifest ${TAG}"
+    # This only clears any stale LOCAL manifest-list cache for this tag
+    # (harmless if none exists, hence `|| true`) — it has no effect on the
+    # registry, and is not part of the tag-existence enforcement above.
     docker manifest rm "${FULL}:${TAG}" 2>/dev/null || true
     manifest_args=()
     for arch in "$@"; do

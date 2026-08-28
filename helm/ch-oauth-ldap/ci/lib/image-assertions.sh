@@ -61,6 +61,29 @@
 #       file -- proving canonical publication is refused in the latter two
 #       cases BEFORE any go build/docker step, and that a clean tree is not
 #       wrongly refused by the guard itself.
+#     - the real script's dirty-working-tree guard BYPASSES (review Finding
+#       1): two more throwaway repos proving the strengthened
+#       `--untracked-files=all --ignored=matching` status pre-check still
+#       refuses a `status.showUntrackedFiles=no`-hidden untracked .go file
+#       and a .gitignore'd .go file -- both of which a bare `git status
+#       --porcelain` (the pre-fix check) let through silently.
+#     - a HEAD-export BEHAVIORAL proof (review Finding 1's actual fix): the
+#       real, unmodified script run against a throwaway repo whose tracked
+#       .go file is tampered under `git update-index --assume-unchanged`
+#       (invisible to every `git status` flag combination, so the guard
+#       above cannot catch it), with a PATH-stubbed `docker` (records args,
+#       satisfies every preflight, exits 0) and a PATH-stubbed `go` that
+#       never compiles -- it records whether the tampered/HEAD marker
+#       strings are present under its own build cwd. Proves the compile
+#       input is `git archive HEAD`'s export, not the working tree: the
+#       tampered marker must be absent and the committed HEAD marker
+#       present.
+#     - static proof (review Finding 1) that `git archive --format=tar
+#       HEAD` precedes `go build`, and that the compile/Dockerfile-copy
+#       paths read from that export ($SRC_DIR), never from $REPO.
+#     - static proof (review Finding 2) that the manual script's `docker
+#       manifest inspect` tag-existence check precedes its first `docker
+#       push`, with no force-override knob.
 #     - .github/workflows/build-ch-oauth-ldap.yml (plan sections 51, A7):
 #       image path, `main`-only push plus workflow_dispatch with
 #       tag_prefix reaching the shell only through `env:` (never inlined in
@@ -68,7 +91,9 @@
 #       main.version stamp, amd64/arm64, immutable-tag-only (no `:main` /
 #       `:latest`), per-arch $RUNNER_TEMP/runner.temp context and Docker
 #       build `context:` that is never checkout root, the binary chmod
-#       0755, and cancel-in-progress concurrency.
+#       0755, cancel-in-progress concurrency, and (review Finding 2) that
+#       its `docker buildx imagetools inspect` tag-existence check precedes
+#       the build-push action, with no force-override input.
 #     - a final `test ! -e "$REPO_ROOT/ch-oauth-ldap"` proving none of the
 #       above checks (nor anything else already on disk) left a compiled
 #       LDAP binary in the repository root.
@@ -306,6 +331,76 @@ _ia_script_static_assertions() {
     _ia_script_arch_parity "$script"
     _ia_script_binary_mode "$script"
     _ia_script_dirty_tree_guard_static "$script"
+    _ia_script_head_export_static "$script"
+    _ia_script_tag_republish_static "$script"
+}
+
+# _ia_script_head_export_static SCRIPT
+# Static proof of the review's Finding 1 fix: `git archive --format=tar
+# HEAD` (exporting exactly the HEAD commit's tree into the script's own
+# temp dir) must run strictly before the compile step, and the compile /
+# Dockerfile-copy paths must read from that export, never from $REPO's
+# working tree. A bare `git status --porcelain` check -- even the
+# strengthened form checked by _ia_script_dirty_tree_guard_static -- cannot
+# see a tracked file hidden by `--assume-unchanged`/`--skip-worktree`; the
+# archive export is what actually makes the compile input immune to that
+# (proven behaviorally by _ia_script_head_export_behavioral below).
+_ia_script_head_export_static() {
+    local script="$1"
+    local archive_line build_line
+
+    assert_match "$script" 'git archive --format=tar HEAD' F
+    assert_match "$script" 'SRC_DIR='
+    assert_match "$script" 'cp "$SRC_DIR/Dockerfile.ch-oauth-ldap"' F
+    assert_not_match "$script" 'cp "$REPO/Dockerfile.ch-oauth-ldap"' F
+
+    archive_line=$(command grep -nF 'git archive --format=tar HEAD' "$script" | command head -n1 | command cut -d: -f1)
+    # Anchored to an actual command line (optional leading whitespace/env
+    # assignments), matching _ia_script_binary_mode's convention -- never
+    # the header prose, which also says "go build" in passing.
+    build_line=$(command grep -nE '^[[:space:]]*([A-Z_]+=[^[:space:]]*[[:space:]]+)*go build' "$script" | command head -n1 | command cut -d: -f1)
+
+    if [ -z "$archive_line" ] || [ -z "$build_line" ]; then
+        fail "$script: could not locate both 'git archive --format=tar HEAD' and 'go build' to order them"
+        return
+    fi
+    if [ "$archive_line" -lt "$build_line" ]; then
+        pass "$script: git archive --format=tar HEAD (line $archive_line) precedes go build (line $build_line)"
+    else
+        fail "$script: expected git archive --format=tar HEAD (line $archive_line) to precede go build (line $build_line)"
+    fi
+
+    # The go build invocation itself must run scoped to $SRC_DIR (never
+    # $REPO), so the exported tree -- not the working tree -- is what
+    # actually gets compiled.
+    assert_match "$script" 'cd "$SRC_DIR" &&' F
+}
+
+# _ia_script_tag_republish_static SCRIPT
+# Static proof of the review's Finding 2 fix in the manual script: the
+# `docker manifest inspect` existence check must run before the first
+# `docker push`, checked before any build/push work, with no force-override
+# knob.
+_ia_script_tag_republish_static() {
+    local script="$1"
+    local inspect_line push_line
+
+    assert_match "$script" 'docker manifest inspect' F
+
+    inspect_line=$(command grep -nF 'docker manifest inspect' "$script" | command head -n1 | command cut -d: -f1)
+    push_line=$(command grep -nE '^[[:space:]]*docker push' "$script" | command head -n1 | command cut -d: -f1)
+
+    if [ -z "$inspect_line" ] || [ -z "$push_line" ]; then
+        fail "$script: could not locate both 'docker manifest inspect' and 'docker push' to order them"
+        return
+    fi
+    if [ "$inspect_line" -lt "$push_line" ]; then
+        pass "$script: docker manifest inspect existence check (line $inspect_line) precedes the first docker push (line $push_line)"
+    else
+        fail "$script: expected the docker manifest inspect existence check (line $inspect_line) to precede the first docker push (line $push_line)"
+    fi
+
+    assert_not_match "$script" 'FORCE' F
 }
 
 # _ia_script_dirty_tree_guard_static SCRIPT
@@ -582,6 +677,208 @@ _ia_script_dirty_tree_guard() {
     fi
 }
 
+# _ia_script_dirty_tree_guard_bypasses SCRIPT
+# Extends _ia_script_dirty_tree_guard with the two specific bypasses the
+# review reproduced against the pre-fix bare `git status --porcelain`:
+#   1. `git config status.showUntrackedFiles no` hides an untracked .go
+#      file from a bare `git status --porcelain` entirely.
+#   2. A .gitignore'd .go file is never reported by `git status
+#      --porcelain` without `--ignored=matching`, even though `go build`
+#      still happily compiles it if it sits in the package directory.
+# The strengthened `--untracked-files=all --ignored=matching` flags must
+# refuse both cases -- proving the convenience pre-check is now as strong
+# as `git status` alone can be made. The one remaining bypass no `git
+# status` invocation can ever see (`--assume-unchanged`/`--skip-worktree`)
+# is proven separately, behaviorally, against the archive export, by
+# _ia_script_head_export_behavioral below.
+_ia_script_dirty_tree_guard_bypasses() {
+    local script="$1"
+    _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
+
+    if ! command -v git >/dev/null 2>&1; then
+        fail "dirty-tree guard bypasses: git not on PATH"
+        return
+    fi
+
+    local base="$RUN_TMP_DIR/dirty-tree-guard-bypasses"
+    local refusal_marker="refusing to publish"
+    command mkdir -p "$base/tmp"
+
+    local show_untracked_dir="$base/show-untracked-no" gitignored_dir="$base/gitignored"
+    _ia_dtg_new_repo "$show_untracked_dir"
+    _ia_dtg_new_repo "$gitignored_dir"
+
+    # Bypass 1: status.showUntrackedFiles=no.
+    git -C "$show_untracked_dir" config status.showUntrackedFiles no
+    command mkdir -p "$show_untracked_dir/cmd/ch-oauth-ldap"
+    printf 'package main\nfunc main(){}\n' >"$show_untracked_dir/cmd/ch-oauth-ldap/extra.go"
+
+    # Bypass 2: a committed .gitignore excluding *.go, then an untracked
+    # (ignored) .go file added afterward.
+    printf '*.go\n' >"$gitignored_dir/.gitignore"
+    git -C "$gitignored_dir" add .gitignore
+    git -C "$gitignored_dir" commit -q -m "add gitignore"
+    command mkdir -p "$gitignored_dir/cmd/ch-oauth-ldap"
+    printf 'package main\nfunc main(){}\n' >"$gitignored_dir/cmd/ch-oauth-ldap/extra.go"
+
+    local status
+
+    REPO="$show_untracked_dir" TMPDIR="$base/tmp" bash "$script" \
+        >"$base/show-untracked.out" 2>"$base/show-untracked.err"
+    status=$?
+    if [ "$status" -ne 0 ] && command grep -qF "$refusal_marker" "$base/show-untracked.err"; then
+        pass "dirty-tree guard bypasses: status.showUntrackedFiles=no + untracked .go in $show_untracked_dir is refused (exit $status) -- the explicit --untracked-files=all flag overrides the config"
+    else
+        fail "dirty-tree guard bypasses: status.showUntrackedFiles=no + untracked .go in $show_untracked_dir was NOT refused (exit $status): $(command head -n3 "$base/show-untracked.err")"
+    fi
+
+    REPO="$gitignored_dir" TMPDIR="$base/tmp" bash "$script" \
+        >"$base/gitignored.out" 2>"$base/gitignored.err"
+    status=$?
+    if [ "$status" -ne 0 ] && command grep -qF "$refusal_marker" "$base/gitignored.err"; then
+        pass "dirty-tree guard bypasses: .gitignore'd .go file in $gitignored_dir is refused (exit $status) -- --ignored=matching catches it"
+    else
+        fail "dirty-tree guard bypasses: .gitignore'd .go file in $gitignored_dir was NOT refused (exit $status): $(command head -n3 "$base/gitignored.err")"
+    fi
+}
+
+# _ia_script_head_export_behavioral SCRIPT
+# Behavioral proof for the review's third bypass (`--assume-unchanged` /
+# `--skip-worktree`), which NO `git status` flag combination can detect: a
+# tracked .go file is tampered after `git update-index --assume-unchanged`,
+# then the REAL, unmodified script is run against that repo with a
+# PATH-stubbed `docker` (records args, answers every preflight the script
+# performs -- manifest/image inspect, pull, build, push -- without ever
+# touching a real daemon) and a PATH-stubbed `go` that never compiles
+# anything: it inspects its own $PWD for the tampered-vs-HEAD marker
+# strings and records the verdict, then fabricates the requested `-o`
+# output file so the rest of the script (chmod, docker build/push)
+# proceeds normally. Proves the compile input is the exported HEAD tree,
+# not the working tree: the tampered marker must be ABSENT from the stub's
+# build cwd and the committed HEAD marker must be PRESENT.
+_ia_script_head_export_behavioral() {
+    local script="$1"
+    _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
+
+    if ! command -v git >/dev/null 2>&1; then
+        fail "HEAD-export behavioral proof: git not on PATH"
+        return
+    fi
+
+    local base="$RUN_TMP_DIR/head-export-behavioral"
+    local repo="$base/repo"
+    command mkdir -p "$repo/cmd/ch-oauth-ldap" "$base/stub" "$base/tmp"
+
+    git -C "$repo" init -q
+    git -C "$repo" config user.email gate@example.invalid
+    git -C "$repo" config user.name gate
+    printf 'FROM scratch\n' >"$repo/Dockerfile.ch-oauth-ldap"
+    printf 'module example.com/ia-head-export\n\ngo 1.22\n' >"$repo/go.mod"
+    printf 'package main\n\n// MARKER: IA_HEAD_CONTENT_MARKER\nfunc main() {}\n' \
+        >"$repo/cmd/ch-oauth-ldap/main.go"
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m init
+
+    # Tamper the tracked file under --assume-unchanged: invisible to every
+    # `git status` flag combination, including this script's own
+    # strengthened --untracked-files=all --ignored=matching convenience
+    # pre-check.
+    git -C "$repo" update-index --assume-unchanged cmd/ch-oauth-ldap/main.go
+    printf 'package main\n\n// MARKER: IA_TAMPERED_CONTENT_MARKER\nfunc main() {}\n' \
+        >"$repo/cmd/ch-oauth-ldap/main.go"
+
+    cat >"$base/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+echo "docker $*" >>"$IA_DOCKER_LOG"
+case "$1" in
+    manifest)
+        if [ "$2" = "inspect" ]; then
+            exit 1
+        fi
+        exit 0
+        ;;
+    image)
+        if [ "$2" = "inspect" ]; then
+            echo "$IA_STUB_ARCH"
+            exit 0
+        fi
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+DOCKER_STUB
+    command chmod +x "$base/stub/docker"
+
+    cat >"$base/stub/go" <<'GO_STUB'
+#!/bin/bash
+if [ "$1" != "build" ]; then
+    exit 0
+fi
+shift
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+{
+    if command grep -RqF "$IA_TAMPER_MARKER" . 2>/dev/null; then
+        echo "TAMPER:PRESENT"
+    else
+        echo "TAMPER:ABSENT"
+    fi
+    if command grep -RqF "$IA_HEAD_MARKER" . 2>/dev/null; then
+        echo "HEAD:PRESENT"
+    else
+        echo "HEAD:ABSENT"
+    fi
+    echo "CWD:$(pwd)"
+} >>"$IA_GO_RESULT"
+command mkdir -p "$(dirname "$out")"
+printf 'stub-binary\n' >"$out"
+exit 0
+GO_STUB
+    command chmod +x "$base/stub/go"
+
+    local docker_log="$base/docker.log" go_result="$base/go-result.log"
+    : >"$docker_log"
+    : >"$go_result"
+
+    REPO="$repo" \
+        TMPDIR="$base/tmp" \
+        ARCHES="amd64" \
+        PATH="$base/stub:$PATH" \
+        IA_DOCKER_LOG="$docker_log" \
+        IA_STUB_ARCH="amd64" \
+        IA_TAMPER_MARKER="IA_TAMPERED_CONTENT_MARKER" \
+        IA_HEAD_MARKER="IA_HEAD_CONTENT_MARKER" \
+        IA_GO_RESULT="$go_result" \
+        bash "$script" >"$base/run.out" 2>"$base/run.err"
+    local status=$?
+
+    if [ "$status" -ne 0 ]; then
+        fail "HEAD-export behavioral proof: script exited $status against the assume-unchanged-tampered/stubbed repo (expected 0 -- this tamper is NOT caught by the status pre-check, only silently excluded from the build by the archive export): $(command tail -n5 "$base/run.err")"
+        return
+    fi
+
+    if [ ! -s "$go_result" ]; then
+        fail "HEAD-export behavioral proof: the stub go was never invoked with 'build' -- see $base/run.out / $base/run.err"
+        return
+    fi
+
+    if command grep -qF 'TAMPER:PRESENT' "$go_result"; then
+        fail "HEAD-export behavioral proof: the tampered (--assume-unchanged) marker WAS visible to the stub go's build cwd -- the compile input is still the working tree, not an exported HEAD: $(cat "$go_result")"
+    else
+        pass "HEAD-export behavioral proof: tampered (--assume-unchanged) content is absent from the compile input"
+    fi
+
+    if command grep -qF 'HEAD:PRESENT' "$go_result"; then
+        pass "HEAD-export behavioral proof: committed HEAD content is present in the compile input"
+    else
+        fail "HEAD-export behavioral proof: committed HEAD content is NOT present in the compile input (see $go_result) -- the export may not be running at all"
+    fi
+}
+
 # =============================================================================
 # Section 51 (+ A7) -- .github/workflows/build-ch-oauth-ldap.yml
 # =============================================================================
@@ -641,6 +938,34 @@ _ia_workflow_assertions() {
 
     # Concurrency (plan amendment A7).
     assert_match "$workflow" 'cancel-in-progress: true'
+
+    _ia_workflow_tag_republish_static "$workflow"
+}
+
+# _ia_workflow_tag_republish_static WORKFLOW
+# Static proof of the review's Finding 2 fix in the workflow: the
+# `docker buildx imagetools inspect` existence check must run before the
+# build-push action, with no force-override input.
+_ia_workflow_tag_republish_static() {
+    local workflow="$1"
+    local inspect_line buildpush_line
+
+    assert_match "$workflow" 'docker buildx imagetools inspect' F
+
+    inspect_line=$(command grep -nF 'docker buildx imagetools inspect' "$workflow" | command head -n1 | command cut -d: -f1)
+    buildpush_line=$(command grep -nF 'docker/build-push-action' "$workflow" | command head -n1 | command cut -d: -f1)
+
+    if [ -z "$inspect_line" ] || [ -z "$buildpush_line" ]; then
+        fail "$workflow: could not locate both 'docker buildx imagetools inspect' and 'docker/build-push-action' to order them"
+        return
+    fi
+    if [ "$inspect_line" -lt "$buildpush_line" ]; then
+        pass "$workflow: docker buildx imagetools inspect existence check (line $inspect_line) precedes docker/build-push-action (line $buildpush_line)"
+    else
+        fail "$workflow: expected the docker buildx imagetools inspect existence check (line $inspect_line) to precede docker/build-push-action (line $buildpush_line)"
+    fi
+
+    assert_not_match "$workflow" 'FORCE' F
 }
 
 # =============================================================================
@@ -671,6 +996,8 @@ run_image_assertions() {
     _ia_script_static_assertions
     _ia_script_sigint_regression "$_IA_SCRIPT"
     _ia_script_dirty_tree_guard "$_IA_SCRIPT"
+    _ia_script_dirty_tree_guard_bypasses "$_IA_SCRIPT"
+    _ia_script_head_export_behavioral "$_IA_SCRIPT"
     _ia_workflow_assertions
 
     if [ -e "$REPO_ROOT/ch-oauth-ldap" ]; then

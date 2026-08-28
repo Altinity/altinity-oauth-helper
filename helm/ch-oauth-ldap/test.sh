@@ -316,6 +316,10 @@ run_docs_checks() {
         assert_match "$root_readme" "$s" F
     done
 
+    note "docs: the old, inaccurate 'same tag always refers to the same manifest' promise must be gone (review Finding 2) -- publication now REFUSES tag re-use, but a rebuild of the same commit is not byte-reproducible"
+    assert_not_match "$chart_readme" 'the same tag always refers to the same manifest' F
+    assert_not_match "$root_readme" 'the same tag always refers to the same manifest' F
+
     note "docs: CLAUDE.md mentions of chart/image/gate/workflow"
     assert_match "$claude_md" 'helm/ch-oauth-ldap/' F
     assert_match "$claude_md" 'Dockerfile.ch-oauth-ldap' F

@@ -313,6 +313,13 @@ binaries stamped with `-X main.version=<final-tag>`, per-arch push, and
 multi-arch manifest assembly — but never compiles into the checkout: each
 architecture is built from a throwaway `$TMPDIR` context containing only that
 arch's binary and `Dockerfile.ch-oauth-ldap` (copied in as `Dockerfile`).
+Nor does it ever compile the live working tree: the binary and Dockerfile
+both come from an export of exactly `HEAD` (`git archive HEAD` into that
+same throwaway context), so an untracked, `.gitignore`d, or
+`--assume-unchanged`-hidden local modification can never end up baked into
+a published tag — a `git status` check alone cannot see all three. The
+script also refuses outright to publish any `ldap-<sha>` tag (or per-arch
+sub-tag) that already exists in the registry; there is no force override.
 
 ## Layout
 

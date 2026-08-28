@@ -8,6 +8,16 @@ name: Build & push ch-oauth-ldap image
 # immutable `<prefix>-<7-char-sha>` tag is ever pushed; `main`/`latest` are
 # never used as tags.
 #
+# Tag-republication guard: before any per-arch build/push runs, this
+# refuses outright if `<prefix>-<sha>` already exists in the registry --
+# there is no force override. A rebuild of the same commit is not
+# guaranteed to reproduce the same manifest byte for byte
+# (Dockerfile.ch-oauth-ldap's `alpine:3.24` base floats within its minor
+# version, `apk add ca-certificates` is unpinned, and the toolchain can
+# drift), so silently republishing an already-published tag risks moving
+# it to a different manifest. Re-run from a new commit, or dispatch with a
+# different `tag_prefix`.
+#
 # Read-only post-publication note (plan §26): the first time this workflow
 # publishes an image, do NOT assume the GHCR package's repository linkage,
 # its exact manifest contents, or whether anonymous/unauthenticated pulls
@@ -103,6 +113,16 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to republish an already-published tag
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          FULL="${REGISTRY}/${IMAGE}"
+          if docker buildx imagetools inspect "${FULL}:${TAG}" >/dev/null 2>&1; then
+            echo "refusing to publish: ${FULL}:${TAG} already exists in the registry and would be silently moved to a possibly different manifest. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
+            exit 1
+          fi
 
       - name: Build & push per-arch image
         uses: docker/build-push-action@v6

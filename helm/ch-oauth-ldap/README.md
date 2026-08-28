@@ -57,9 +57,27 @@ ldap-<7-character-git-sha>
 ```
 
 There is no mutable `main`/`latest` alias — `image.tag` is required
-precisely so nobody accidentally floats on a moving tag. Treat every
-`ldap-<sha>` tag as immutable: the same tag always refers to the same
-manifest, so `pullPolicy: IfNotPresent` (the chart default) is safe.
+precisely so nobody accidentally floats on a moving tag, and both
+publication paths (the manual `scripts/build-ch-oauth-ldap-image.sh` and
+the `.github/workflows/build-ch-oauth-ldap.yml` workflow) **refuse to
+republish** a `ldap-<sha>` tag — or any of its per-arch `-amd64`/`-arm64`
+sub-tags — that already exists in the registry. There is no force
+override: re-running either path against the same commit fails loudly
+rather than silently moving the tag to a different manifest.
+
+That refusal is what you actually get, and it is **not** the same as
+byte-for-byte reproducibility. Rebuilding the exact same commit is not
+guaranteed to produce an identical image: `Dockerfile.ch-oauth-ldap`'s base
+image (`alpine:3.24`) floats within its minor version, `apk add
+ca-certificates` is unpinned, and the Go toolchain used to build it can
+change over time. So "immutable" here means *this tag will not be
+silently republished to point somewhere else* — not *rebuilding this
+commit reproduces this exact manifest*. If you need a hard guarantee that
+the image you deploy never changes underneath you, pin `image.tag` to a
+resolved `@sha256:<digest>` reference rather than the `ldap-<sha>` tag.
+`pullPolicy: IfNotPresent` (the chart default) is safe either way — it
+only governs whether an already-cached local image is reused, not whether
+a tag can ever be moved in the registry.
 
 Set `imagePullSecrets` (a chart value, defaulting to `[]`) if your GHCR
 package requires authenticated pulls. Do not assume the package is
