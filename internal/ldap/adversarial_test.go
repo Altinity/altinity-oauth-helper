@@ -1574,14 +1574,34 @@ func saturateOrdinaryWorkSlots(t *testing.T, rawConn net.Conn, fv *fakeVerifier)
 // (MaxInFlightControlOperationsPerClient), not the ordinary-work semaphore.
 // It saturates every ordinary-work slot on one connection with Binds that
 // can never complete on their own (fv.block is never closed), then sends an
-// Abandon targeting the one Bind actually blocked in the fake verifier
-// (messageID 1) and asserts the verifier's Verify call returns promptly
-// with context.Canceled — proof the Abandon actually ran, not merely that
-// the connection survived. Before the fix this would deadlock: message 21
-// (the Abandon) would itself queue behind the same exhausted
-// MaxInFlightRequestsPerClient semaphore that will never free a slot within
-// this test (fv.block stays open), so fv.returned would never fire and this
-// test would time out.
+// Abandon targeting every one of those saturating message IDs and asserts
+// the verifier's Verify call returns promptly with context.Canceled — proof
+// some Abandon actually ran, not merely that the connection survived.
+// Before the fix this would deadlock: an Abandon message would itself queue
+// behind the same exhausted MaxInFlightRequestsPerClient semaphore that
+// will never free a slot within this test (fv.block stays open), so
+// fv.returned would never fire and this test would time out.
+//
+// Abandon targets every saturating message ID (1..MaxInFlightRequestsPerClient),
+// not just messageID 1, deliberately: which of those N pipelined Binds is
+// the one that actually wins internal/ldap's per-connection session-lock
+// race and ends up blocked inside fv.Verify is NOT determined by dispatch
+// order. saturateOrdinaryWorkSlots's own doc explains why only one Bind
+// ever reaches Verify (the rest queue behind handleBind's session.Lock()),
+// but session.Lock() is a plain sync.Mutex, and Go's Mutex fast path allows
+// an arriving goroutine to barge ahead of goroutines that have been
+// waiting for less than ~1ms — it makes no FIFO promise between the N
+// goroutines client.go's read loop spawns (in message-ID order) to run
+// ProcessRequestMessage for each pipelined Bind. Under -race, scheduling
+// perturbation makes a non-messageID-1 winner materially more likely,
+// which is what an earlier version of this test (assuming messageID 1
+// always wins) intermittently hit: Abandon(1) would land on a Bind that
+// was never in Verify to begin with (still queued on the mutex, its
+// context cancellation is checked only once it acquires the lock — see
+// bind.go's requestCtx.Err() guard — so it never unblocks the actual
+// winner), and fv.returned would never fire. Targeting every saturating ID
+// guarantees the real winner (whichever numeric ID it turns out to be)
+// gets its Abandon.
 func TestAdversarial_AbandonRunsPromptlyDespiteSaturatedOrdinaryWork(t *testing.T) {
 	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
 	fv := newFakeVerifier(acct)
@@ -1603,8 +1623,15 @@ func TestAdversarial_AbandonRunsPromptlyDespiteSaturatedOrdinaryWork(t *testing.
 
 	saturateOrdinaryWorkSlots(t, rawConn, fv)
 
-	if _, err := rawConn.Write(rawAbandonMessage(ldapserver.MaxInFlightRequestsPerClient+1, 1)); err != nil {
-		t.Fatalf("write abandon: %v", err)
+	// Abandon every saturating message ID — see the doc comment above for
+	// why the winner of the session-lock race cannot be assumed to be
+	// messageID 1. Each Abandon envelope needs its own messageID, distinct
+	// from the 1..N range it targets.
+	for target := 1; target <= ldapserver.MaxInFlightRequestsPerClient; target++ {
+		abandonMessageID := ldapserver.MaxInFlightRequestsPerClient + target
+		if _, err := rawConn.Write(rawAbandonMessage(abandonMessageID, target)); err != nil {
+			t.Fatalf("write abandon for target %d: %v", target, err)
+		}
 	}
 
 	select {
