@@ -108,11 +108,89 @@ than HTTP Basic. It speaks only simple Bind and a narrowly restricted Search
   member's DN, a different base/scope/filter — is rejected without exposing
   data.
 
-This is the **standalone phase-2 LDAP server** described above. It has not
-yet been wired up against a real ClickHouse instance — real ClickHouse 24.8
-LDAP configuration and end-to-end interoperability testing is deferred to
-phase 3. Treat it today as a protocol-correct LDAP server you can Bind and
-Search against directly, not yet as a drop-in ClickHouse LDAP backend.
+### Wiring ClickHouse to `ch-oauth-ldap`
+
+ClickHouse's built-in [LDAP external user directory][ch-ldap] does the rest:
+users that do not exist locally are materialized in memory on a successful
+Bind, and the roles ClickHouse assigns them come from an LDAP `role_mapping`
+Search — which `ch-oauth-ldap` answers from the JWT's mapped groups. The
+ClickHouse username travels as the Bind DN's `uid`, and **the JWT travels as
+the simple-Bind password**.
+
+This path is verified end to end by the real-ClickHouse integration suite in
+[`integration/clickhouse/`](integration/clickhouse/) against
+`altinity/clickhouse-server:24.8.11.51285.altinitystable` (the baseline
+target) and `altinity/clickhouse-server:25.8.28.10001.altinitystable`. The
+configuration below is copied verbatim from that working fixture
+(`integration/clickhouse/clickhouse/common/config.d/ldap.xml`) — note that
+`role_mapping` sits **directly under `<ldap>`**, not nested inside a `<roles>`
+element:
+
+```xml
+<clickhouse>
+    <ldap_servers>
+        <oauth_helper>
+            <host>ch-oauth-ldap</host>
+            <port>389</port>
+            <bind_dn>uid={user_name},ou=users,dc=altinity,dc=internal</bind_dn>
+            <verification_cooldown>0</verification_cooldown>
+            <enable_tls>no</enable_tls>
+        </oauth_helper>
+    </ldap_servers>
+
+    <user_directories>
+        <ldap>
+            <server>oauth_helper</server>
+            <role_mapping>
+                <base_dn>ou=groups,dc=altinity,dc=internal</base_dn>
+                <scope>subtree</scope>
+                <search_filter>(&amp;(objectClass=groupOfNames)(member={bind_dn}))</search_filter>
+                <attribute>cn</attribute>
+                <prefix>clickhouse_</prefix>
+            </role_mapping>
+        </ldap>
+    </user_directories>
+</clickhouse>
+```
+
+What the fixture proves, and what you should expect in production:
+
+- **`verification_cooldown` must be `0`.** ClickHouse otherwise caches a
+  successful Bind and skips re-authentication for the cooldown window, so a
+  reconnect with a new token (new groups) would keep the stale role set.
+  With `0`, every authentication reaches the helper and sees the current
+  token-derived roles (scenario F).
+- **Mapped roles must pre-exist locally.** `role_mapping` strips the
+  `clickhouse_` transport prefix and activates a role of that name *only if
+  it exists*; an unknown name confers nothing. ClickHouse remains the sole
+  authority for roles, grants, row policies and quotas — the helper never
+  creates users or roles (scenario C).
+- **Local users take precedence.** A user defined in ClickHouse itself is
+  authenticated by ClickHouse; the LDAP directory is consulted only for
+  names that do not exist locally (scenario G).
+- **Distributed queries carry the external roles to remote nodes** via
+  `push_external_roles_in_interserver_queries` over secret-authenticated
+  interserver connections — **with an important compatibility caveat.** The
+  fixture found two upstream ClickHouse defects:
+  - it requires ClickHouse **≥ 25.8** (containing [#79099][ch-79099]); on
+    24.8 and 25.3 — including every Altinity Stable 24.8 build — the remote
+    node logs that the role was received but it never authorizes anything
+    ([#78791][ch-78791]);
+  - on **every** current version (through 26.3) the pushed role is lost when
+    the remote table is a normal `VIEW` ([#116840][ch-116840]) — point
+    `Distributed` tables at base tables.
+
+  `integration/clickhouse/lib/expectations.sh` records these per-version
+  outcomes and the suite fails loudly if ClickHouse's behavior changes.
+- **This validates plain LDAP only.** TLS, LDAPS and StartTLS are out of MVP
+  scope, so the JWT crosses the ClickHouse→helper hop in clear text. Keep the
+  helper on a trusted internal network (ClusterIP-only, NetworkPolicy) or
+  co-located on loopback; never expose it publicly.
+
+[ch-ldap]: https://clickhouse.com/docs/operations/external-authenticators/ldap
+[ch-79099]: https://github.com/ClickHouse/ClickHouse/pull/79099
+[ch-78791]: https://github.com/ClickHouse/ClickHouse/issues/78791
+[ch-116840]: https://github.com/ClickHouse/ClickHouse/issues/116840
 
 ## Quick start
 
@@ -180,6 +258,7 @@ access.
 cmd/ch-jwt-verify/     # the sidecar binary (main, config, settings, verify)
 cmd/ch-oauth-ldap/     # the standalone LDAPv3 server (main, config)
 internal/ldap/         # LDAP session/DN/filter/entry primitives + Bind/Search handlers
+integration/clickhouse/ # real-ClickHouse acceptance suite for ch-oauth-ldap (manual; see its README)
 helm/ch-jwt-verify/    # Helm chart (ConfigMaps + container fragment, no Deployment)
 scripts/build-image.sh # multi-arch image build & push
 examples/              # _platform shared compose base, plus curl / superset /

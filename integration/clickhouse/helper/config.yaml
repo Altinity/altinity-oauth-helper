@@ -1,0 +1,55 @@
+# integration/clickhouse/helper/config.yaml
+#
+# ch-oauth-ldap configuration for the phase-3 real-ClickHouse fixture.
+# Verbatim from the phase-3 plan's "Helper fixture configuration" block —
+# do not drift from it without updating the plan/README together.
+#
+# Notable choices (see the plan for the full rationale):
+#   - expected_issuer matches the synthetic-idp's Compose-pinned ISSUER
+#     (http://synthetic-idp/) exactly, or every Bind fails on issuer
+#     mismatch.
+#   - roles_mapping intentionally includes idp-unprovisioned -> ch_unprovisioned,
+#     a role that must NEVER be created in ClickHouse (see bootstrap/common.sql)
+#     so scenario C can prove the helper cannot invent authorization.
+#   - denied_usernames includes "admin" (not "admin@example.com") — the
+#     local-precedence fixture user is deliberately admin@example.com so
+#     that scenario G's token is otherwise helper-eligible.
+
+oauth:
+  expected_issuer: http://synthetic-idp/
+  jwks_url: http://synthetic-idp/.well-known/jwks.json
+  expected_audiences:
+    - clickhouse
+  username_claim: email
+  groups_claim: roles
+  verifier_leeway: 60s
+  required_scopes: []
+  jwks_cache_lifetime: 5m
+  token_cache_lifetime: 30s
+
+identity:
+  username_match: lowercase_equal
+  require_email_verified: true
+  allowed_email_domains:
+    - example.com
+  allowed_hosted_domains: []
+  denied_usernames:
+    - default
+    - admin
+    - operator
+
+roles:
+  roles_mapping:
+    idp-readers: ch_readonly
+    idp-engineers: ch_engineer
+    idp-distributed: ch_distributed_reader
+    idp-unprovisioned: ch_unprovisioned
+  roles_filter: '^ch_[A-Za-z0-9_]+$'
+  roles_transform: ''
+
+ldap:
+  listen: ':389'
+  user_base_dn: 'ou=users,dc=altinity,dc=internal'
+  group_base_dn: 'ou=groups,dc=altinity,dc=internal'
+  user_rdn_attribute: uid
+  role_cn_prefix: 'clickhouse_'

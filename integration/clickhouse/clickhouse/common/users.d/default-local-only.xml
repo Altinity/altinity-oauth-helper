@@ -1,0 +1,32 @@
+<!--
+  integration/clickhouse/clickhouse/common/users.d/default-local-only.xml
+
+  Restricts the packaged `default` user to loopback-only access so it can
+  still be used for container-local readiness/bootstrap (`docker compose
+  exec -T ... clickhouse-client ...`) while an ordinary passwordless
+  `default` connection arriving from another container on the Docker
+  network is denied (see "Default-user fixture policy" and "Prevent
+  ordinary default fallback" in the phase-3 plan).
+
+  This is a network-only override: `replace="replace"` on <networks>
+  fully replaces just that element when ClickHouse merges this file with
+  the packaged users.xml under the same <clickhouse><users><default> path;
+  every sibling setting the packaged users.xml already sets for `default`
+  (in particular <access_management>1</access_management> and
+  <named_collection_control>1</named_collection_control>) is preserved
+  because this file never mentions them. Do NOT add a redundant
+  access_management override here — the pinned target's packaged default
+  user already has it, and bootstrap's first CREATE ROLE is the runtime
+  proof that assumption holds (see "Bootstrap identity can manage access
+  entities" in the plan's invariant map).
+-->
+<clickhouse>
+    <users>
+        <default>
+            <networks replace="replace">
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+        </default>
+    </users>
+</clickhouse>
