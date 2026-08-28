@@ -55,9 +55,9 @@ PHASE3_G_ROLES=""
 IFS=$'\t' read -r PHASE3_G_USER PHASE3_G_ROLES <<<"$CH_LAST_BODY"
 
 [ "$PHASE3_G_USER" = "admin@example.com" ] \
-    || die "scenario G: expected currentUser() exactly 'admin@example.com', got '$PHASE3_G_USER' (full body: $CH_LAST_BODY)"
+    || die "scenario G: expected currentUser() exactly 'admin@example.com', got '$PHASE3_G_USER' ($(oauth_body_diagnostics))"
 [ "$PHASE3_G_ROLES" = "ch_local_admin" ] \
-    || die "scenario G: expected currentRoles() exactly 'ch_local_admin', got '$PHASE3_G_ROLES' (full body: $CH_LAST_BODY)"
+    || die "scenario G: expected currentRoles() exactly 'ch_local_admin', got '$PHASE3_G_ROLES' ($(oauth_body_diagnostics))"
 oauth_expect_not_contains "ch_readonly" "scenario G (real local auth)"
 
 log "scenario G: real local password -> currentUser()=admin@example.com, currentRoles()=ch_local_admin (exact match, no ch_readonly) — OK"
