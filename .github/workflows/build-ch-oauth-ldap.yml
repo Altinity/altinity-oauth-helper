@@ -163,8 +163,22 @@ jobs:
           FULL="${REGISTRY}/${IMAGE}"
           NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
           for CANDIDATE in "${FULL}:${TAG}" "${FULL}:${TAG}-${ARCH}"; do
-            OUT=$(docker buildx imagetools inspect "${CANDIDATE}" 2>&1)
-            RC=$?
+            # errexit-safe capture: this step runs under GitHub-hosted
+            # runners' `bash --noprofile --norc -eo pipefail`. A genuinely
+            # absent tag is the normal first-publication case and makes
+            # `docker buildx imagetools inspect` exit nonzero -- a bare
+            # `OUT=$(...); RC=$?` would die at the assignment under `-e`
+            # before `RC=$?` ever runs, so the classification below never
+            # executes and first publication is always blocked. Wrapping
+            # the assignment as the condition of an `if` suspends errexit
+            # for it, exactly like this script's `check_tag_absent` (see
+            # scripts/build-ch-oauth-ldap-image.sh) relies on `if !
+            # check_tag_absent` for the same reason.
+            if OUT=$(docker buildx imagetools inspect "${CANDIDATE}" 2>&1); then
+              RC=0
+            else
+              RC=$?
+            fi
             if [ "$RC" -eq 0 ]; then
               echo "refusing to publish: ${CANDIDATE} already exists in the registry and would be silently moved to a possibly different manifest. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
               exit 1
@@ -198,6 +212,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Refuse to republish an already-published tag (final recheck)
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          FULL: ${{ env.REGISTRY }}/${{ env.IMAGE }}
         run: |
           # Review pass 4: the per-arch `build` job's own guard (above)
           # inspected this shared final tag once, before that arch's push --
@@ -209,11 +226,20 @@ jobs:
           # before `docker buildx imagetools create` mutates it, with the
           # same fail-closed-on-ambiguous-error handling as the per-arch
           # guard (see its comment for the ghcr.io "denied" rationale).
-          TAG="${{ needs.build.outputs.tag }}"
-          FULL="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          #
+          # TAG/FULL come in through `env:` (not inlined `${{ }}` in the
+          # script body) so this step's body is plain bash -- identical in
+          # shape to the per-arch guard step -- and can be extracted from
+          # the workflow YAML and executed standalone by the gate.
           NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
-          OUT=$(docker buildx imagetools inspect "${FULL}:${TAG}" 2>&1)
-          RC=$?
+          # errexit-safe capture -- see the per-arch guard step's comment
+          # above for why a bare `OUT=$(...); RC=$?` would block every
+          # first publication under this runner's `bash -eo pipefail`.
+          if OUT=$(docker buildx imagetools inspect "${FULL}:${TAG}" 2>&1); then
+            RC=0
+          else
+            RC=$?
+          fi
           if [ "$RC" -eq 0 ]; then
             echo "refusing to publish: ${FULL}:${TAG} already exists in the registry and would be silently moved to a possibly different manifest -- it must have been published by another run while this job's per-arch builds were in progress. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
             exit 1

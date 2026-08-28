@@ -336,6 +336,18 @@ _TAG_NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found
 # not a recognized "not found" response, since that failure could just as
 # easily be an auth/transport/registry error masking a tag that actually
 # exists.
+#
+# Note on `-euo pipefail` (set at the top of this script): the
+# `out=$(...); rc=$?` capture inside this function looks like the same
+# shape that had to be made errexit-safe (`if OUT=$(...); then RC=0; else
+# RC=$?; fi`) in .github/workflows/build-ch-oauth-ldap.yml's two guard
+# steps, but it is NOT broken here. Every call site below invokes this
+# function as `if ! check_tag_absent ...`, and bash suspends `-e` for the
+# entire duration of a command (including a function call) that appears as
+# the condition of an `if`/`while`/`until`, or is negated with `!` — so a
+# nonzero exit from `docker manifest inspect` inside the function body
+# never triggers errexit here. Do not call this function outside such a
+# context, or the same failure mode the workflow had would reappear.
 check_tag_absent() {
     local ref="$1" out rc
     out=$(docker manifest inspect "$ref" 2>&1)
