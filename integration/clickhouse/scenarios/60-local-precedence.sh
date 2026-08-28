@@ -34,6 +34,11 @@ log "scenario G: local-user precedence"
 
 : "${CH_LOCAL_ADMIN_PASSWORD:?scenario G requires the run.sh origin.sql bootstrap step to have set CH_LOCAL_ADMIN_PASSWORD}"
 
+# The plaintext local-admin password is a credential that travels the same
+# HTTP Basic path as every JWT below, so it joins the leak-scan corpus
+# (scenario I) too — by NAME, exactly like the tokens.
+oauth_retain CH_LOCAL_ADMIN_PASSWORD
+
 PHASE3_TOKEN_G_ADMIN_EXTERNAL="$(oauth_mint admin@example.com idp-readers)"
 oauth_retain PHASE3_TOKEN_G_ADMIN_EXTERNAL
 

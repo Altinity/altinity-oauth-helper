@@ -6,8 +6,11 @@
 # lib/oauth.sh's OAUTH_RETAINED_TOKEN_NAMES registry already holds every
 # signed JWT this run minted: Alice reader/unprovisioned (scenario B),
 # Bob mismatch (D), expired Alice (E), reconnect A and B (F),
-# local-precedence (G), and distributed (H) — exactly the seven the plan
-# names in "Acceptance scenario I".
+# local-precedence (G), and distributed (H, both oracles) — the seven the
+# plan names in "Acceptance scenario I" plus the view-oracle token — and,
+# beyond the plan's minimum, the runtime-generated plaintext password of
+# the local-precedence user (scenario G retains CH_LOCAL_ADMIN_PASSWORD),
+# which travels the same HTTP Basic path and is just as much a credential.
 #
 # Order matters here (see the plan's "Leak-scanner self-test"): the
 # self-test MUST run and MUST detect its own deliberate plant before this
@@ -32,9 +35,21 @@ log "scenario I: leak-scanner self-test (plant one real JWT into a synthetic art
 leakscan_self_test "${OAUTH_RETAINED_TOKEN_NAMES[0]}"
 
 # ── Collect real artifacts ────────────────────────────────────────────────
+# The artifact directory is created HERE (not inside
+# leakscan_collect_artifacts) so that function runs in this shell and its
+# `die` calls abort the suite for real — see lib/leakscan.sh.
 log "scenario I: collecting real artifacts (helper/origin/remote compose logs, on-disk ClickHouse server/error logs, runner transcript, HTTP auth-failure bodies)"
-PHASE3_I_ARTIFACT_DIR="$(leakscan_collect_artifacts)"
+PHASE3_I_ARTIFACT_DIR="$(mktemp -d "$RUN_TMP_DIR/leakscan-artifacts.XXXXXX")"
+chmod 700 "$PHASE3_I_ARTIFACT_DIR"
+leakscan_collect_artifacts "$PHASE3_I_ARTIFACT_DIR"
 leakscan_capture_auth_failure_bodies "$PHASE3_I_ARTIFACT_DIR" "${OAUTH_RETAINED_TOKEN_NAMES[@]}"
+
+# ── Completeness gate ─────────────────────────────────────────────────────
+# A scan over a missing or empty artifact is trivially "clean" and proves
+# nothing, so every artifact the scan is about to trust must exist and be
+# non-empty (see leakscan_require_artifacts_complete for the one logged
+# exception, an error log a quiet build never wrote to).
+leakscan_require_artifacts_complete "$PHASE3_I_ARTIFACT_DIR"
 
 # ── Scan real artifacts ────────────────────────────────────────────────────
 # Do NOT scan the private per-request curl credential configs

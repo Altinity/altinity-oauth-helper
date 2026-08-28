@@ -18,8 +18,8 @@
 #      ch_http_query_as, so every scenario file makes the same shape of
 #      assertion (fresh HTTP connection, exact HTTP status, exact trimmed
 #      body) rather than each re-deriving its own comparison logic.
-#   3. A retained-token NAME registry for the later JWT-leak-scan scenario
-#      (acceptance scenario I, out of this sub-task's scope) — see
+#   3. A retained-credential NAME registry for the JWT-leak-scan scenario
+#      (acceptance scenario I, scenarios/80-leak-scan.sh) — see
 #      "Retained-token registry" below.
 #
 # Every function here inherits ch_http_query_as's existing credential
@@ -97,13 +97,14 @@
 #                                         a specific error string either.
 #
 # ── Retained-token registry ────────────────────────────────────────────────
-# Acceptance scenario I (the JWT-leak scan) needs every generated signed
-# JWT this phase mints — reader/unprovisioned, mismatch, expired, both
-# reconnect tokens, local-precedence, and the later distributed token — so
-# it can fixed-string-scan the captured artifacts for each one. That
-# scenario is out of THIS sub-task's file scope, but every scenario file
-# added here retains its tokens so a later sub-task's leak-scan scenario
-# can consume them without needing to re-derive or re-mint anything.
+# Acceptance scenario I (the JWT-leak scan, scenarios/80-leak-scan.sh)
+# needs every generated credential this phase mints — reader/unprovisioned,
+# mismatch, expired, both reconnect tokens, local-precedence (both the
+# external JWT and the runtime-generated local password), and both
+# distributed tokens — so it can fixed-string-scan the captured artifacts
+# for each one. Every scenario file retains its credentials by NAME the
+# moment it mints or receives them, so the leak-scan scenario can consume
+# them without re-deriving or re-minting anything.
 #
 # The registry stores VARIABLE NAMES, never values: OAUTH_RETAINED_TOKEN_NAMES
 # is a plain (unexported) indexed array of the names of other unexported
@@ -127,10 +128,10 @@
 #                                         OAUTH_RETAINED_TOKEN_NAMES.
 #
 # ── Sourcing ────────────────────────────────────────────────────────────────
-# run.sh itself sources only lib/common.sh (see run.sh and this repo's
-# declared file scope for this sub-task, which does not include run.sh);
-# it does not know about lib/oauth.sh. Each scenario file that needs these
-# helpers therefore sources this file itself, near the top:
+# run.sh itself sources only lib/common.sh; it does not know about
+# lib/oauth.sh (or lib/expectations.sh / lib/leakscan.sh). Each scenario
+# file that needs these helpers therefore sources this file itself, near
+# the top:
 #
 #   source "$SCRIPT_DIR/lib/oauth.sh"
 #

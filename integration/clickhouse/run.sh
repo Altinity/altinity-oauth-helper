@@ -7,10 +7,9 @@
 # applies RBAC/data bootstrap, runs the acceptance scenario-A
 # infrastructure/compatibility preflight, then sources every
 # integration/clickhouse/scenarios/*.sh file in lexical order (scenarios B
-# through I and beyond — exits 0 if none exist yet). See
-# /Users/altinity/tmp/plan-19p3.md (the phase-3 plan) for the full design
-# and rationale; integration/clickhouse/lib/common.sh documents the exact
-# sourcing contract scenario files can rely on.
+# through I; dies if none are found). See integration/clickhouse/README.md
+# for the full design and rationale; integration/clickhouse/lib/common.sh
+# documents the exact sourcing contract scenario files can rely on.
 #
 # Usage:
 #   ./integration/clickhouse/run.sh
@@ -23,7 +22,14 @@
 set -euo pipefail
 umask 077
 
-: "${TMPDIR:?TMPDIR must be set to a writable directory outside /tmp (this sandbox blocks /tmp bind mounts for Docker) — see the sandboxed-environment notes in CLAUDE.md}"
+# Per-run private state lives under $TMPDIR. Most Linux dev/CI hosts leave
+# TMPDIR unset, so default it to $HOME/tmp rather than refusing to run —
+# deliberately NOT /tmp: sandboxed Docker hosts (including the one this
+# fixture was developed on) block /tmp for container bind mounts, and the
+# fixture bind-mounts generated files from here.
+TMPDIR="${TMPDIR:-$HOME/tmp}"
+mkdir -p "$TMPDIR"
+export TMPDIR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -61,24 +67,39 @@ chmod 600 "$ENV_FILE"
 
 # PHASE3_CH_IMAGE selects which ClickHouse build this run targets, defaulted
 # to the issue's pinned 24.8 baseline. EXPECTED_CH_VERSION is derived from it
-# (the tag after the colon) rather than hardcoded, so scenario A's own
-# version-pin check and lib/expectations.sh's per-build behavioral table
-# (see that file) both stay correct for whichever build PHASE3_CH_IMAGE
-# names — run-all-builds.sh drives this same script once per known build.
+# (the tag after the LAST colon — `##*:`, so a registry host with a port,
+# e.g. `ghcr.io:5000/…:24.8.x`, still yields the tag) rather than
+# hardcoded, so scenario A's own version-pin check and
+# lib/expectations.sh's per-build behavioral table (see that file) both
+# stay correct for whichever build PHASE3_CH_IMAGE names —
+# run-all-builds.sh drives this same script once per known build. Digest
+# references (`image@sha256:…`) carry no tag to compare version() against
+# and are rejected up front.
 PHASE3_CH_IMAGE="${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}"
-EXPECTED_CH_VERSION="${PHASE3_CH_IMAGE#*:}"
+case "$PHASE3_CH_IMAGE" in
+*@*) die "PHASE3_CH_IMAGE='$PHASE3_CH_IMAGE' is a digest reference; this suite needs a TAGGED image whose tag equals the server's version() string (e.g. altinity/clickhouse-server:24.8.11.51285.altinitystable)" ;;
+*:*) : ;;
+*) die "PHASE3_CH_IMAGE='$PHASE3_CH_IMAGE' has no tag; this suite needs a TAGGED image whose tag equals the server's version() string" ;;
+esac
+EXPECTED_CH_VERSION="${PHASE3_CH_IMAGE##*:}"
 
 cleanup() {
     local rc=$?
     set +e
     log "cleanup: tearing down the compose project and removing generated material"
+    local down_rc
     compose down -v --remove-orphans >/dev/null 2>&1
+    down_rc=$?
+    if [ "$down_rc" -ne 0 ]; then
+        log "cleanup: WARNING — 'compose down -v --remove-orphans' exited $down_rc; containers/volumes of project $COMPOSE_PROJECT_NAME may be left behind (check 'docker ps -a --filter name=${COMPOSE_PROJECT_NAME}')"
+    fi
     if [ "${FALLBACK_NETWORKS_CREATED:-0}" = "1" ]; then
         # These two networks were created by hand in the sandbox
         # compatibility fallback (see bring_up_fixture_fallback) rather
         # than by compose, so `compose down` above does not know about
         # them.
-        docker network rm ch-phase3-auth-net ch-phase3-cluster-net >/dev/null 2>&1
+        docker network rm ch-phase3-auth-net ch-phase3-cluster-net >/dev/null 2>&1 \
+            || log "cleanup: WARNING — could not remove one or both hand-made fallback networks (ch-phase3-auth-net, ch-phase3-cluster-net); a later run tolerates pre-existing ones"
     fi
     # RUN_LOG lives under RUN_TMP_DIR, so this also removes the transcript
     # tee'd above, along with the per-run secret env file, any curl
@@ -207,9 +228,19 @@ bring_up_fixture_fallback() {
     compose up --build -d
 
     log "fallback: creating the real auth-net/cluster-net networks and reshaping container network membership onto them"
-    docker network create ch-phase3-auth-net >/dev/null
-    docker network create ch-phase3-cluster-net >/dev/null
+    # Flag set BEFORE creating, so cleanup() removes whatever subset got
+    # created even if the second `create` fails partway; and a network
+    # left behind by a crashed earlier run ("already exists") is tolerated
+    # rather than failing every subsequent run the same way.
     FALLBACK_NETWORKS_CREATED=1
+    local net
+    for net in ch-phase3-auth-net ch-phase3-cluster-net; do
+        if docker network inspect "$net" >/dev/null 2>&1; then
+            log "fallback: network $net already exists (left over from an earlier run?) — reusing it"
+        else
+            docker network create "$net" >/dev/null
+        fi
+    done
 
     local svc cname
     for svc in synthetic-idp ch-oauth-ldap clickhouse-origin; do
@@ -304,8 +335,13 @@ unset origin_sql_template origin_sql_rendered CH_LOCAL_ADMIN_SHA256_HEX
 log "bootstrap complete"
 
 # ── Acceptance scenario A — infrastructure and compatibility preflight ───
-# All 12 points from "Acceptance scenario A" in the plan. No acceptance
-# JWT is minted until every point here passes.
+# The 12 points from "Acceptance scenario A" in the plan, plus two live
+# grant-exclusivity checks (A.13, A.14) added after review: scenario H's
+# negative control is only a causal proof if ch_distributed_reader is the
+# ONLY grantee of anything in phase3 on the remote and alice has no local
+# role grant anywhere, and reading bootstrap/*.sql does not prove that
+# about the live servers. No acceptance JWT is minted until every point
+# here passes.
 scenario_a_preflight() {
     log "scenario A: preflight starting"
 
@@ -429,23 +465,45 @@ scenario_a_preflight() {
     [ "$status" = "healthy" ] || die "scenario A.12: ch-oauth-ldap health = '$status'"
     log "scenario A.12: ch-oauth-ldap (helper) TCP/389 health is green"
 
-    log "scenario A: preflight passed (all 12 points)"
+    # 13. On the remote, NOTHING in database phase3 is granted to any user
+    # directly, nor to any role other than ch_distributed_reader. This is
+    # what makes scenario H's negative control (propagation disabled ->
+    # denied) a causal proof rather than an accident of configuration.
+    # role_name is Nullable: a direct user grant has role_name = NULL, and
+    # `NULL != 'x'` is NULL, so the user_name IS NOT NULL disjunct is what
+    # catches those.
+    cnt="$(ch_admin_query clickhouse-remote "SELECT count() FROM system.grants WHERE database = 'phase3' AND (user_name IS NOT NULL OR role_name != 'ch_distributed_reader')")"
+    [ "$cnt" = "0" ] || die "scenario A.13: clickhouse-remote has $cnt grant(s) in database phase3 to a user or to a role other than ch_distributed_reader — the fixture over-grants and scenario H's negative control would be vacuous"
+    log "scenario A.13: on remote, phase3 is granted to ch_distributed_reader only"
+
+    # 14. alice@example.com holds no LOCAL role grant on either node — her
+    # only authority anywhere must come from LDAP role mapping on origin
+    # and from interserver propagation on the remote.
+    for svc in clickhouse-origin clickhouse-remote; do
+        cnt="$(ch_admin_query "$svc" "SELECT count() FROM system.role_grants WHERE user_name = 'alice@example.com'")"
+        [ "$cnt" = "0" ] || die "scenario A.14: $svc has $cnt local role grant(s) for alice@example.com — her authority must be LDAP-mapped/propagated only"
+    done
+    log "scenario A.14: alice@example.com has no local role grants on either node"
+
+    log "scenario A: preflight passed (all 14 points)"
 }
 
 scenario_a_preflight
 
 # ── Auto-source scenarios/*.sh in lexical order ───────────────────────────
 # See the "Sourcing contract" header in lib/common.sh for exactly what a
-# scenario file can assume at this point. Exits 0 here when no scenario
-# files exist yet — expected until later sub-tasks add them.
+# scenario file can assume at this point. The suite ships with scenarios
+# B–I, so an empty glob is a broken checkout/path, never a legitimate
+# "nothing to run" — dying here stops a silent preflight-only pass from
+# masquerading as a full green run.
 shopt -s nullglob
 scenario_files=("$SCRIPT_DIR"/scenarios/*.sh)
 shopt -u nullglob
 
 if [ "${#scenario_files[@]}" -eq 0 ]; then
-    log "no integration/clickhouse/scenarios/*.sh files present yet; scenario-A preflight is the full suite for now"
-    exit 0
+    die "no integration/clickhouse/scenarios/*.sh files found under $SCRIPT_DIR/scenarios — refusing to report a preflight-only run as a passing suite"
 fi
+log "found ${#scenario_files[@]} scenario file(s) to source"
 
 for f in "${scenario_files[@]}"; do
     log "sourcing scenario file: $f"

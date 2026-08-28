@@ -50,6 +50,10 @@
 # (24.8, 25.3, 25.8, 26.3) — see lib/expectations.sh's H_view_propagation
 # entry.
 #
+# Both arms here require the denial to have come FROM THE REMOTE (HTTP 500,
+# ACCESS_DENIED, "Received from clickhouse-remote:9000") — see scenarios/70's
+# header for why a generic "not 200" would let this pass vacuously.
+#
 # A FRESH token is minted here (not reused from scenario H) so this
 # scenario's own reasoning is self-contained, matching every other
 # scenario file's convention.
@@ -59,6 +63,8 @@ source "$SCRIPT_DIR/lib/expectations.sh"
 
 log "scenario H (view oracle): distributed external-role propagation through a normal view"
 
+oauth_retry_reset_extra_attempts
+
 PHASE3_TOKEN_H_VIEW="$(oauth_mint alice@example.com idp-distributed)"
 oauth_retain PHASE3_TOKEN_H_VIEW
 
@@ -67,23 +73,24 @@ PHASE3_H_VIEW_QUERY="SELECT remote_user, remote_roles, sum(n) FROM phase3.distri
 # ── Negative propagation control ──────────────────────────────────────────
 # Build-independent, exactly like scenario H's own negative control: with
 # propagation disabled, nothing is pushed, so the ephemeral
-# alice@example.com has zero authority regardless of either tracked
-# ClickHouse defect.
-oauth_run alice@example.com "$PHASE3_TOKEN_H_VIEW" "${PHASE3_H_VIEW_QUERY} = 0"
-oauth_expect_auth_failure "scenario H view oracle (negative propagation control, setting=0)"
-log "scenario H (view oracle): negative control (push_external_roles_in_interserver_queries=0) correctly denied — OK"
+# alice@example.com has zero authority on the remote regardless of either
+# tracked ClickHouse defect.
+oauth_run_retry_transient alice@example.com "$PHASE3_TOKEN_H_VIEW" "${PHASE3_H_VIEW_QUERY} = 0"
+expect_remote_access_denied "scenario H view oracle (negative propagation control, setting=0)"
+log "scenario H (view oracle): negative control (push_external_roles_in_interserver_queries=0) correctly denied BY THE REMOTE — OK"
 
 # ── Positive propagation control ──────────────────────────────────────────
 # Tracked as expected_fail on EVERY currently known build (see
 # lib/expectations.sh's H_view_propagation entry) — assert_propagation_outcome
-# asserts the specific known ACCESS_DENIED failure shape and logs it loudly
-# as a tracked limitation. If a future ClickHouse build fixes the
+# asserts the specific known remote ACCESS_DENIED failure shape and logs it
+# loudly as a tracked limitation. If a future ClickHouse build fixes the
 # underlying ContextData copy-constructor omission, this will die with a
-# "BEHAVIOR CHANGED" message rather than silently passing — update
-# lib/expectations.sh's H_view_propagation entry to must_pass for that
-# build and change the assertion below to require the exact
-# "alice@example.com\tch_distributed_reader\t6" body, matching scenario H's
-# own must_pass shape, when that happens.
+# "BEHAVIOR CHANGED" message rather than silently passing. When that
+# happens, ONLY lib/expectations.sh's H_view_propagation entry needs to be
+# flipped to must_pass for that build: the exact success body this
+# scenario requires ("alice@example.com\tch_distributed_reader\t6") is
+# already passed to assert_propagation_outcome below and is enforced
+# automatically under must_pass.
 oauth_run_retry_transient alice@example.com "$PHASE3_TOKEN_H_VIEW" "${PHASE3_H_VIEW_QUERY} = 1"
 assert_propagation_outcome H_view_propagation \
     "scenario H view oracle (positive propagation control, setting=1)" \

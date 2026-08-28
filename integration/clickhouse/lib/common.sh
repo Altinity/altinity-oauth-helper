@@ -18,9 +18,9 @@
 #   3. the full scenario-A infrastructure/compatibility preflight
 #      (implemented directly in run.sh, not as a scenarios/ file) has
 #      passed.
-# If integration/clickhouse/scenarios/ does not exist, or exists but
-# matches no `*.sh` files, run.sh logs that and exits 0 — this is the
-# expected state until scenario files are added.
+# If integration/clickhouse/scenarios/ matches no `*.sh` files, run.sh
+# `die`s — the suite ships with scenarios B–I, so an empty glob means a bad
+# checkout or a broken path, never a legitimate "nothing to run".
 #
 # Each scenario file is sourced (not exec'd as a subprocess) directly into
 # run.sh's own shell, so:
@@ -42,16 +42,17 @@
 #     argv literal to curl/clickhouse-client/docker) — see "Administrative
 #     versus OAuth client paths" in the phase-3 plan. Use idp_sign and
 #     ch_http_query_as below, which already follow that discipline.
-#   - filenames should sort (lexically) in the dependency order the plan's
-#     scenarios need — e.g. `scenarios/b-current-user.sh`,
-#     `scenarios/c-dynamic-roles.sh`, ..., `scenarios/i-leak-scan.sh` (the
-#     plan's own B..I letters already sort correctly; a numeric prefix
-#     works too as long as the ordering matches). Scenario H is split
-#     across two files for this reason: `scenarios/70-distributed-
-#     propagation.sh` (the base-table authorization oracle) and
-#     `scenarios/75-distributed-propagation-view.sh` (a separate,
-#     view-based oracle tracking an independent ClickHouse defect) — see
-#     lib/expectations.sh.
+#   - filenames sort (lexically) in the dependency order the plan's
+#     scenarios need, via a two-digit numeric prefix:
+#     `10-ephemeral-user.sh` (B), `20-dynamic-roles.sh` (C),
+#     `30-username-mismatch.sh` (D), `40-invalid-expired.sh` (E),
+#     `50-role-refresh.sh` (F), `60-local-precedence.sh` (G),
+#     `70-distributed-propagation.sh` (H, the base-table authorization
+#     oracle), `75-distributed-propagation-view.sh` (H's expected-fail
+#     sibling: a view-based oracle tracking an independent ClickHouse
+#     defect — see lib/expectations.sh), `80-leak-scan.sh` (I, which must
+#     run last so every earlier scenario's retained credentials are in the
+#     registry). Leave gaps for new scenarios.
 #   - a scenario probing a known, tracked upstream ClickHouse behavioral
 #     difference between builds (see lib/expectations.sh) should source
 #     that file (same pattern as lib/oauth.sh: sourced by the scenario

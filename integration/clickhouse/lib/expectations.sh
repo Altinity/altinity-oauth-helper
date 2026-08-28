@@ -82,16 +82,45 @@
 #   expectation_reason KEY          prints the recorded human-readable
 #                                    reason for KEY's expected_fail case
 #                                    (used in log lines and die messages).
-#   expect_known_access_denied LABEL
-#                                    asserts the SPECIFIC known-limitation
-#                                    failure shape this suite has actually
-#                                    observed for both bugs above (HTTP 500,
-#                                    body containing "ACCESS_DENIED") against
-#                                    $CH_LAST_STATUS/$CH_LAST_BODY — not
+#   expect_remote_access_denied LABEL
+#                                    asserts the ONE failure shape this suite
+#                                    accepts as "the REMOTE node denied the
+#                                    distributed read": HTTP 500, body
+#                                    containing "ACCESS_DENIED", AND body
+#                                    containing "Received from
+#                                    clickhouse-remote:9000" (the same
+#                                    remote-origin marker run.sh's scenario
+#                                    A.3 preflight already keys on) — against
+#                                    $CH_LAST_STATUS/$CH_LAST_BODY. Used for
+#                                    both oracles' NEGATIVE controls. This
+#                                    is deliberately much stricter than
 #                                    oauth_expect_auth_failure's generic
-#                                    "not 200", so a NEW/different failure
-#                                    reason is never mistaken for the
-#                                    tracked one.
+#                                    "not 200": a transport failure
+#                                    (ALL_CONNECTION_TRIES_FAILED), a SQL
+#                                    error, or an ORIGIN-side ACCESS_DENIED
+#                                    (e.g. a lost origin grant, or origin-
+#                                    side role mapping regressing) all also
+#                                    return non-200, and none of them prove
+#                                    "remote denied because no role was
+#                                    pushed". Requiring the remote marker is
+#                                    what stops scenario H from passing
+#                                    vacuously on a build where both arms
+#                                    expect denial.
+#   expect_known_access_denied LABEL
+#                                    the SPECIFIC known-limitation failure
+#                                    shape this suite has actually observed
+#                                    for both bugs above. Identical to
+#                                    expect_remote_access_denied (500 +
+#                                    ACCESS_DENIED + remote marker): the
+#                                    tracked defects both manifest as the
+#                                    REMOTE denying the read, so an
+#                                    origin-side denial is never mistaken
+#                                    for the tracked one either.
+#   oauth_retry_reset_extra_attempts
+#                                    resets OAUTH_RETRY_EXTRA_ATTEMPTS to 0.
+#                                    Call once at the top of every scenario
+#                                    that uses oauth_run_retry_transient and
+#                                    reasons about helper Bind counts.
 #   oauth_run_retry_transient USERNAME PASSWORD SQL [MAX_ATTEMPTS]
 #                                    like oauth_run, but retries (after a
 #                                    short sleep) when $CH_LAST_BODY
@@ -107,13 +136,25 @@
 #                                    same run. Does NOT retry on any other
 #                                    failure shape, including the tracked
 #                                    ACCESS_DENIED case both authorization
-#                                    oracles' positive controls use this
-#                                    for — only this specific transient
-#                                    transport error, so a genuine
-#                                    authorization result is never masked
-#                                    by a retry loop. Gives up and returns
-#                                    the last (still-transient) result
-#                                    after MAX_ATTEMPTS (default 3).
+#                                    oracles' controls use this for — only
+#                                    this specific transient transport
+#                                    error, so a genuine authorization
+#                                    result is never masked by a retry
+#                                    loop. Gives up and returns the last
+#                                    (still-transient) result after
+#                                    MAX_ATTEMPTS (default 3).
+#                                    EVERY retry is a fresh HTTP request and
+#                                    therefore a fresh, successful helper
+#                                    Bind on origin (origin authenticates
+#                                    the JWT before the distributed step
+#                                    fails), so each retry increments
+#                                    OAUTH_RETRY_EXTRA_ATTEMPTS by one —
+#                                    scenario H's "exactly N new Binds"
+#                                    delta proof must add that counter to
+#                                    its expected value, or a retry that did
+#                                    its job would still fail the run with a
+#                                    misleading "remote re-authenticated"
+#                                    diagnosis.
 #   assert_propagation_outcome KEY LABEL EXPECTED_BODY
 #                                    call after oauth_run has already set
 #                                    $CH_LAST_STATUS/$CH_LAST_BODY for the
@@ -186,6 +227,17 @@ expectation_reason() {
     esac
 }
 
+# OAUTH_RETRY_EXTRA_ATTEMPTS — see oauth_run_retry_transient's contract
+# above. Initialized here (idempotently) so a scenario that never retries
+# can still read it as 0; reset per scenario via
+# oauth_retry_reset_extra_attempts.
+: "${OAUTH_RETRY_EXTRA_ATTEMPTS:=0}"
+
+# oauth_retry_reset_extra_attempts — see contract above.
+oauth_retry_reset_extra_attempts() {
+    OAUTH_RETRY_EXTRA_ATTEMPTS=0
+}
+
 # oauth_run_retry_transient USERNAME PASSWORD SQL [MAX_ATTEMPTS] — see
 # contract above.
 oauth_run_retry_transient() {
@@ -199,9 +251,10 @@ oauth_run_retry_transient() {
                 log "oauth_run_retry_transient: still ALL_CONNECTION_TRIES_FAILED after $attempt attempts, giving up and returning this result"
                 return 0
             fi
-            log "oauth_run_retry_transient: transient ALL_CONNECTION_TRIES_FAILED on attempt $attempt/$max_attempts, retrying after a short delay"
+            log "oauth_run_retry_transient: transient ALL_CONNECTION_TRIES_FAILED on attempt $attempt/$max_attempts, retrying after a short delay (this retry is one extra successful origin Bind; OAUTH_RETRY_EXTRA_ATTEMPTS accounts for it)"
             sleep 2
             attempt=$((attempt + 1))
+            OAUTH_RETRY_EXTRA_ATTEMPTS=$((OAUTH_RETRY_EXTRA_ATTEMPTS + 1))
             ;;
         *)
             return 0
@@ -210,15 +263,30 @@ oauth_run_retry_transient() {
     done
 }
 
-# expect_known_access_denied LABEL — see contract above.
-expect_known_access_denied() {
+# PHASE3_REMOTE_DENIAL_MARKER is the substring ClickHouse puts in an
+# exception that was raised on the remote shard and relayed by the
+# initiator — the same text run.sh's scenario A.3 preflight keys on to prove
+# origin actually reached clickhouse-remote:9000.
+PHASE3_REMOTE_DENIAL_MARKER="Received from clickhouse-remote:9000"
+
+# expect_remote_access_denied LABEL — see contract above.
+expect_remote_access_denied() {
     local label="$1"
     [ "$CH_LAST_STATUS" = "500" ] \
-        || die "$label: expected the known ACCESS_DENIED failure shape (HTTP 500), got HTTP $CH_LAST_STATUS (body: $CH_LAST_BODY)"
+        || die "$label: expected a remote ACCESS_DENIED failure shape (HTTP 500), got HTTP $CH_LAST_STATUS (body: $CH_LAST_BODY)"
     case "$CH_LAST_BODY" in
     *ACCESS_DENIED*) : ;;
     *) die "$label: expected body to contain ACCESS_DENIED, got: $CH_LAST_BODY" ;;
     esac
+    case "$CH_LAST_BODY" in
+    *"$PHASE3_REMOTE_DENIAL_MARKER"*) : ;;
+    *) die "$label: expected the denial to have been raised on the REMOTE node (body must contain '$PHASE3_REMOTE_DENIAL_MARKER') — an origin-side denial, a transport failure, or a SQL error proves nothing about role propagation. Got: $CH_LAST_BODY" ;;
+    esac
+}
+
+# expect_known_access_denied LABEL — see contract above.
+expect_known_access_denied() {
+    expect_remote_access_denied "$1"
 }
 
 # assert_propagation_outcome KEY LABEL EXPECTED_BODY — see contract above.

@@ -26,10 +26,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Keep this list in sync with every build prefix lib/expectations.sh's
-# expectation_for actually recognizes — a build added here without a
-# matching expectation entry makes run.sh die loudly at the first
-# expectation lookup, not silently pass.
+# The two Altinity Stable images this suite is actually run against: the
+# issue's pinned 24.8 baseline and the 25.8 build on which distributed
+# external-role propagation is proven to work. lib/expectations.sh also
+# records per-build outcomes for the 25.3 and 26.3 lines (from a one-off
+# LTS sweep, see its header and integration/clickhouse/README.md), so a
+# 25.3/26.3 image can be run ad hoc via PHASE3_CH_IMAGE without adding it
+# here. A build added here (or run ad hoc) WITHOUT a matching expectation
+# entry makes run.sh die loudly at the first expectation lookup, never
+# silently pass.
 BUILDS=(
     "altinity/clickhouse-server:24.8.11.51285.altinitystable"
     "altinity/clickhouse-server:25.8.28.10001.altinitystable"

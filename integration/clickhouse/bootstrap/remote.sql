@@ -3,12 +3,16 @@
 -- Applied ONLY to clickhouse-remote, after bootstrap/common.sql, via the
 -- container-local `default` administrative user (no JWT on this path).
 --
--- remote_auth_probe forces currentUser()/currentRoles() to be evaluated in
--- the REMOTE execution context, which is what makes acceptance scenario H
--- (distributed external-role propagation) a real proof rather than an
--- origin-side assumption. Grants are scoped to ch_distributed_reader only
--- — no broader grant — so that disabling
--- push_external_roles_in_interserver_queries in scenario H's negative
+-- remote_probe (base table) is the authorization oracle acceptance scenario
+-- H (scenarios/70) reads through a Distributed table; remote identity for
+-- that proof is asserted separately via system.query_log, not through a
+-- view. remote_auth_probe (the view) exposes currentUser()/currentRoles()
+-- in the REMOTE execution context and is read ONLY by the expected-fail
+-- view-oracle canary (scenarios/75), which tracks a separate ClickHouse
+-- defect (ClickHouse/ClickHouse#116840). Grants are scoped to
+-- ch_distributed_reader only — no broader grant, and run.sh's scenario
+-- A.13 asserts that exclusivity against the live server — so that
+-- disabling push_external_roles_in_interserver_queries in either negative
 -- control genuinely removes authority rather than merely changing which
 -- role is reported while still allowing the read.
 --
