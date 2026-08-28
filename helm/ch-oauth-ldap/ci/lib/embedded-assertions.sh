@@ -1,0 +1,778 @@
+#!/usr/bin/env bash
+# helm/ch-oauth-ldap/ci/lib/embedded-assertions.sh
+#
+# Embedded-content verifier (plan sections 39, 40, 47, A5, 14, 18): renders
+# the ch-oauth-ldap chart with ci/valid-values.yaml plus three targeted
+# override cases, then structurally parses the two rendered ConfigMaps'
+# embedded payloads — config.yaml as a second YAML document via the
+# repository's existing gopkg.in/yaml.v3 dependency, ldap.xml with the
+# standard library's encoding/xml — instead of relying on grep/indentation
+# to prove the application config and ClickHouse XML are well-formed,
+# correctly typed, and free of fixture leakage.
+#
+# THIS FILE IS A LIBRARY. It must be `source`d, never executed directly. It
+# depends on helm/ch-oauth-ldap/ci/lib/common.sh already being sourced
+# first (for `pass`/`fail`/`note`/`assert_match`/`assert_not_match`/
+# `assert_count`/`$GATE_FAILURES`) — it does not source common.sh itself,
+# so a driver controls sourcing order exactly once.
+#
+# Contract this file provides:
+#
+#   run_embedded_assertions
+#     Requires three variables already exported by the caller:
+#       REPO_ROOT     absolute path to the repository root (module context
+#                     for `go run` — go.mod there already lists
+#                     gopkg.in/yaml.v3 as a direct dependency; this
+#                     function never adds a temporary go.mod and never
+#                     runs `go run` from inside RUN_TMP_DIR).
+#       CHART_DIR     absolute path to the ch-oauth-ldap chart
+#                     (normally "$REPO_ROOT/helm/ch-oauth-ldap").
+#       RUN_TMP_DIR   an already-created, owned scratch directory this
+#                     function may freely write render output, override
+#                     values files, JSON expectation files, and the
+#                     generated Go verifier source under.
+#     Renders the chart four ways (plan §37 items 9-10 plus the plain
+#     default and the custom-namespace/domain case from §16/§47), runs the
+#     Go verifier against each render's two ConfigMaps, and layers raw
+#     fixed-string bash assertions for the XML escaping invariants that
+#     structural XML parsing normalizes away (plan §18/§40/§47). Returns 0
+#     if none of its own checks added a new failure to $GATE_FAILURES,
+#     non-zero otherwise. Never resets $GATE_FAILURES — see common.sh's
+#     contract comment on why.
+#
+# Explicitly NOT part of this file's job: the full positive/negative render
+# matrix (plan §37/§38, owned by the chart-core gate module), kubeconform
+# schema checks, Dockerfile/script/workflow assertions, or documentation
+# checks. This file only proves the *embedded* config.yaml/ldap.xml payload
+# is structurally correct once a render has already succeeded.
+
+# --- sourced-only guard -----------------------------------------------------
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    echo "embedded-assertions.sh: this file is a library; source it, do not execute it" >&2
+    exit 1
+fi
+
+# --- internal: environment contract -----------------------------------------
+
+# _ea_require_env
+# Fails loudly (to stderr, exit 1 from the caller) if any of the three
+# variables run_embedded_assertions depends on is unset/empty, rather than
+# letting `helm template`/`go run` fail confusingly later with an empty path.
+_ea_require_env() {
+    local missing=0 v
+    for v in REPO_ROOT CHART_DIR RUN_TMP_DIR; do
+        if [ -z "${!v:-}" ]; then
+            echo "embedded-assertions.sh: \$$v must be set before calling run_embedded_assertions" >&2
+            missing=1
+        fi
+    done
+    [ "$missing" -eq 0 ]
+}
+
+# --- internal: the generated Go verifier ------------------------------------
+
+# _ea_write_verifier
+# Writes the small structural verifier to $RUN_TMP_DIR/verifier/main.go.
+# Never committed (it lives only under the caller's owned RUN_TMP_DIR) and
+# never given its own go.mod — _ea_run_verifier below runs it with the
+# working directory at $REPO_ROOT specifically so `import "gopkg.in/yaml.v3"`
+# resolves from the repository's own go.mod/go.sum (plan A5).
+#
+# CLI contract: `go run main.go <render-file> <expected-json-or-@file>`.
+# The second argument is either a literal JSON object, or "@<path>" naming a
+# file containing one (this library always uses the "@path" form to avoid
+# shell-quoting the JSON payload through multiple layers). Expected JSON
+# shape:
+#   {
+#     "expect_host": "<fqdn>",     // "" skips the host check
+#     "roundtrip": {               // dotted "family.field" -> expected value
+#       "roles.roles_filter": "...",
+#       "identity.denied_usernames": "..."  // list field: membership check
+#     }
+#   }
+# Prints one PASS:/FAIL: line per check to stdout and exits non-zero if any
+# check failed, so the caller can both capture the full parsed-structure
+# transcript and rely on the exit code.
+_ea_write_verifier() {
+    mkdir -p "$RUN_TMP_DIR/verifier"
+    cat > "$RUN_TMP_DIR/verifier/main.go" <<'EA_VERIFIER_EOF'
+// Generated by helm/ch-oauth-ldap/ci/lib/embedded-assertions.sh. Not part of
+// the Go module's build (it lives under a caller-owned temp directory and
+// is invoked directly via `go run <abs-path>`, never `go build ./...`).
+package main
+
+import (
+	"encoding/json"
+	"encoding/xml"
+	"fmt"
+	"os"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// k8sObj captures just enough of a rendered Kubernetes manifest document to
+// find a ConfigMap by name and read one of its data keys.
+type k8sObj struct {
+	Kind     string `yaml:"kind"`
+	Metadata struct {
+		Name string `yaml:"name"`
+	} `yaml:"metadata"`
+	Data map[string]string `yaml:"data"`
+}
+
+type expectSpec struct {
+	ExpectHost string                 `json:"expect_host"`
+	Roundtrip  map[string]interface{} `json:"roundtrip"`
+}
+
+// clickhouseXML mirrors the fixed structure templates/clickhouse-configmap.yaml
+// emits (and the proven integration/clickhouse fixture it mirrors): a single
+// named <oauth_helper> LDAP server and a direct (unnested) <role_mapping>
+// under <user_directories><ldap>.
+type clickhouseXML struct {
+	XMLName     xml.Name `xml:"clickhouse"`
+	LDAPServers struct {
+		OauthHelper struct {
+			Host                 string `xml:"host"`
+			Port                 int    `xml:"port"`
+			BindDN               string `xml:"bind_dn"`
+			VerificationCooldown int    `xml:"verification_cooldown"`
+			EnableTLS            string `xml:"enable_tls"`
+		} `xml:"oauth_helper"`
+	} `xml:"ldap_servers"`
+	UserDirectories struct {
+		LDAP struct {
+			Server      string `xml:"server"`
+			RoleMapping struct {
+				BaseDN       string `xml:"base_dn"`
+				Scope        string `xml:"scope"`
+				SearchFilter string `xml:"search_filter"`
+				Attribute    string `xml:"attribute"`
+				Prefix       string `xml:"prefix"`
+			} `xml:"role_mapping"`
+		} `xml:"ldap"`
+	} `xml:"user_directories"`
+}
+
+var failures int
+
+func failf(format string, args ...interface{}) {
+	fmt.Printf("FAIL: "+format+"\n", args...)
+	failures++
+}
+
+func passf(format string, args ...interface{}) {
+	fmt.Printf("PASS: "+format+"\n", args...)
+}
+
+func main() {
+	if len(os.Args) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: verifier <render-file> <expected-json-or-@file>")
+		os.Exit(2)
+	}
+	renderFile := os.Args[1]
+	expArg := os.Args[2]
+
+	var expJSON []byte
+	var err error
+	if strings.HasPrefix(expArg, "@") {
+		expJSON, err = os.ReadFile(strings.TrimPrefix(expArg, "@"))
+	} else {
+		expJSON = []byte(expArg)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reading expectations: %v\n", err)
+		os.Exit(2)
+	}
+	var exp expectSpec
+	if err := json.Unmarshal(expJSON, &exp); err != nil {
+		fmt.Fprintf(os.Stderr, "parsing expectations JSON: %v\n", err)
+		os.Exit(2)
+	}
+
+	raw, err := os.ReadFile(renderFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reading render file: %v\n", err)
+		os.Exit(2)
+	}
+
+	// Split the multi-document render on a line that is exactly "---".
+	// Helm's own "# Source: ..." comment lines are ordinary YAML comments
+	// and need no special handling.
+	docs := splitYAMLDocs(string(raw))
+
+	var configCM, chCM *k8sObj
+	for i := range docs {
+		if strings.TrimSpace(docs[i]) == "" {
+			continue
+		}
+		var obj k8sObj
+		if err := yaml.Unmarshal([]byte(docs[i]), &obj); err != nil {
+			failf("document %d of the render failed to parse as YAML: %v", i, err)
+			continue
+		}
+		if obj.Kind != "ConfigMap" {
+			continue
+		}
+		if _, ok := obj.Data["config.yaml"]; ok {
+			cp := obj
+			configCM = &cp
+		}
+		if _, ok := obj.Data["ldap.xml"]; ok {
+			cp := obj
+			chCM = &cp
+		}
+	}
+
+	if configCM == nil {
+		failf("no ConfigMap with data key config.yaml found in %s", renderFile)
+	}
+	if chCM == nil {
+		failf("no ConfigMap with data key ldap.xml found in %s", renderFile)
+	}
+	if configCM == nil || chCM == nil {
+		report()
+		return
+	}
+
+	// Name-suffix sanity (§39): the helper ConfigMap ends in "-config" but
+	// NOT "-clickhouse-config" (which also ends in "-config" and is the
+	// other ConfigMap); the ClickHouse one ends in "-clickhouse-config".
+	if !strings.HasSuffix(configCM.Metadata.Name, "-config") || strings.HasSuffix(configCM.Metadata.Name, "-clickhouse-config") {
+		failf("config ConfigMap name %q does not match the -config (non-clickhouse) suffix convention", configCM.Metadata.Name)
+	} else {
+		passf("config ConfigMap name %q matches -config suffix", configCM.Metadata.Name)
+	}
+	if !strings.HasSuffix(chCM.Metadata.Name, "-clickhouse-config") {
+		failf("clickhouse ConfigMap name %q does not end in -clickhouse-config", chCM.Metadata.Name)
+	} else {
+		passf("clickhouse ConfigMap name %q matches -clickhouse-config suffix", chCM.Metadata.Name)
+	}
+
+	configText := configCM.Data["config.yaml"]
+	xmlText := chCM.Data["ldap.xml"]
+
+	for _, bad := range []string{"synthetic-idp", "example.com"} {
+		if strings.Contains(configText, bad) {
+			failf("config.yaml unexpectedly contains %q", bad)
+		} else {
+			passf("config.yaml does not contain %q", bad)
+		}
+	}
+
+	// --- parse config.yaml as a second YAML document -------------------------
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal([]byte(configText), &cfg); err != nil {
+		failf("config.yaml (the ConfigMap's embedded payload) did not parse as YAML: %v", err)
+		report()
+		return
+	}
+
+	checkExactKeys("top-level", cfg, []string{"oauth", "identity", "roles", "ldap"})
+
+	oauth, _ := cfg["oauth"].(map[string]interface{})
+	identity, _ := cfg["identity"].(map[string]interface{})
+	roles, _ := cfg["roles"].(map[string]interface{})
+	ldap, _ := cfg["ldap"].(map[string]interface{})
+
+	checkExactKeys("oauth", oauth, []string{"expected_issuer", "jwks_url", "expected_audiences", "username_claim", "groups_claim", "verifier_leeway", "required_scopes", "jwks_cache_lifetime", "token_cache_lifetime"})
+	checkExactKeys("identity", identity, []string{"username_match", "require_email_verified", "allowed_email_domains", "allowed_hosted_domains", "denied_usernames"})
+	checkExactKeys("roles", roles, []string{"roles_mapping", "roles_filter", "roles_transform"})
+	checkExactKeys("ldap", ldap, []string{"user_base_dn", "group_base_dn", "user_rdn_attribute", "role_cn_prefix", "listen"})
+
+	checkString("oauth.expected_issuer", oauth["expected_issuer"])
+	checkString("oauth.jwks_url", oauth["jwks_url"])
+	checkList("oauth.expected_audiences", oauth["expected_audiences"])
+	checkString("oauth.username_claim", oauth["username_claim"])
+	checkString("oauth.groups_claim", oauth["groups_claim"])
+	checkString("oauth.verifier_leeway", oauth["verifier_leeway"])
+	checkList("oauth.required_scopes", oauth["required_scopes"])
+	checkString("oauth.jwks_cache_lifetime", oauth["jwks_cache_lifetime"])
+	checkString("oauth.token_cache_lifetime", oauth["token_cache_lifetime"])
+
+	checkString("identity.username_match", identity["username_match"])
+	checkBool("identity.require_email_verified", identity["require_email_verified"])
+	checkList("identity.allowed_email_domains", identity["allowed_email_domains"])
+	checkList("identity.allowed_hosted_domains", identity["allowed_hosted_domains"])
+	checkList("identity.denied_usernames", identity["denied_usernames"])
+
+	checkMap("roles.roles_mapping", roles["roles_mapping"])
+	checkString("roles.roles_filter", roles["roles_filter"])
+	checkString("roles.roles_transform", roles["roles_transform"])
+
+	checkString("ldap.user_base_dn", ldap["user_base_dn"])
+	checkString("ldap.group_base_dn", ldap["group_base_dn"])
+	checkString("ldap.user_rdn_attribute", ldap["user_rdn_attribute"])
+	checkString("ldap.role_cn_prefix", ldap["role_cn_prefix"])
+
+	if listen, ok := ldap["listen"]; !ok {
+		failf("ldap.listen is missing")
+	} else if s, ok := listen.(string); !ok {
+		failf("ldap.listen is not a string: %#v", listen)
+	} else if s != ":3389" {
+		failf("ldap.listen = %q, want \":3389\"", s)
+	} else {
+		passf("ldap.listen == \":3389\" (exactly one key in the ldap mapping)")
+	}
+
+	// --- per-case round-trip checks --------------------------------------------
+	for path, want := range exp.Roundtrip {
+		parts := strings.SplitN(path, ".", 2)
+		if len(parts) != 2 {
+			failf("roundtrip path %q must be family.field", path)
+			continue
+		}
+		var family map[string]interface{}
+		switch parts[0] {
+		case "oauth":
+			family = oauth
+		case "identity":
+			family = identity
+		case "roles":
+			family = roles
+		case "ldap":
+			family = ldap
+		default:
+			failf("roundtrip path %q has unknown family %q", path, parts[0])
+			continue
+		}
+		got, ok := family[parts[1]]
+		if !ok {
+			failf("roundtrip path %q: field not present in parsed YAML", path)
+			continue
+		}
+		wantStr, _ := want.(string)
+		switch v := got.(type) {
+		case string:
+			if v == wantStr {
+				passf("roundtrip %s == %q", path, wantStr)
+			} else {
+				failf("roundtrip %s = %q, want %q", path, v, wantStr)
+			}
+		case []interface{}:
+			found := false
+			for _, item := range v {
+				if s, ok := item.(string); ok && s == wantStr {
+					found = true
+					break
+				}
+			}
+			if found {
+				passf("roundtrip %s contains %q", path, wantStr)
+			} else {
+				failf("roundtrip %s = %#v, does not contain %q", path, v, wantStr)
+			}
+		default:
+			failf("roundtrip %s has unsupported parsed type %T", path, got)
+		}
+	}
+
+	// --- parse ldap.xml with encoding/xml -------------------------------------
+	var cx clickhouseXML
+	if err := xml.Unmarshal([]byte(xmlText), &cx); err != nil {
+		failf("ldap.xml (the ClickHouse ConfigMap's embedded payload) did not parse as well-formed XML: %v", err)
+		report()
+		return
+	}
+	passf("ldap.xml is well-formed XML")
+
+	if exp.ExpectHost != "" {
+		if cx.LDAPServers.OauthHelper.Host == exp.ExpectHost {
+			passf("ldap.xml oauth_helper host == %q", exp.ExpectHost)
+		} else {
+			failf("ldap.xml oauth_helper host = %q, want %q", cx.LDAPServers.OauthHelper.Host, exp.ExpectHost)
+		}
+	}
+	if cx.LDAPServers.OauthHelper.Port == 389 {
+		passf("ldap.xml oauth_helper port == 389")
+	} else {
+		failf("ldap.xml oauth_helper port = %d, want 389", cx.LDAPServers.OauthHelper.Port)
+	}
+
+	// Cross-ConfigMap alignment (§39/§47): the XML's bind_dn/role_mapping
+	// base_dn/prefix must equal the *same* values.ldap fields that drove
+	// config.yaml's own ldap.* fields in this very render — not merely
+	// "look plausible". encoding/xml decodes &amp; back to a literal &, so
+	// this comparison holds even for the &-in-DN case.
+	wantBindDN := fmt.Sprintf("%v={user_name},%v", ldap["user_rdn_attribute"], ldap["user_base_dn"])
+	if cx.LDAPServers.OauthHelper.BindDN == wantBindDN {
+		passf("ldap.xml bind_dn == %q (matches config.yaml's ldap.user_rdn_attribute + ldap.user_base_dn)", wantBindDN)
+	} else {
+		failf("ldap.xml bind_dn = %q, want %q", cx.LDAPServers.OauthHelper.BindDN, wantBindDN)
+	}
+
+	if cx.LDAPServers.OauthHelper.VerificationCooldown == 0 {
+		passf("ldap.xml verification_cooldown == 0")
+	} else {
+		failf("ldap.xml verification_cooldown = %d, want 0", cx.LDAPServers.OauthHelper.VerificationCooldown)
+	}
+
+	if cx.LDAPServers.OauthHelper.EnableTLS == "no" {
+		passf("ldap.xml enable_tls == \"no\"")
+	} else {
+		failf("ldap.xml enable_tls = %q, want \"no\"", cx.LDAPServers.OauthHelper.EnableTLS)
+	}
+
+	if cx.UserDirectories.LDAP.Server == "oauth_helper" {
+		passf("ldap.xml user_directories/ldap/server == \"oauth_helper\"")
+	} else {
+		failf("ldap.xml user_directories/ldap/server = %q, want \"oauth_helper\"", cx.UserDirectories.LDAP.Server)
+	}
+
+	rm := cx.UserDirectories.LDAP.RoleMapping
+	wantGroupDN := fmt.Sprintf("%v", ldap["group_base_dn"])
+	if rm.BaseDN == wantGroupDN {
+		passf("ldap.xml role_mapping/base_dn == %q (matches config.yaml's ldap.group_base_dn)", wantGroupDN)
+	} else {
+		failf("ldap.xml role_mapping/base_dn = %q, want %q", rm.BaseDN, wantGroupDN)
+	}
+	if rm.Scope == "subtree" {
+		passf("ldap.xml role_mapping/scope == \"subtree\"")
+	} else {
+		failf("ldap.xml role_mapping/scope = %q, want \"subtree\"", rm.Scope)
+	}
+	if rm.Attribute == "cn" {
+		passf("ldap.xml role_mapping/attribute == \"cn\"")
+	} else {
+		failf("ldap.xml role_mapping/attribute = %q, want \"cn\"", rm.Attribute)
+	}
+	wantPrefix := fmt.Sprintf("%v", ldap["role_cn_prefix"])
+	if rm.Prefix == wantPrefix {
+		passf("ldap.xml role_mapping/prefix == %q (matches config.yaml's ldap.role_cn_prefix)", wantPrefix)
+	} else {
+		failf("ldap.xml role_mapping/prefix = %q, want %q", rm.Prefix, wantPrefix)
+	}
+
+	report()
+}
+
+func checkExactKeys(label string, m map[string]interface{}, want []string) {
+	if m == nil {
+		failf("%s: expected a mapping, got none", label)
+		return
+	}
+	wantSet := map[string]bool{}
+	for _, k := range want {
+		wantSet[k] = true
+	}
+	if len(m) != len(want) {
+		failf("%s: expected exactly %d key(s) %v, got %d: %v", label, len(want), want, len(m), keysOf(m))
+		return
+	}
+	for k := range m {
+		if !wantSet[k] {
+			failf("%s: unexpected key %q (invented/secret field?)", label, k)
+			return
+		}
+	}
+	passf("%s: exactly the expected key set %v", label, want)
+}
+
+func keysOf(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func checkString(label string, v interface{}) {
+	if _, ok := v.(string); ok {
+		passf("%s is a string", label)
+	} else {
+		failf("%s is not a string: %#v (%T)", label, v, v)
+	}
+}
+
+func checkBool(label string, v interface{}) {
+	if _, ok := v.(bool); ok {
+		passf("%s is a bool", label)
+	} else {
+		failf("%s is not a bool: %#v (%T)", label, v, v)
+	}
+}
+
+func checkList(label string, v interface{}) {
+	if _, ok := v.([]interface{}); ok {
+		passf("%s is a list", label)
+	} else {
+		failf("%s is not a list: %#v (%T)", label, v, v)
+	}
+}
+
+func checkMap(label string, v interface{}) {
+	if _, ok := v.(map[string]interface{}); ok {
+		passf("%s is a map", label)
+		return
+	}
+	if v == nil {
+		// toYaml on an empty Go map renders "{}", which yaml.v3 may decode
+		// as a nil interface rather than an allocated empty map; either
+		// way it is a (empty) mapping, not the missing/wrong-type defect
+		// this check exists to catch.
+		passf("%s is an (empty) map", label)
+		return
+	}
+	failf("%s is not a map: %#v (%T)", label, v, v)
+}
+
+func report() {
+	if failures > 0 {
+		fmt.Printf("VERIFIER FAILURES: %d\n", failures)
+		os.Exit(1)
+	}
+	fmt.Println("VERIFIER OK")
+}
+
+func splitYAMLDocs(s string) []string {
+	lines := strings.Split(s, "\n")
+	var docs []string
+	var cur []string
+	for _, line := range lines {
+		if strings.TrimRight(line, "\r") == "---" {
+			docs = append(docs, strings.Join(cur, "\n"))
+			cur = nil
+			continue
+		}
+		cur = append(cur, line)
+	}
+	docs = append(docs, strings.Join(cur, "\n"))
+	return docs
+}
+EA_VERIFIER_EOF
+}
+
+# _ea_run_verifier RENDER_FILE EXPECT_JSON_FILE
+# Runs the generated verifier exactly as plan A5 requires: cwd at
+# $REPO_ROOT (so gopkg.in/yaml.v3 resolves from the repo's own go.mod),
+# never from $RUN_TMP_DIR, never with a temporary go.mod.
+_ea_run_verifier() {
+    local render_file="$1" expect_json_file="$2"
+    ( cd "$REPO_ROOT" && go run "$RUN_TMP_DIR/verifier/main.go" "$render_file" "@$expect_json_file" )
+}
+
+# _ea_verify_case LABEL RENDER_FILE EXPECT_JSON_FILE
+# Runs the verifier, echoes its full PASS:/FAIL: transcript (so a driver
+# capturing this library's output shows the parsed key sets, not just a
+# summary), and folds its outcome into $GATE_FAILURES via fail/pass.
+_ea_verify_case() {
+    local label="$1" render_file="$2" expect_json_file="$3" output rc
+    output=$(_ea_run_verifier "$render_file" "$expect_json_file" 2>&1)
+    rc=$?
+    printf '%s\n' "$output"
+    if [ "$rc" -eq 0 ]; then
+        pass "embedded-assertions: $label verifier reported no failures"
+    else
+        fail "embedded-assertions: $label verifier reported structural failures (see transcript above)"
+    fi
+}
+
+# --- internal: chart rendering ----------------------------------------------
+
+# _ea_render_full OUTFILE [EXTRA-HELM-ARGS...]
+# Full multi-resource `helm template` render, used as input to the Go
+# verifier. Always renders ci/valid-values.yaml on top of chart defaults
+# and always pins --namespace explicitly (the ambient kube context's
+# current-namespace default is not reproducible across machines/CI
+# runners, so this library never relies on it).
+_ea_render_full() {
+    local outfile="$1"; shift
+    if ! helm template t "$CHART_DIR" -f "$CHART_DIR/ci/valid-values.yaml" --namespace default "$@" > "$outfile" 2> "${outfile}.stderr"; then
+        fail "embedded-assertions: helm template (full render) failed writing $outfile (extra args: $*)"
+        note "embedded-assertions: helm template stderr: $(cat "${outfile}.stderr" 2>/dev/null)"
+        return 1
+    fi
+    return 0
+}
+
+# _ea_render_xmlonly OUTFILE [EXTRA-HELM-ARGS...]
+# Renders only templates/clickhouse-configmap.yaml, isolated from
+# config.yaml's own text (which legitimately contains unescaped "&" in
+# quoted YAML scalars — a whole-render raw-string check for XML escaping
+# would false-positive against that unrelated ConfigMap). Used only for
+# the raw fixed-string XML-escaping assertions in _ea_raw_filter_checks;
+# the Go verifier always runs against the full render instead.
+_ea_render_xmlonly() {
+    local outfile="$1"; shift
+    if ! helm template t "$CHART_DIR" -f "$CHART_DIR/ci/valid-values.yaml" --namespace default --show-only templates/clickhouse-configmap.yaml "$@" > "$outfile" 2> "${outfile}.stderr"; then
+        fail "embedded-assertions: helm template (xml-only render) failed writing $outfile (extra args: $*)"
+        note "embedded-assertions: helm template stderr: $(cat "${outfile}.stderr" 2>/dev/null)"
+        return 1
+    fi
+    return 0
+}
+
+# --- internal: raw-string escaping assertions (plan §18/§40/§47) -----------
+
+# _ea_raw_filter_checks XML_ONLY_RENDER_FILE
+# Structural XML parsing normalizes entities back to their literal
+# characters (encoding/xml decodes &amp; to &), so it cannot by itself
+# distinguish "escaped correctly once" from "escaped, then escaped again"
+# or "never escaped". These fixed-string checks run on the raw rendered
+# text instead, against the isolated clickhouse-configmap-only render.
+_ea_raw_filter_checks() {
+    local file="$1"
+    assert_count "$file" '(&amp;(objectClass=groupOfNames)(member={bind_dn}))' 1 F
+    assert_not_match "$file" '&amp;amp;' F
+    assert_not_match "$file" '(&(objectClass=groupOfNames)(member={bind_dn}))' F
+}
+
+# --- the four render cases ---------------------------------------------------
+
+# Plain ci/valid-values.yaml render, explicit default namespace, default
+# clusterDomain. Establishes the baseline every field/type/key-set check
+# runs against, plus the always-on raw filter-escaping checks.
+_ea_case_default() {
+    local render="$RUN_TMP_DIR/render-default.yaml" xmlonly="$RUN_TMP_DIR/xmlonly-default.yaml" expect="$RUN_TMP_DIR/expect-default.json"
+    _ea_render_full "$render" || return
+    _ea_render_xmlonly "$xmlonly" || return
+    printf '%s\n' '{"expect_host":"t-ch-oauth-ldap.default.svc.cluster.local","roundtrip":{}}' > "$expect"
+    _ea_verify_case "default render" "$render" "$expect"
+    _ea_raw_filter_checks "$xmlonly"
+}
+
+# YAML-significant-strings case (plan §37 item 9): values containing "#",
+# ": " (colon immediately followed by a space — the classic "this parses as
+# a nested mapping key if unquoted" gotcha), a leading "!", "&", and "*"
+# where valid — a roles_filter/roles_transform value and a denied_usernames
+# entry — proving the safe `quote`/`toYaml` serialization convention (plan
+# §14) round-trips these scalars to their intended values rather than
+# corrupting the embedded YAML or being reinterpreted as a YAML mapping
+# key, comment, tag, anchor, or alias.
+_ea_case_special_chars() {
+    local values="$RUN_TMP_DIR/values-special-chars.yaml"
+    local render="$RUN_TMP_DIR/render-special-chars.yaml" xmlonly="$RUN_TMP_DIR/xmlonly-special-chars.yaml" expect="$RUN_TMP_DIR/expect-special-chars.json"
+
+    cat > "$values" <<'EA_VALUES_EOF'
+roles:
+  roles_filter: 'contains: a colon-space, a #hash, and a *star'
+  roles_transform: '!leading-bang-value'
+identity:
+  denied_usernames:
+    - default
+    - admin
+    - operator
+    - 'amp&ersand: user #tag'
+EA_VALUES_EOF
+
+    _ea_render_full "$render" -f "$values" || return
+    _ea_render_xmlonly "$xmlonly" -f "$values" || return
+
+    cat > "$expect" <<'EA_EXPECT_EOF'
+{
+  "expect_host": "t-ch-oauth-ldap.default.svc.cluster.local",
+  "roundtrip": {
+    "roles.roles_filter": "contains: a colon-space, a #hash, and a *star",
+    "roles.roles_transform": "!leading-bang-value",
+    "identity.denied_usernames": "amp&ersand: user #tag"
+  }
+}
+EA_EXPECT_EOF
+
+    _ea_verify_case "YAML-significant-strings render" "$render" "$expect"
+    _ea_raw_filter_checks "$xmlonly"
+}
+
+# `&`-in-DN case (plan §18/§37 item 10/§47): directory values containing
+# literal "&", "<", and ">" must come out of the ClickHouse XML with each
+# character escaped exactly once — "&amp;", "&lt;", "&gt;" — never
+# double-escaped ("&amp;amp;", "&amp;lt;", "&amp;gt;") and never left bare.
+# Mixing "&" with "<"/">" in one value (rather than "&" alone) is
+# deliberate: the fixed &-then-<-then-> replacement order (plan §18) matters
+# only when a value contains more than one of these characters — escaping
+# "&" alone is order-independent, so a "&"-only value cannot distinguish
+# the correct order from every buggy permutation. With "<"/">" also
+# present, a swapped order (e.g. escaping "<" before "&") introduces a new
+# literal "&" that a subsequent "&" pass would wrongly re-escape, and
+# encoding/xml decodes entities in one linear pass — so a double-escaped
+# "&amp;lt;" decodes back to the literal text "&lt;", not "<", making the
+# Go verifier's exact bind_dn/base_dn string comparison fail on any such
+# ordering bug, not only the specific &/< swap named in this file's
+# doneWhen check.
+_ea_case_ampersand_dn() {
+    local values="$RUN_TMP_DIR/values-ampersand-dn.yaml"
+    local render="$RUN_TMP_DIR/render-ampersand-dn.yaml" xmlonly="$RUN_TMP_DIR/xmlonly-ampersand-dn.yaml" expect="$RUN_TMP_DIR/expect-ampersand-dn.json"
+
+    cat > "$values" <<'EA_VALUES_EOF'
+ldap:
+  user_base_dn: 'ou=R&D<Ops>,dc=altinity,dc=internal'
+  group_base_dn: 'ou=Ops&Sec>Team,dc=altinity,dc=internal'
+EA_VALUES_EOF
+
+    _ea_render_full "$render" -f "$values" || return
+    _ea_render_xmlonly "$xmlonly" -f "$values" || return
+
+    cat > "$expect" <<'EA_EXPECT_EOF'
+{
+  "expect_host": "t-ch-oauth-ldap.default.svc.cluster.local",
+  "roundtrip": {
+    "ldap.user_base_dn": "ou=R&D<Ops>,dc=altinity,dc=internal",
+    "ldap.group_base_dn": "ou=Ops&Sec>Team,dc=altinity,dc=internal"
+  }
+}
+EA_EXPECT_EOF
+
+    _ea_verify_case "&/</>-in-DN render" "$render" "$expect"
+    _ea_raw_filter_checks "$xmlonly"
+
+    # Case-specific raw-escaping checks beyond the generic filter checks
+    # above: each special character must appear escaped exactly once, never
+    # doubly escaped, and never bare/unescaped.
+    assert_match "$xmlonly" 'ou=R&amp;D&lt;Ops&gt;,' F
+    assert_not_match "$xmlonly" '&amp;amp;' F
+    assert_not_match "$xmlonly" '&amp;lt;' F
+    assert_not_match "$xmlonly" '&amp;gt;' F
+    assert_not_match "$xmlonly" 'R&D<' F
+    assert_not_match "$xmlonly" 'D<Ops' F
+    assert_not_match "$xmlonly" 'Ops>,' F
+
+    assert_match "$xmlonly" 'ou=Ops&amp;Sec&gt;Team,' F
+    assert_not_match "$xmlonly" 'Sec>Team' F
+}
+
+# Custom namespace + clusterDomain case (plan §16/§37 item 7/§47): proves
+# both .Release.Namespace and .Values.clusterDomain participate in the
+# generated ClickHouse Service hostname, not just one of them or a
+# hardcoded default.
+_ea_case_namespace_domain() {
+    local render="$RUN_TMP_DIR/render-namespace-domain.yaml" xmlonly="$RUN_TMP_DIR/xmlonly-namespace-domain.yaml" expect="$RUN_TMP_DIR/expect-namespace-domain.json"
+
+    _ea_render_full "$render" --namespace analytics --set clusterDomain=k8s.example || return
+    _ea_render_xmlonly "$xmlonly" --namespace analytics --set clusterDomain=k8s.example || return
+
+    printf '%s\n' '{"expect_host":"t-ch-oauth-ldap.analytics.svc.k8s.example","roundtrip":{}}' > "$expect"
+
+    _ea_verify_case "--namespace analytics --set clusterDomain=k8s.example render" "$render" "$expect"
+    _ea_raw_filter_checks "$xmlonly"
+}
+
+# --- public entry point ------------------------------------------------------
+
+# run_embedded_assertions
+# See the file header for the full contract. Renders all four cases above,
+# verifies each with the generated Go verifier plus the raw filter-escaping
+# checks, and returns non-zero iff any of that work added a new failure to
+# $GATE_FAILURES (the shared counter from common.sh, never reset here).
+run_embedded_assertions() {
+    _ea_require_env || return 1
+
+    local start_failures="${GATE_FAILURES:-0}"
+
+    note "embedded-assertions: generating structural verifier at $RUN_TMP_DIR/verifier/main.go"
+    _ea_write_verifier
+
+    _ea_case_default
+    _ea_case_special_chars
+    _ea_case_ampersand_dn
+    _ea_case_namespace_domain
+
+    local end_failures="${GATE_FAILURES:-0}"
+    if [ "$end_failures" -gt "$start_failures" ]; then
+        fail "embedded-assertions: $((end_failures - start_failures)) embedded-content assertion(s) failed"
+        return 1
+    fi
+
+    pass "embedded-assertions: all embedded-content (config.yaml/ldap.xml) assertions passed"
+    return 0
+}
