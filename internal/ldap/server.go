@@ -27,7 +27,7 @@ import (
 // dependency (see third_party/ldapserver/server.go's doc comments: zero
 // disables the deadline) — leaving them at their Go zero value here would
 // mean an unauthenticated client that declares a message body up to
-// third_party/ldapserver/packet.go's 1 MiB maxMessageBodyLength cap, then
+// third_party/ldapserver/packet.go's 64 KiB maxMessageBodyLength cap, then
 // never finishes sending it, pins that connection's goroutine, buffer, and
 // file descriptor indefinitely: client.serve() blocks forever inside
 // io.ReadFull with no deadline to interrupt it. This is the same class of
@@ -267,7 +267,15 @@ func (hs *handlerSource) GetHandler() ldapserver.Handler {
 	// fallback keeps running unmodified — see unsupported.go.
 	routes.NotFound(h.handleNotFound)
 
-	return routes
+	// Wrap the RouteMux in the unsupported-critical-control guard (see
+	// controls.go): every request on this connection reaches
+	// criticalControlGuard.ServeLDAP first, which delegates to routes
+	// unchanged unless the request carries an unsupported control with
+	// criticality=true, in which case it never reaches routes at all. This
+	// is also what lets the guard intercept Abandon/Cancel before RouteMux's
+	// own built-in fallback for either (route.go) ever runs — see
+	// controls.go's criticalControlGuard doc for why that ordering matters.
+	return &criticalControlGuard{session: h.session, next: routes}
 }
 
 // connectionHandler owns everything specific to exactly one accepted LDAP
