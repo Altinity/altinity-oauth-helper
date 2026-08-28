@@ -1,0 +1,49 @@
+# ch-oauth-ldap standalone LDAP server image. Built by
+# scripts/build-ch-oauth-ldap-image.sh (manual, multi-arch) or
+# .github/workflows/build-ch-oauth-ldap.yml (push-to-main, multi-arch): both
+# cross-compile a statically-linked binary into a private temporary build
+# context alongside a copy of this Dockerfile, then `docker build` from that
+# context with legacy DOCKER_BUILDKIT=0 (some sandboxed docker proxies refuse
+# the privileged container buildkit needs for cross-arch) — never against the
+# repository checkout itself, so no `ch-oauth-ldap` binary is ever produced
+# in the repo root.
+#
+# alpine:3.24 is pinned (not "latest") to match this repo's existing
+# integration-runtime convention; see integration/clickhouse/README.md.
+FROM alpine:3.24
+
+RUN apk --no-cache add ca-certificates
+
+# The Deployment's preStop hook (helm/ch-oauth-ldap) shells out to
+# /bin/sleep for a best-effort endpoint-withdrawal delay before SIGTERM
+# closes the LDAP listener; fail the image build loudly if a future base
+# image ever drops it rather than fail silently at pod termination.
+RUN test -x /bin/sleep
+
+# The binary is compiled OUTSIDE this Dockerfile (see the build script/
+# workflow above) and supplied by the build context — never built in-image.
+#
+# File mode: COPY preserves the context file's mode and the file is owned by
+# root in the image, while the process runs as UID 65532 (USER below). The
+# binary therefore MUST be world-readable+executable (0755) in the build
+# context — a private umask on the build host (the manual script runs under
+# `umask 077`) would otherwise yield a 0700 binary that builds fine and then
+# fails to exec at container start. Both build paths chmod 0755 explicitly;
+# the check below fails the image build loudly if the mode is still wrong.
+# (`COPY --chmod` is not used because the legacy DOCKER_BUILDKIT=0 builder
+# rejects it.)
+COPY ch-oauth-ldap /bin/ch-oauth-ldap
+RUN stat -c '%a' /bin/ch-oauth-ldap | grep -Eq '^[0-7]?[0-7][0-7][57]$'
+
+LABEL org.opencontainers.image.source="https://github.com/Altinity/altinity-oauth-helper"
+
+# Matches the chart's pinned pod security context (runAsUser/runAsGroup
+# 65532, runAsNonRoot: true) — see helm/ch-oauth-ldap/templates/deployment.yaml.
+USER 65532:65532
+
+# The LDAP listener is fixed to :3389 (never a privileged port, so no
+# NET_BIND_SERVICE capability is needed); the chart's Service maps
+# ClusterIP port 389 -> container port 3389.
+EXPOSE 3389
+
+ENTRYPOINT ["/bin/ch-oauth-ldap"]

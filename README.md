@@ -182,10 +182,28 @@ What the fixture proves, and what you should expect in production:
 
   `integration/clickhouse/lib/expectations.sh` records these per-version
   outcomes and the suite fails loudly if ClickHouse's behavior changes.
-- **This validates plain LDAP only.** TLS, LDAPS and StartTLS are out of MVP
-  scope, so the JWT crosses the ClickHouse→helper hop in clear text. Keep the
-  helper on a trusted internal network (ClusterIP-only, NetworkPolicy) or
-  co-located on loopback; never expose it publicly.
+- **⚠️ This validates plain LDAP only — the OAuth bearer travels in clear
+  text.** TLS, LDAPS and StartTLS are out of MVP scope, so the JWT (the
+  OAuth bearer) crosses the ClickHouse→helper hop as the *LDAP simple-bind password*,
+  in clear text, on the wire between ClickHouse and `ch-oauth-ldap`. This is a
+  **deliberate MVP deviation from `ADR #16`**
+  (which calls for a confidential transport), not an oversight or an
+  unresolved planning question. Boris Tyshkevich (`@BorisTyshkevich`) is the
+  **named risk owner** who accepted this exception for the environment-level
+  deployment described below.
+  - The `ch-oauth-ldap` Service is **internal-only**: it is hard-coded to
+    `type: ClusterIP`, there is no Ingress/LoadBalancer/NodePort knob, and the
+    chart renders a source-restricting `NetworkPolicy` by default.
+  - **`NetworkPolicy is not transport confidentiality`** — it is a
+    reachability control (who may open a TCP connection to the pod), not
+    encryption. A NetworkPolicy does nothing to stop anyone already on the
+    permitted path from reading the bearer off the wire.
+  - The paths to remove this exception are **TLS** on the LDAP listener (not
+    yet implemented; see `ADR #16`) or running the helper **co-located on
+    loopback** as a sidecar instead of as an environment-level service (the
+    same trust model `ch-jwt-verify` already uses, below). Until one of those
+    lands, keep `ch-oauth-ldap` on a trusted internal network and never
+    expose it publicly.
 
 [ch-ldap]: https://clickhouse.com/docs/operations/external-authenticators/ldap
 [ch-79099]: https://github.com/ClickHouse/ClickHouse/pull/79099
@@ -213,20 +231,38 @@ for the failure-mode cheatsheet.
 
 ### Deploy alongside ClickHouse
 
-The Helm chart in [`helm/ch-jwt-verify/`](helm/ch-jwt-verify/) renders two
-ConfigMaps (sidecar YAML, CH `<http_authentication_servers>` XML) and a
-reusable container fragment you splice into your CH pod spec. It does **not**
-render a Deployment/StatefulSet — the sidecar must share a pod with
-ClickHouse so the loopback trust model holds.
+The two binaries deploy in two different trust models — pick the one that
+matches which binary you're running:
 
-See [`helm/ch-jwt-verify/README.md`](helm/ch-jwt-verify/README.md) for the
-wiring (including the clickhouse-operator `default` emptyDir quirk).
+- **`ch-jwt-verify` — colocated sidecar.** The chart in
+  [`helm/ch-jwt-verify/`](helm/ch-jwt-verify/) renders two ConfigMaps
+  (sidecar YAML, CH `<http_authentication_servers>` XML) and a reusable
+  container fragment you splice into your CH pod spec. It does **not**
+  render a Deployment/StatefulSet — the sidecar must share a pod with
+  ClickHouse so the loopback trust model holds (see
+  [`helm/ch-jwt-verify/README.md`](helm/ch-jwt-verify/README.md) for the
+  wiring, including the clickhouse-operator `default` emptyDir quirk).
+- **`ch-oauth-ldap` — environment-level Deployment+ClusterIP.** The
+  standalone chart in [`helm/ch-oauth-ldap/`](helm/ch-oauth-ldap/) renders a
+  two-replica Deployment and an internal-only `ClusterIP` Service on LDAP
+  port 389, plus a default-on source-restricting `NetworkPolicy`, a PDB, and
+  the two ConfigMaps (helper config, CH LDAP XML) — see
+  [`helm/ch-oauth-ldap/README.md`](helm/ch-oauth-ldap/README.md) for values,
+  the validation contract, and the clear-text-bearer risk acceptance
+  recapped above.
 
 For worked end-to-end examples (Superset, Grafana, …), see
 [`examples/`](examples/) — the [`examples/README.md`](examples/README.md)
 matrix tracks which consumer × deploy-style combinations are working.
 
 ## Building images
+
+There are two independent image publication pipelines, one per binary. Both
+push to `ghcr.io`, are multi-arch (amd64+arm64), and only ever push
+immutable, SHA-suffixed tags — neither pipeline is a PR-time gate; both
+trigger only on push to `main` (plus manual `workflow_dispatch`).
+
+### `ch-jwt-verify`
 
 **CI (default):** [`.github/workflows/build-ch-jwt-verify.yml`](.github/workflows/build-ch-jwt-verify.yml)
 builds and pushes automatically on every push to `main` that touches
@@ -252,6 +288,39 @@ QEMU instead of Docker Desktop's built-in emulation) — use this locally when
 you need a build from an unmerged branch or a sandbox without registry push
 access.
 
+### `ch-oauth-ldap`
+
+**CI (default):** [`.github/workflows/build-ch-oauth-ldap.yml`](.github/workflows/build-ch-oauth-ldap.yml)
+builds and pushes automatically on every push to `main` that touches
+`cmd/ch-oauth-ldap/**`, `internal/**`, `third_party/**`, `go.mod`/`go.sum`,
+or `Dockerfile.ch-oauth-ldap` — tag `ldap-<short-sha>`, multi-arch
+(amd64+arm64), pushed to `ghcr.io/altinity/ch-oauth-ldap` using the repo's
+own `GITHUB_TOKEN`. Trigger a one-off build with a custom tag prefix (default
+`ldap`, still emitted as `<prefix>-<short-sha>`) via **Actions → Run
+workflow**'s `tag_prefix` input.
+
+**Manual / local:**
+
+```bash
+scripts/build-ch-oauth-ldap-image.sh
+# → ghcr.io/altinity/ch-oauth-ldap:ldap-<short-sha>
+#   (multi-arch manifest + per-arch -amd64 / -arm64 tags)
+```
+
+Mirrors `scripts/build-image.sh`'s exact conventions — legacy
+`DOCKER_BUILDKIT=0`, a per-arch base-image pull before each build, static
+binaries stamped with `-X main.version=<final-tag>`, per-arch push, and
+multi-arch manifest assembly — but never compiles into the checkout: each
+architecture is built from a throwaway `$TMPDIR` context containing only that
+arch's binary and `Dockerfile.ch-oauth-ldap` (copied in as `Dockerfile`).
+Nor does it ever compile the live working tree: the binary and Dockerfile
+both come from an export of exactly `HEAD` (`git archive HEAD` into that
+same throwaway context), so an untracked, `.gitignore`d, or
+`--assume-unchanged`-hidden local modification can never end up baked into
+a published tag — a `git status` check alone cannot see all three. The
+script also refuses outright to publish any `ldap-<sha>` tag (or per-arch
+sub-tag) that already exists in the registry; there is no force override.
+
 ## Layout
 
 ```
@@ -260,10 +329,15 @@ cmd/ch-oauth-ldap/     # the standalone LDAPv3 server (main, config)
 internal/ldap/         # LDAP session/DN/filter/entry primitives + Bind/Search handlers
 integration/clickhouse/ # real-ClickHouse acceptance suite for ch-oauth-ldap (manual; see its README)
 helm/ch-jwt-verify/    # Helm chart (ConfigMaps + container fragment, no Deployment)
-scripts/build-image.sh # multi-arch image build & push
+helm/ch-oauth-ldap/    # Helm chart (Deployment + ClusterIP Service + NetworkPolicy + PDB + ConfigMaps)
+scripts/build-image.sh # multi-arch image build & push (ch-jwt-verify)
+scripts/build-ch-oauth-ldap-image.sh # multi-arch image build & push (ch-oauth-ldap)
 examples/              # _platform shared compose base, plus curl / superset /
                        # grafana consumer overlays (see examples/README.md)
 Dockerfile             # consumed by scripts/build-image.sh
+Dockerfile.ch-oauth-ldap # consumed by scripts/build-ch-oauth-ldap-image.sh
+.github/workflows/build-ch-jwt-verify.yml  # push-to-main image publication (ch-jwt-verify)
+.github/workflows/build-ch-oauth-ldap.yml  # push-to-main image publication (ch-oauth-ldap)
 ```
 
 JWKS fetching, JWT validation, and the shared identity-policy helpers live

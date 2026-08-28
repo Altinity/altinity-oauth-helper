@@ -1,0 +1,260 @@
+name: Build & push ch-oauth-ldap image
+
+# Mirrors build-ch-jwt-verify.yml's structure (per-arch cross-compile, build+push,
+# multi-arch manifest under ghcr.io/altinity/ch-oauth-ldap) but with stricter
+# context rules from the phase-4 plan: the binary is compiled directly into a
+# $RUNNER_TEMP-owned per-arch directory (never into the checkout), and the
+# Docker build context is that owned temp directory (never `.`). Only an
+# immutable `<prefix>-<7-char-sha>` tag is ever pushed; `main`/`latest` are
+# never used as tags.
+#
+# Tag-republication guard: before any per-arch build/push runs, this
+# refuses outright if `<prefix>-<sha>` OR that arch's own
+# `<prefix>-<sha>-<arch>` sub-tag already exists in the registry -- there
+# is no force override. Each matrix job checks both the shared final tag
+# and its own per-arch sub-tag (mirroring scripts/build-ch-oauth-ldap-
+# image.sh's per-arch loop), so a retry after a partial run (e.g. amd64
+# pushed, then the manifest job failed before assembling the final tag)
+# cannot silently overwrite the already-published amd64 sub-tag just
+# because the final tag still doesn't exist. A rebuild of the same commit
+# is not guaranteed to reproduce the same manifest byte for byte
+# (Dockerfile.ch-oauth-ldap's `alpine:3.24` base floats within its minor
+# version, `apk add ca-certificates` is unpinned, and the toolchain can
+# drift), so silently republishing an already-published tag risks moving
+# it to a different manifest. Re-run from a new commit, or dispatch with a
+# different `tag_prefix`.
+#
+# Review pass 4 hardened this guard twice more. (1) Fail closed on doubt:
+# a bare nonzero exit from `docker buildx imagetools inspect` no longer
+# means "tag absent" -- an auth/transport/registry error looks identical to
+# a genuine absence on exit code alone (ghcr.io itself returns "denied",
+# not a not-found error, for an unauthenticated/under-scoped inspect of a
+# tag that IS genuinely absent), so every guard step now requires an
+# unambiguous "not found" signature in the inspect output before treating
+# a tag as absent; anything else aborts the job. (2) Non-atomicity: the
+# per-arch `build` job's guard only ever inspected the shared final tag
+# once, before ITS OWN push -- the separate `manifest` job that later
+# assembles that tag never rechecked it, leaving a window (the full
+# duration of both arches' builds) in which a concurrent publisher (an
+# Actions run against the same commit, or a manual
+# `scripts/build-ch-oauth-ldap-image.sh` run -- the two are disjoint
+# processes with no shared lock) could publish the tag first. The
+# `manifest` job now rechecks immediately before `docker buildx imagetools
+# create` mutates it. Full atomicity across two disjoint publisher
+# processes still is not achievable without a registry-side conditional
+# create or a distributed lock (out of scope here); this recheck narrows
+# the race window from "the whole build" to "immediately before the
+# mutating call" for both the per-arch guard and this one.
+#
+# Read-only post-publication note (plan §26): the first time this workflow
+# publishes an image, do NOT assume the GHCR package's repository linkage,
+# its exact manifest contents, or whether anonymous/unauthenticated pulls
+# succeed. Those must be verified read-only against the actual GHCR package
+# after publication, and reported as observed. This workflow and this repo
+# never mutate GHCR package visibility automatically — that remains an
+# explicit, separate, human-driven registry action.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/ch-oauth-ldap/**"
+      - "internal/**"
+      - "third_party/**"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile.ch-oauth-ldap"
+      - ".github/workflows/build-ch-oauth-ldap.yml"
+  workflow_dispatch:
+    inputs:
+      tag_prefix:
+        description: "Tag prefix (final tag: <prefix>-<short-sha>)"
+        required: false
+        default: "ldap"
+
+concurrency:
+  group: build-ch-oauth-ldap-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: altinity/ch-oauth-ldap
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: vars
+        # The dispatch input reaches the shell only through `env:` (never
+        # inlined into `run:`), and is shape-checked before use.
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+        run: |
+          prefix="${TAG_PREFIX:-ldap}"
+          if ! [[ "$prefix" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}$ ]]; then
+            echo "invalid tag_prefix" >&2
+            exit 1
+          fi
+          echo "tag=${prefix}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create owned build context
+        run: mkdir -p "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}"
+
+      - name: Cross-compile static binary into owned temp context
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build \
+            -ldflags="-s -w -X main.version=${TAG}" \
+            -o "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/ch-oauth-ldap" \
+            ./cmd/ch-oauth-ldap
+          # COPY preserves the context mode and the image runs as UID 65532:
+          # the binary must be 0755 (see Dockerfile.ch-oauth-ldap).
+          chmod 0755 "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/ch-oauth-ldap"
+
+      - name: Copy Dockerfile into owned temp context
+        run: cp Dockerfile.ch-oauth-ldap "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/Dockerfile"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.arch }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to republish an already-published tag
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # Review pass 4: a bare truthiness check on `docker buildx
+          # imagetools inspect`'s exit code cannot tell "tag genuinely
+          # absent" apart from an auth/transport/registry error -- both
+          # come back nonzero, and treating every nonzero as "absent" lets
+          # an operational failure silently wave publication through
+          # (some registries make this worse: an unauthenticated/
+          # under-scoped inspect against ghcr.io returns "denied" for a
+          # tag that's genuinely absent too, so exit code alone is not
+          # enough on every registry). Require an unambiguous "not found"
+          # signature in the inspect output before treating a tag as
+          # absent; anything else aborts the job rather than proceeding --
+          # fail closed on doubt, per the tag-immutability guarantee in
+          # helm/ch-oauth-ldap/README.md.
+          FULL="${REGISTRY}/${IMAGE}"
+          NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
+          for CANDIDATE in "${FULL}:${TAG}" "${FULL}:${TAG}-${ARCH}"; do
+            # errexit-safe capture: this step runs under GitHub-hosted
+            # runners' `bash --noprofile --norc -eo pipefail`. A genuinely
+            # absent tag is the normal first-publication case and makes
+            # `docker buildx imagetools inspect` exit nonzero -- a bare
+            # `OUT=$(...); RC=$?` would die at the assignment under `-e`
+            # before `RC=$?` ever runs, so the classification below never
+            # executes and first publication is always blocked. Wrapping
+            # the assignment as the condition of an `if` suspends errexit
+            # for it, exactly like this script's `check_tag_absent` (see
+            # scripts/build-ch-oauth-ldap-image.sh) relies on `if !
+            # check_tag_absent` for the same reason.
+            if OUT=$(docker buildx imagetools inspect "${CANDIDATE}" 2>&1); then
+              RC=0
+            else
+              RC=$?
+            fi
+            if [ "$RC" -eq 0 ]; then
+              echo "refusing to publish: ${CANDIDATE} already exists in the registry and would be silently moved to a possibly different manifest. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
+              exit 1
+            fi
+            if ! printf '%s' "$OUT" | grep -qiE "$NOT_FOUND_PATTERN"; then
+              echo "refusing to publish: could not determine whether ${CANDIDATE} already exists in the registry -- 'docker buildx imagetools inspect' exited ${RC} with a response that is not a recognized \"not found\" signature, so this is being treated as an operational/transport/auth failure rather than proof the tag is absent. Fix the underlying registry-inspection error and re-run. Raw output:" >&2
+              printf '%s\n' "$OUT" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build & push per-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ runner.temp }}/ch-oauth-ldap-${{ matrix.arch }}
+          file: ${{ runner.temp }}/ch-oauth-ldap-${{ matrix.arch }}/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.tag }}-${{ matrix.arch }}
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to republish an already-published tag (final recheck)
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          FULL: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+        run: |
+          # Review pass 4: the per-arch `build` job's own guard (above)
+          # inspected this shared final tag once, before that arch's push --
+          # but this job runs separately, after BOTH arches finished
+          # building and pushing, which is exactly the window a concurrent
+          # publisher (another Actions run, or someone running
+          # scripts/build-ch-oauth-ldap-image.sh by hand) on the same
+          # commit could have published this tag in. Recheck immediately
+          # before `docker buildx imagetools create` mutates it, with the
+          # same fail-closed-on-ambiguous-error handling as the per-arch
+          # guard (see its comment for the ghcr.io "denied" rationale).
+          #
+          # TAG/FULL come in through `env:` (not inlined `${{ }}` in the
+          # script body) so this step's body is plain bash -- identical in
+          # shape to the per-arch guard step -- and can be extracted from
+          # the workflow YAML and executed standalone by the gate.
+          NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
+          # errexit-safe capture -- see the per-arch guard step's comment
+          # above for why a bare `OUT=$(...); RC=$?` would block every
+          # first publication under this runner's `bash -eo pipefail`.
+          if OUT=$(docker buildx imagetools inspect "${FULL}:${TAG}" 2>&1); then
+            RC=0
+          else
+            RC=$?
+          fi
+          if [ "$RC" -eq 0 ]; then
+            echo "refusing to publish: ${FULL}:${TAG} already exists in the registry and would be silently moved to a possibly different manifest -- it must have been published by another run while this job's per-arch builds were in progress. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$OUT" | grep -qiE "$NOT_FOUND_PATTERN"; then
+            echo "refusing to publish: could not determine whether ${FULL}:${TAG} already exists in the registry -- 'docker buildx imagetools inspect' exited ${RC} with a response that is not a recognized \"not found\" signature, so this is being treated as an operational/transport/auth failure rather than proof the tag is absent. Fix the underlying registry-inspection error and re-run. Raw output:" >&2
+            printf '%s\n' "$OUT" >&2
+            exit 1
+          fi
+
+      - name: Assemble multi-arch manifest
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          FULL="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          docker buildx imagetools create -t "${FULL}:${TAG}" \
+            "${FULL}:${TAG}-amd64" \
+            "${FULL}:${TAG}-arm64"
+          echo "Pushed ${FULL}:${TAG} (amd64+arm64)"

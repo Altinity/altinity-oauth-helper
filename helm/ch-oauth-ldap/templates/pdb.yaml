@@ -1,0 +1,21 @@
+{{- include "ch-oauth-ldap.validate" . -}}
+{{/*
+Only meaningful with more than one replica; dev's single-replica override
+(values-dev.yaml) intentionally omits this resource. Covers voluntary
+disruption only (see README.md) — it does not protect against node loss,
+which the best-effort anti-affinity in templates/deployment.yaml does not
+guarantee either.
+*/}}
+{{- if gt (.Values.replicaCount | int) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ch-oauth-ldap.fullname" . | quote }}
+  labels:
+    {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "ch-oauth-ldap.selectorLabels" . | nindent 6 }}
+{{- end }}

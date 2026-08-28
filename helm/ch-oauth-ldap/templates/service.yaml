@@ -1,0 +1,25 @@
+{{- include "ch-oauth-ldap.validate" . -}}
+{{/*
+Fixed internal-only ClusterIP Service. No type/nodePort/loadBalancer/
+externalIPs knobs exist — the recorded security decision (see
+values.yaml/README.md) is that the OAuth bearer travels in clear text as
+the LDAP bind password, so this must never be reachable outside the
+cluster. Exactly one port: LDAP 389 -> container port 3389 (named `ldap`,
+see templates/deployment.yaml).
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ch-oauth-ldap.fullname" . | quote }}
+  labels:
+    {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  sessionAffinity: None
+  selector:
+    {{- include "ch-oauth-ldap.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: ldap
+      port: 389
+      targetPort: ldap
+      protocol: TCP
