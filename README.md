@@ -1,8 +1,17 @@
 # altinity-oauth-helper
 
-OAuth helpers for ClickHouse-fronted deployments. The first (and currently
-only) helper is `ch-jwt-verify`: a tiny HTTP server that ClickHouse calls from
-its `<http_authentication>` handler to validate JWT bearers.
+OAuth helpers for ClickHouse-fronted deployments. Two binaries ship today:
+
+- **`ch-jwt-verify`** — a tiny HTTP server that ClickHouse calls from its
+  `<http_authentication_servers>` handler to validate JWT bearers repacked as
+  a Basic-auth password.
+- **`ch-oauth-ldap`** — a standalone LDAPv3 server that authenticates a
+  simple Bind's password as a JWT and exposes the caller's mapped ClickHouse
+  roles as synthetic LDAP groups, for consumers that speak LDAP rather than
+  HTTP Basic.
+
+Both share the same underlying JWT verification and identity-policy logic
+from [`github.com/altinity/go-mcp-oauth-sdk`](https://github.com/altinity/go-mcp-oauth-sdk).
 
 ## Why this exists
 
@@ -70,6 +79,41 @@ CREATE USER "alice@example.com"
 (The grammar token is `http`, not `http_authenticator` — the latter is
 rejected with `SYNTAX_ERROR`.)
 
+## ch-oauth-ldap
+
+A standalone LDAPv3 server for consumers that authenticate over LDAP rather
+than HTTP Basic. It speaks only simple Bind and a narrowly restricted Search
+— there is no generic directory behind it:
+
+- **LDAP-only.** No HTTP endpoint, no TLS/LDAPS/StartTLS, no SASL, no
+  Add/Modify/Delete/Compare — those fail closed.
+- **The simple-Bind password is the JWT.** The Bind DN's leading RDN
+  (`uid=<username>,<user_base_dn>` by default) carries the requested
+  username; the password field carries the raw JWT, exactly as
+  `ch-jwt-verify` expects it packed into a Basic-auth password.
+- **The shared verifier owns authentication and identity policy.** Signature,
+  `iss`/`aud`/`exp`, and identity-policy checks (verified-email, allowed
+  domains, deny-list) are the same `internal/verification` + `internal/roles`
+  pipeline `ch-jwt-verify` uses — the LDAP layer does not reimplement any of
+  it, and every failure class collapses into one generic `invalidCredentials`
+  response so no failure reason is disclosed over the wire.
+- **Roles are derived once at Bind and snapshotted** on that connection. A
+  subsequent Search never re-verifies the JWT or recomputes roles — it reads
+  only the stored snapshot.
+- **Search is restricted to the caller's own membership.** A same-connection
+  Search against the configured group base, with the documented
+  `(&(objectClass=groupOfNames)(member=<bound DN>))` filter shape, returns one
+  synthetic `groupOfNames` entry per mapped role (`cn` gets a configurable
+  transport prefix, e.g. `clickhouse_ch_engineer`); anything else — another
+  member's DN, a different base/scope/filter — is rejected without exposing
+  data.
+
+This is the **standalone phase-2 LDAP server** described above. It has not
+yet been wired up against a real ClickHouse instance — real ClickHouse 24.8
+LDAP configuration and end-to-end interoperability testing is deferred to
+phase 3. Treat it today as a protocol-correct LDAP server you can Bind and
+Search against directly, not yet as a drop-in ClickHouse LDAP backend.
+
 ## Quick start
 
 ### Run locally against an existing IdP
@@ -134,6 +178,8 @@ access.
 
 ```
 cmd/ch-jwt-verify/     # the sidecar binary (main, config, settings, verify)
+cmd/ch-oauth-ldap/     # the standalone LDAPv3 server (main, config)
+internal/ldap/         # LDAP session/DN/filter/entry primitives + Bind/Search handlers
 helm/ch-jwt-verify/    # Helm chart (ConfigMaps + container fragment, no Deployment)
 scripts/build-image.sh # multi-arch image build & push
 examples/              # _platform shared compose base, plus curl / superset /

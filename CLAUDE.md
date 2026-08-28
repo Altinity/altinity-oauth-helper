@@ -1,17 +1,28 @@
 # Contributor guide — altinity-oauth-helper
 
 Go module providing OAuth/JWT helpers for ClickHouse-fronted deployments.
-The only shipped binary today is `ch-jwt-verify`: a sidecar HTTP server that
-ClickHouse's `<http_authentication_servers>` calls to validate a JWT that
-upstream consumers have repacked as an HTTP Basic password
-(`base64(email:jwt)`). See `README.md` for the full wire diagram and
-rationale (OSS ClickHouse has no native Bearer/JWT auth path; Antalya does).
+Two binaries ship today:
+
+- `ch-jwt-verify`: a sidecar HTTP server that ClickHouse's
+  `<http_authentication_servers>` calls to validate a JWT that upstream
+  consumers have repacked as an HTTP Basic password (`base64(email:jwt)`).
+- `ch-oauth-ldap`: a standalone LDAPv3 server where the simple-Bind password
+  is the JWT; it authenticates via the same shared verifier and exposes the
+  caller's mapped ClickHouse roles as synthetic LDAP groups over a
+  same-connection restricted Search. It is the standalone phase-2 protocol
+  server — real ClickHouse 24.8 configuration/interoperability is deferred
+  to phase 3, not yet implemented here.
+
+See `README.md` for the full wire diagram and rationale (OSS ClickHouse has
+no native Bearer/JWT auth path; Antalya does).
 
 ## Repo map
 
 | Path | What |
 |---|---|
 | `cmd/ch-jwt-verify/` | the sidecar binary — `main.go` (CLI/server wiring), `config.go` (YAML config), `settings.go`, `verify.go` (the `/verify` handler: JWT validation, cache-key binding, identity policy), `verify_test.go` |
+| `cmd/ch-oauth-ldap/` | the standalone LDAPv3 server binary — `main.go` (CLI/signal-context/lifecycle wiring: verifier + role pipeline + `internal/ldap.Server`), `config.go` (YAML config, defaults, fail-startup validation, conversion into `verification.Config`/`identity.Config`/`roles.Config`/`internal/ldap.Config`), `config_test.go`, `main_test.go` |
+| `internal/ldap/` | LDAP protocol package consumed by `cmd/ch-oauth-ldap` — `server.go` (lifecycle/handler-source wiring, dependency-logger suppression), `session.go` (per-connection authenticated state), `dn.go` (RFC 4514 Bind-DN parsing/validation), `filter.go` (structural Search-filter authorization), `bind.go`/`search.go`/`unsupported.go` (the LDAP operation handlers), `entry.go` (synthetic `groupOfNames` rendering), plus `*_test.go` including a real-TCP `protocol_test.go` and `adversarial_test.go` |
 | `cmd/synthetic-idp/` | a controllable in-process test IdP (imported from altinity-mcp) used by examples/local dev — not part of the shipped image |
 | `helm/ch-jwt-verify/` | Helm chart — ConfigMaps (sidecar config, CH `http_authentication_servers` XML) + a reusable container fragment (`_helpers.tpl`) for sidecar mode, plus a standalone Deployment+Service mode; see `helm/ch-jwt-verify/README.md` |
 | `examples/` | consumer × deploy-style recipes (`_platform` is the shared Dex+Postgres+ClickHouse+sidecar base every consumer overlay layers on); `examples/README.md` tracks the working/planned/broken matrix |
@@ -28,7 +39,7 @@ fork that logic — extend the SDK instead when the need is generic (not
 
 ## Build & test
 
-- `go build ./...` — compiles both binaries.
+- `go build ./...` — compiles all binaries (`ch-jwt-verify`, `ch-oauth-ldap`, `synthetic-idp`).
 - `go test ./...` — the test suite; `cmd/ch-jwt-verify/verify_test.go` spins
   up an in-process test IdP (RSA-signed JWTs against an httptest JWKS
   server) rather than depending on any shared fixture, since the sidecar is
