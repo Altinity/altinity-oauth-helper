@@ -59,7 +59,14 @@ ENV_FILE="$RUN_TMP_DIR/compose.env"
 : >"$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-EXPECTED_CH_VERSION="24.8.11.51285.altinitystable"
+# PHASE3_CH_IMAGE selects which ClickHouse build this run targets, defaulted
+# to the issue's pinned 24.8 baseline. EXPECTED_CH_VERSION is derived from it
+# (the tag after the colon) rather than hardcoded, so scenario A's own
+# version-pin check and lib/expectations.sh's per-build behavioral table
+# (see that file) both stay correct for whichever build PHASE3_CH_IMAGE
+# names — run-all-builds.sh drives this same script once per known build.
+PHASE3_CH_IMAGE="${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}"
+EXPECTED_CH_VERSION="${PHASE3_CH_IMAGE#*:}"
 
 cleanup() {
     local rc=$?
@@ -92,6 +99,12 @@ log "run started; private per-run state under $RUN_TMP_DIR"
 PHASE3_CLUSTER_SECRET="$(gen_secret 32)"
 printf 'PHASE3_CLUSTER_SECRET=%s\n' "$PHASE3_CLUSTER_SECRET" >>"$ENV_FILE"
 unset PHASE3_CLUSTER_SECRET
+
+# Not a secret — written to the same env-file purely so compose.yml's
+# `${PHASE3_CH_IMAGE:-...}` substitution (docker compose reads --env-file,
+# not this process's own environment, for that) resolves to the build this
+# run actually targets.
+printf 'PHASE3_CH_IMAGE=%s\n' "$PHASE3_CH_IMAGE" >>"$ENV_FILE"
 
 # ── Sandbox/CI network-isolator compatibility fallback ────────────────────
 # Track whether the fallback below actually ran, so cleanup() knows whether
@@ -152,7 +165,7 @@ bring_up_fixture_fallback() {
         printf '      timeout: 2s\n'
         printf '      retries: 60\n'
         printf '  clickhouse-origin:\n'
-        printf '    image: altinity/clickhouse-server:24.8.11.51285.altinitystable\n'
+        printf '    image: %s\n' "$PHASE3_CH_IMAGE"
         printf '    volumes:\n'
         printf '      - %s/clickhouse/common/config.d:/etc/clickhouse-server/config.d:ro\n' "$SCRIPT_DIR"
         printf '      - %s/clickhouse/common/users.d:/etc/clickhouse-server/users.d:ro\n' "$SCRIPT_DIR"
@@ -167,7 +180,7 @@ bring_up_fixture_fallback() {
         printf '      timeout: 2s\n'
         printf '      retries: 60\n'
         printf '  clickhouse-remote:\n'
-        printf '    image: altinity/clickhouse-server:24.8.11.51285.altinitystable\n'
+        printf '    image: %s\n' "$PHASE3_CH_IMAGE"
         printf '    volumes:\n'
         printf '      - %s/clickhouse/common/config.d:/etc/clickhouse-server/config.d:ro\n' "$SCRIPT_DIR"
         printf '      - %s/clickhouse/common/users.d:/etc/clickhouse-server/users.d:ro\n' "$SCRIPT_DIR"

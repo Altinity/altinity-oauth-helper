@@ -46,7 +46,18 @@
 #     scenarios need — e.g. `scenarios/b-current-user.sh`,
 #     `scenarios/c-dynamic-roles.sh`, ..., `scenarios/i-leak-scan.sh` (the
 #     plan's own B..I letters already sort correctly; a numeric prefix
-#     works too as long as the ordering matches).
+#     works too as long as the ordering matches). Scenario H is split
+#     across two files for this reason: `scenarios/70-distributed-
+#     propagation.sh` (the base-table authorization oracle) and
+#     `scenarios/75-distributed-propagation-view.sh` (a separate,
+#     view-based oracle tracking an independent ClickHouse defect) — see
+#     lib/expectations.sh.
+#   - a scenario probing a known, tracked upstream ClickHouse behavioral
+#     difference between builds (see lib/expectations.sh) should source
+#     that file (same pattern as lib/oauth.sh: sourced by the scenario
+#     file itself, not by run.sh) and route its build-dependent assertion
+#     through `assert_propagation_outcome`/`expectation_for` rather than
+#     hardcoding a pass/fail expectation inline.
 #   - a scenario file that needs its own throwaway temp file should create
 #     it under $RUN_TMP_DIR (already private: created via `mktemp -d`
 #     after run.sh's `umask 077`) and remove it itself when it's no longer
@@ -80,6 +91,14 @@
 #   CH_LOCAL_ADMIN_PASSWORD  plaintext runtime-generated password for the
 #                           local-precedence `admin@example.com` ClickHouse
 #                           user (see bootstrap/origin.sql); unexported.
+#   PHASE3_CH_IMAGE         the ClickHouse image this run targets (default:
+#                           the issue's pinned 24.8 baseline) — set from the
+#                           environment, written into the private
+#                           --env-file for compose.yml's own substitution.
+#   EXPECTED_CH_VERSION     derived from PHASE3_CH_IMAGE (the tag after the
+#                           colon) — scenario A's own version-pin check uses
+#                           this, and so does lib/expectations.sh's
+#                           ch_build_prefix/expectation_for.
 #
 # ── Functions this file provides ──────────────────────────────────────────
 #   log MSG                          timestamped stderr log line

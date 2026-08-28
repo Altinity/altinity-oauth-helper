@@ -11,6 +11,16 @@
 -- push_external_roles_in_interserver_queries in scenario H's negative
 -- control genuinely removes authority rather than merely changing which
 -- role is reported while still allowing the read.
+--
+-- remote_probe (the base table) is read two ways from origin:
+--   - directly, via phase3.distributed_probe (bootstrap/origin.sql) — the
+--     primary scenario H oracle (scenarios/70), no view in the path;
+--   - through remote_auth_probe (this view) via
+--     phase3.distributed_auth_probe (bootstrap/origin.sql) — the
+--     expected-fail sibling oracle (scenarios/75) that reproduces a
+--     separate, view-specific ClickHouse defect. See lib/expectations.sh.
+-- Both grants below already cover both paths; no additional grant is
+-- needed for the base-table oracle.
 
 CREATE TABLE IF NOT EXISTS phase3.remote_probe
 (
