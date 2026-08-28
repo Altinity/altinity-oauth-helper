@@ -1,0 +1,24 @@
+apiVersion: v2
+name: ch-oauth-ldap
+description: |
+  Standalone LDAPv3-to-OAuth bridge for ClickHouse's LDAP user directory.
+
+  Deploys ch-oauth-ldap as an internal-only Deployment + ClusterIP Service on
+  LDAP port 389 (no public exposure, no HTTP surface). ClickHouse's LDAP
+  storage authenticates a query via simple Bind, using the caller's OAuth
+  bearer token repacked as the LDAP simple-bind password; the helper
+  verifies it against the configured JWKS/issuer and exposes the caller's
+  mapped ClickHouse roles as synthetic LDAP groups over a same-connection
+  restricted Search. This is a deliberate MVP deviation from ADR #16 (the
+  bearer travels in clear text as the LDAP bind password) — see README.md
+  for the accepted-risk rationale, the named risk owner, and TLS/loopback
+  alternatives.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/altinity/altinity-oauth-helper
+sources:
+  - https://github.com/altinity/altinity-oauth-helper
+maintainers:
+  - name: Altinity
+    url: https://altinity.com
