@@ -1,0 +1,45 @@
+<!--
+  integration/clickhouse/clickhouse/common/config.d/remote_servers.xml
+
+  Common secret-authenticated interserver cluster definition, mounted
+  identically on both clickhouse-origin and clickhouse-remote (see
+  "Interserver-secret configuration" in the phase-3 plan). Both nodes need
+  the same cluster/secret: the receiving node verifies the interserver
+  authentication hash against this same secret, and rejects the query if
+  the salt/secret is missing or does not match.
+
+  No fixed <user>/<password> replica credentials are configured — identity
+  crosses the interserver boundary via the secret plus the initiating
+  username/external-role names (see "Why the remote node has the LDAP
+  directory but not helper connectivity").
+
+  The secret itself is never committed. run.sh generates a fresh value each
+  run and passes it into both containers' PHASE3_CLUSTER_SECRET environment
+  variable (via compose.yml, itself populated from a private, mode-0600
+  per-run env file — never an exported shell variable, never a `docker -e`
+  literal, never committed here).
+
+  Contingency (see "Interserver-secret configuration" in the plan): if a
+  later pinned 24.8 Altinity Stable build ever rejects `from_env` on
+  <secret>, the documented fallback is to render an otherwise-identical
+  temporary XML file under the runner's private $TMPDIR-rooted directory,
+  with the secret value substituted in literally, and bind-mount that
+  generated file over this path instead — never commit a fixed secret here.
+  As of altinity/clickhouse-server:24.8.11.51285.altinitystable, `from_env`
+  on <secret> was verified to work directly (single-node config-acceptance
+  probe: SELECT 1 succeeds with the config below and PHASE3_CLUSTER_SECRET
+  set), so that fallback is not currently exercised.
+-->
+<clickhouse>
+    <remote_servers>
+        <phase3_remote>
+            <secret from_env="PHASE3_CLUSTER_SECRET"/>
+            <shard>
+                <replica>
+                    <host>clickhouse-remote</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </phase3_remote>
+    </remote_servers>
+</clickhouse>
