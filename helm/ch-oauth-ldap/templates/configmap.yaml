@@ -2,41 +2,20 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "ch-oauth-ldap.fullname" . }}-config
+  name: {{ printf "%s-config" (include "ch-oauth-ldap.fullname" .) | quote }}
   labels: {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
 data:
   # Mounted read-only at /etc/ch-oauth-ldap/config.yaml (see
-  # templates/deployment.yaml, owned by a sibling change). Mirrors
+  # templates/deployment.yaml). The payload is built as one string by the
+  # ch-oauth-ldap.configYAML helper (templates/_helpers.tpl), which mirrors
   # cmd/ch-oauth-ldap/config.go's Config exactly: the four top-level
-  # families oauth/identity/roles/ldap, plus the chart-fixed `listen`
-  # the binary passes straight to net.Listen. Every value-derived scalar
-  # goes through `quote`; lists/maps through `toYaml`; booleans render as
-  # real YAML booleans (never quoted) so they don't corrupt the binary's
-  # own YAML parse.
-  config.yaml: |
-    oauth:
-      expected_issuer: {{ .Values.oauth.expected_issuer | quote }}
-      jwks_url: {{ .Values.oauth.jwks_url | quote }}
-      expected_audiences: {{ toYaml .Values.oauth.expected_audiences | nindent 8 }}
-      username_claim: {{ .Values.oauth.username_claim | quote }}
-      groups_claim: {{ .Values.oauth.groups_claim | quote }}
-      verifier_leeway: {{ .Values.oauth.verifier_leeway | quote }}
-      required_scopes: {{ toYaml .Values.oauth.required_scopes | nindent 8 }}
-      jwks_cache_lifetime: {{ .Values.oauth.jwks_cache_lifetime | quote }}
-      token_cache_lifetime: {{ .Values.oauth.token_cache_lifetime | quote }}
-    identity:
-      username_match: {{ .Values.identity.username_match | quote }}
-      require_email_verified: {{ .Values.identity.require_email_verified }}
-      allowed_email_domains: {{ toYaml .Values.identity.allowed_email_domains | nindent 8 }}
-      allowed_hosted_domains: {{ toYaml .Values.identity.allowed_hosted_domains | nindent 8 }}
-      denied_usernames: {{ toYaml .Values.identity.denied_usernames | nindent 8 }}
-    roles:
-      roles_mapping: {{ toYaml .Values.roles.roles_mapping | nindent 8 }}
-      roles_filter: {{ .Values.roles.roles_filter | quote }}
-      roles_transform: {{ .Values.roles.roles_transform | quote }}
-    ldap:
-      user_base_dn: {{ .Values.ldap.user_base_dn | quote }}
-      group_base_dn: {{ .Values.ldap.group_base_dn | quote }}
-      user_rdn_attribute: {{ .Values.ldap.user_rdn_attribute | quote }}
-      role_cn_prefix: {{ .Values.ldap.role_cn_prefix | quote }}
-      listen: ":3389"
+  # families oauth/identity/roles/ldap, plus the chart-fixed `listen` the
+  # binary passes straight to net.Listen. Every value-derived scalar goes
+  # through `quote`; lists/maps through `toYaml`; the one boolean renders as
+  # a real YAML boolean (validate rule 20 rejects a string there).
+  #
+  # Serialized with `toYaml` so the whole payload is a single YAML scalar
+  # by construction — no value can terminate it and inject into this
+  # manifest. Do not replace this with a hand-written `config.yaml: |`
+  # block scalar.
+  config.yaml: {{ include "ch-oauth-ldap.configYAML" . | toYaml | indent 4 | trim }}

@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "ch-oauth-ldap.fullname" . }}-clickhouse-config
+  name: {{ printf "%s-clickhouse-config" (include "ch-oauth-ldap.fullname" .) | quote }}
   labels: {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
 data:
   # Mount into ClickHouse's config.d/ (outside this chart's scope — CH is
@@ -10,33 +10,13 @@ data:
   # directory. Structure, fixed server id `oauth_helper`, port 389,
   # verification_cooldown 0, enable_tls no, and the direct (unnested)
   # <role_mapping> under <ldap> all mirror the proven working fixture at
-  # integration/clickhouse/clickhouse/common/config.d/ldap.xml. Every
-  # value-derived text node is XML-escaped (& before < before >); the
-  # membership filter below is already escaped in the fixture and is
-  # emitted verbatim, exactly once — do not run it through the escape
-  # helper.
-  ldap.xml: |
-    <clickhouse>
-        <ldap_servers>
-            <oauth_helper>
-                <host>{{ include "ch-oauth-ldap.xmlEscape" (include "ch-oauth-ldap.clickhouseServiceHost" .) }}</host>
-                <port>389</port>
-                <bind_dn>{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.user_rdn_attribute }}={user_name},{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.user_base_dn }}</bind_dn>
-                <verification_cooldown>0</verification_cooldown>
-                <enable_tls>no</enable_tls>
-            </oauth_helper>
-        </ldap_servers>
-
-        <user_directories>
-            <ldap>
-                <server>oauth_helper</server>
-                <role_mapping>
-                    <base_dn>{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.group_base_dn }}</base_dn>
-                    <scope>subtree</scope>
-                    <search_filter>(&amp;(objectClass=groupOfNames)(member={bind_dn}))</search_filter>
-                    <attribute>cn</attribute>
-                    <prefix>{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.role_cn_prefix }}</prefix>
-                </role_mapping>
-            </ldap>
-        </user_directories>
-    </clickhouse>
+  # integration/clickhouse/clickhouse/common/config.d/ldap.xml.
+  #
+  # The payload is built as one string by the ch-oauth-ldap.ldapXML helper
+  # (templates/_helpers.tpl) and serialized here with `toYaml`, so it is a
+  # single YAML scalar by construction: no value can terminate the scalar
+  # and inject a sibling key or a further resource into this manifest,
+  # regardless of what characters it contains (validate rule 16 separately
+  # rejects line breaks in every XML-bound value). Do not replace this with
+  # a hand-written `ldap.xml: |` block scalar.
+  ldap.xml: {{ include "ch-oauth-ldap.ldapXML" . | toYaml | indent 4 | trim }}

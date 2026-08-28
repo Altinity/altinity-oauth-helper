@@ -185,7 +185,10 @@ _gate_delta_report() {
     if [ "$after" -eq "$before" ]; then
         pass "$label: section passed"
     else
-        fail "$label: section recorded $((after - before)) new failure(s) above"
+        # A summary NOTE, deliberately not another `fail`: each failure above
+        # is already counted exactly once in $GATE_FAILURES, so the final
+        # "GATE RESULT: FAIL (N failure(s))" line is the true assertion count.
+        note "$label: section FAILED -- $((after - before)) failure(s) recorded above"
     fi
 }
 
@@ -414,12 +417,23 @@ run_untouched_path_proof() {
     note "untouched-paths: BASE_REF=$base_ref"
 
     if ( cd "$REPO_ROOT" && git rev-parse --verify "${base_ref}^{commit}" >/dev/null 2>&1 ); then
-        local diff_out
-        diff_out=$(cd "$REPO_ROOT" && git diff --stat "$base_ref" HEAD -- "${UNTOUCHED_PATHS[@]}")
-        if [ -z "$diff_out" ]; then
-            pass "untouched-paths: git diff --stat $base_ref..HEAD is empty over the committed non-goal path set"
+        # Diff against the real merge-base, not the base ref's tip: a
+        # tip-vs-tip diff would report every change the base branch itself
+        # received since this branch forked as if this branch had made it
+        # (or, worse, would cancel a real change here out against an
+        # opposite one there).
+        local merge_base diff_out
+        merge_base=$(cd "$REPO_ROOT" && git merge-base "$base_ref" HEAD 2>/dev/null)
+        if [ -z "$merge_base" ]; then
+            fail "untouched-paths: git merge-base $base_ref HEAD failed (unrelated histories or a shallow checkout?)"
         else
-            fail "untouched-paths: git diff --stat $base_ref..HEAD is NOT empty over the committed non-goal path set: $diff_out"
+            note "untouched-paths: merge-base($base_ref, HEAD)=$merge_base"
+            diff_out=$(cd "$REPO_ROOT" && git diff --stat "$merge_base" HEAD -- "${UNTOUCHED_PATHS[@]}")
+            if [ -z "$diff_out" ]; then
+                pass "untouched-paths: git diff --stat $merge_base..HEAD is empty over the committed non-goal path set"
+            else
+                fail "untouched-paths: git diff --stat $merge_base..HEAD is NOT empty over the committed non-goal path set: $diff_out"
+            fi
         fi
     else
         skip "untouched-paths: BASE_REF '$base_ref' does not resolve to a commit in this checkout; committed non-goal scope could not be proven from local history here (a shallow checkout must not be treated as a false implementation failure -- obtain the real base comparison before certification)"
@@ -440,10 +454,10 @@ run_untouched_path_proof
 
 # ==============================================================================
 # §50/§29 -- this script's OWN deterministic SIGINT regression, run against
-# a real, unmodified copy of itself (never a special test mode). Mirrors
-# ci/lib/image-assertions.sh's proven regression against
-# scripts/build-ch-oauth-ldap-image.sh, adapted to this script's own
-# ch-oauth-ldap-chart-gate.* prefix.
+# a real, unmodified copy of itself (never a special test mode), through the
+# same common.sh harness (gate_sigint_regression) image-assertions.sh uses
+# against scripts/build-ch-oauth-ldap-image.sh -- here with this script's
+# own ch-oauth-ldap-chart-gate.* run-directory prefix.
 # ==============================================================================
 
 run_self_sigint_regression() {
@@ -456,84 +470,13 @@ run_self_sigint_regression() {
     chmod +x "$self_script"
     # A copy of ci/ travels alongside so a child that gets far enough to
     # source the assertion libraries can do so; in practice the SIGINT
-    # below lands during this child's own run-directory `mkdir`, strictly
-    # before it ever reaches that sourcing step.
+    # lands during this child's own run-directory `mkdir`, strictly before
+    # it ever reaches that sourcing step.
     if [ -d "$CHART_DIR/ci" ]; then
         cp -R "$CHART_DIR/ci" "$self_dir/ci"
     fi
 
-    local iso_parent="$RUN_TMP_DIR/sigint-gate"
-    local shim_dir="$RUN_TMP_DIR/sigint-gate-shim"
-    command mkdir -p "$iso_parent" "$shim_dir"
-
-    # The shim intercepts only ch-oauth-ldap-chart-gate.* targets: it runs
-    # the real `mkdir` (so the directory genuinely exists on disk for the
-    # poll loop below to find), then sleeps -- holding the child inside
-    # this one foreground `mkdir` call long enough for the whole-
-    # process-group SIGINT below to land while it is still running. Every
-    # other mkdir call (e.g. `mkdir -p "$TMPDIR"`) passes straight through.
-    cat >"$shim_dir/mkdir" <<'SHIM'
-#!/bin/bash
-for _t4_shim_arg in "$@"; do
-    case "$_t4_shim_arg" in
-        *ch-oauth-ldap-chart-gate.*)
-            command -p mkdir "$@"
-            _t4_shim_rc=$?
-            sleep 5
-            exit "$_t4_shim_rc"
-            ;;
-    esac
-done
-exec command -p mkdir "$@"
-SHIM
-    chmod +x "$shim_dir/mkdir"
-
-    local was_monitor=0
-    case "$-" in
-        *m*) was_monitor=1 ;;
-    esac
-    set -m
-
-    TMPDIR="$iso_parent" PATH="$shim_dir:$PATH" bash "$self_script" \
-        >"$RUN_TMP_DIR/sigint-gate.out" 2>"$RUN_TMP_DIR/sigint-gate.err" &
-    local child_pid=$!
-
-    local target="" waited=0
-    while [ "$waited" -lt 200 ]; do
-        target=$(command find "$iso_parent" -maxdepth 1 -type d -name 'ch-oauth-ldap-chart-gate.*' 2>/dev/null | command head -n1)
-        if [ -n "$target" ]; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [ -z "$target" ]; then
-        kill -INT -- "-$child_pid" 2>/dev/null
-        wait "$child_pid" 2>/dev/null
-        [ "$was_monitor" -eq 0 ] && set +m
-        fail "self-sigint: no ch-oauth-ldap-chart-gate.* run directory appeared under $iso_parent within 20s (see $RUN_TMP_DIR/sigint-gate.err)"
-        _gate_delta_report "self-sigint" "$before" "$GATE_FAILURES"
-        return
-    fi
-
-    kill -INT -- "-$child_pid"
-    wait "$child_pid"
-    local status=$?
-
-    [ "$was_monitor" -eq 0 ] && set +m
-
-    if [ "$status" -ne 0 ]; then
-        pass "self-sigint: test.sh exited non-zero/signal ($status) after whole-process-group SIGINT"
-    else
-        fail "self-sigint: test.sh exited 0 after whole-process-group SIGINT (expected non-zero/signal)"
-    fi
-
-    if [ -e "$target" ]; then
-        fail "self-sigint: run directory $target still present after SIGINT + wait (cleanup did not run or did not know RUN_TMP_DIR)"
-    else
-        pass "self-sigint: run directory $target removed after SIGINT + wait"
-    fi
+    gate_sigint_regression "self-sigint" "$self_script" "ch-oauth-ldap-chart-gate." "$RUN_TMP_DIR/sigint-gate"
 
     _gate_delta_report "self-sigint" "$before" "$GATE_FAILURES"
 }

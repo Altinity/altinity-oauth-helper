@@ -24,39 +24,37 @@
 #     - Dockerfile.ch-oauth-ldap (plan section 48): pinned base image, CA
 #       certificates, the /bin/sleep executable guard the preStop hook
 #       depends on, OCI source metadata, non-root USER, EXPOSE 3389, the
-#       LDAP entrypoint, and UID/GID equality between the Dockerfile's
-#       `USER` and the chart's rendered `runAsUser`/`runAsGroup` (rendered
-#       from $CHART_DIR with $CHART_DIR/ci/valid-values.yaml).
+#       LDAP entrypoint, the world-executable-mode guard on the copied
+#       binary placed between `COPY` and `USER` (the image runs as UID
+#       65532, not the root owner of the file), and UID/GID equality
+#       between the Dockerfile's `USER` and the chart's rendered
+#       `runAsUser`/`runAsGroup` (rendered from $CHART_DIR with
+#       $CHART_DIR/ci/valid-values.yaml).
 #     - scripts/build-ch-oauth-ldap-image.sh (plan sections 49, A2): `bash
 #       -n` syntax, the $TMPDIR/$HOME/tmp contract, the
 #       ch-oauth-ldap-image. run-directory prefix, trap-before-mkdir and
 #       candidate-assigned-before-mkdir ordering, no `mktemp -d`, no
 #       checkout-root binary output, the main.version stamp, the default
 #       "ldap" tag prefix, amd64/arm64, a temporary (non-checkout-root)
-#       Docker build context, and the A2 per-arch `docker pull --platform`
-#       of the pinned base image ordered before that arch's `docker build`
-#       plus the post-build `docker image inspect ... .Architecture`
-#       equality check.
+#       Docker build context, the explicit `chmod 0755` of the compiled
+#       binary ordered after `go build` and before `docker build` (the
+#       script's own `umask 077` would otherwise leave it 0700), and the A2
+#       per-arch `docker pull --platform` of the pinned base image ordered
+#       before that arch's `docker build` plus the post-build `docker image
+#       inspect ... .Architecture` equality check.
 #     - the real script's deterministic SIGINT regression (plan section
-#       29): runs the actual, unmodified script -- never a special test
-#       mode -- under an isolated $TMPDIR, with a `mkdir` shim prepended to
-#       PATH that intercepts only `ch-oauth-ldap-image.*` targets (creates
-#       the directory for real, then sleeps, so the run directory is on
-#       disk long enough to observe and to signal into), launched under
-#       `set -m` so its backgrounded PGID equals its PID, polls only inside
-#       the isolated TMPDIR for the run directory to appear, sends
-#       `kill -INT -- "-$pid"` to the whole process group, waits, requires
-#       a non-zero/signal exit, and only then requires the run directory
-#       gone. The regression is interrupted during the run-directory
-#       `mkdir` itself, strictly before any `go build`/`docker` step runs,
-#       so the real script's docker/push path is never exercised.
+#       29), via common.sh's gate_sigint_regression: the actual, unmodified
+#       script -- never a special test mode -- interrupted during its
+#       run-directory `mkdir` itself, strictly before any `go build`/`docker`
+#       step runs, so the real script's docker/push path is never exercised.
 #     - .github/workflows/build-ch-oauth-ldap.yml (plan sections 51, A7):
 #       image path, `main`-only push plus workflow_dispatch with
-#       tag_prefix, no pull_request trigger, all seven path filters, the
+#       tag_prefix reaching the shell only through `env:` (never inlined in
+#       `run:`), no pull_request trigger, all seven path filters, the
 #       main.version stamp, amd64/arm64, immutable-tag-only (no `:main` /
 #       `:latest`), per-arch $RUNNER_TEMP/runner.temp context and Docker
-#       build `context:` that is never checkout root, and
-#       cancel-in-progress concurrency.
+#       build `context:` that is never checkout root, the binary chmod
+#       0755, and cancel-in-progress concurrency.
 #     - a final `test ! -e "$REPO_ROOT/ch-oauth-ldap"` proving none of the
 #       above checks (nor anything else already on disk) left a compiled
 #       LDAP binary in the repository root.
@@ -109,26 +107,68 @@ _ia_dockerfile_assertions() {
     assert_match "$dockerfile" 'EXPOSE 3389'
     assert_match "$dockerfile" 'ENTRYPOINT ["/bin/ch-oauth-ldap"]'
 
+    _ia_dockerfile_binary_mode_guard "$dockerfile"
     _ia_uid_gid_equality "$dockerfile"
+}
+
+# _ia_dockerfile_binary_mode_guard DOCKERFILE
+# The image runs as UID 65532 while COPY leaves the binary root-owned with
+# the build context's mode, so a 0700 binary (what a `umask 077` build host
+# produces) builds fine and fails to exec at container start. Require:
+#   * the `COPY ch-oauth-ldap /bin/ch-oauth-ldap` line,
+#   * a `RUN stat ... /bin/ch-oauth-ldap ... grep` mode guard on a LATER
+#     line that requires the others-execute bit,
+#   * `USER 65532:65532` on a line after BOTH (so the guard still runs as
+#     root, where stat cannot be denied, and the drop happens last),
+#   * the file-mode concern documented in a comment.
+_ia_dockerfile_binary_mode_guard() {
+    local dockerfile="$1"
+    local copy_line guard_line user_line
+
+    copy_line=$(command grep -nE '^COPY[[:space:]]+ch-oauth-ldap[[:space:]]+/bin/ch-oauth-ldap[[:space:]]*$' "$dockerfile" | command head -n1 | command cut -d: -f1)
+    # Fixed-string match on the exact guard line (the regex it contains is
+    # data here, not a pattern).
+    guard_line=$(command grep -nF "RUN stat -c '%a' /bin/ch-oauth-ldap | grep -Eq '^[0-7]?[0-7][0-7][5-7]\$'" "$dockerfile" | command head -n1 | command cut -d: -f1)
+    user_line=$(command grep -nE '^USER[[:space:]]+65532:65532[[:space:]]*$' "$dockerfile" | command head -n1 | command cut -d: -f1)
+
+    if [ -z "$copy_line" ]; then
+        fail "$dockerfile: no 'COPY ch-oauth-ldap /bin/ch-oauth-ldap' line found"
+        return
+    fi
+    if [ -z "$guard_line" ]; then
+        fail "$dockerfile: no 'RUN stat -c %a /bin/ch-oauth-ldap | grep -Eq <others-exec mode regex>' guard found after COPY"
+        return
+    fi
+    if [ -z "$user_line" ]; then
+        fail "$dockerfile: no 'USER 65532:65532' line found"
+        return
+    fi
+    if [ "$copy_line" -lt "$guard_line" ] && [ "$guard_line" -lt "$user_line" ]; then
+        pass "$dockerfile: COPY (line $copy_line) < binary mode guard (line $guard_line) < USER 65532:65532 (line $user_line)"
+    else
+        fail "$dockerfile: expected COPY (line $copy_line) < binary mode guard (line $guard_line) < USER 65532:65532 (line $user_line)"
+    fi
+
+    assert_match "$dockerfile" 'COPY preserves the context file'
+    assert_match "$dockerfile" '0755'
+    assert_match "$dockerfile" 'umask 077'
 }
 
 # _ia_uid_gid_equality DOCKERFILE
 # Extracts the Dockerfile's `USER uid:gid` and compares it against the
 # chart's rendered `runAsUser`/`runAsGroup` (rendered from $CHART_DIR with
-# $CHART_DIR/ci/valid-values.yaml). Skips -- rather than fails -- when helm
-# is unavailable or the chart/valid-values are not present yet, since this
-# library must remain runnable in isolation before Wave 1A's chart output
-# and this library's own output are integrated onto the same branch.
+# $CHART_DIR/ci/valid-values.yaml). helm and the chart are hard requirements
+# of this gate, so their absence is a failure, never a skip.
 _ia_uid_gid_equality() {
     local dockerfile="$1"
     local valid_values="$CHART_DIR/ci/valid-values.yaml"
 
     if ! command -v helm >/dev/null 2>&1; then
-        skip "Dockerfile/chart UID-GID equality: helm not on PATH"
+        fail "Dockerfile/chart UID-GID equality: helm not on PATH"
         return
     fi
     if [ ! -d "$CHART_DIR" ] || [ ! -f "$valid_values" ]; then
-        skip "Dockerfile/chart UID-GID equality: chart or ci/valid-values.yaml not present at $CHART_DIR"
+        fail "Dockerfile/chart UID-GID equality: chart or ci/valid-values.yaml not present at $CHART_DIR"
         return
     fi
 
@@ -211,6 +251,42 @@ _ia_script_static_assertions() {
     _ia_script_trap_and_candidate_ordering "$script"
     _ia_script_no_bare_dot_context "$script"
     _ia_script_arch_parity "$script"
+    _ia_script_binary_mode "$script"
+}
+
+# _ia_script_binary_mode SCRIPT
+# The script runs under `umask 077` (its run directory must be private), so
+# `go build` writes a 0700 binary; COPY preserves that mode and the image
+# runs as UID 65532, which then cannot exec it. Require an explicit
+# `chmod 0755 "$ctx/ch-oauth-ldap"` ordered strictly after the `go build`
+# and before the arch's `docker build`, plus a 0644 on the copied
+# Dockerfile.
+_ia_script_binary_mode() {
+    local script="$1"
+    local build_line chmod_line docker_line
+
+    # Commands only (line-anchored, optional leading whitespace and env
+    # assignments) -- the script's header comments also mention `go build`
+    # and `docker build` in prose.
+    build_line=$(command grep -nE '^[[:space:]]*([A-Z_]+=[^[:space:]]*[[:space:]]+)*go build' "$script" | command head -n1 | command cut -d: -f1)
+    chmod_line=$(command grep -nF 'chmod 0755 "$ctx/ch-oauth-ldap"' "$script" | command head -n1 | command cut -d: -f1)
+    docker_line=$(command grep -nE '^[[:space:]]*([A-Z_]+=[^[:space:]]*[[:space:]]+)*docker[a-zA-Z]*[[:space:]]+(image[[:space:]]+)?build' "$script" | command head -n1 | command cut -d: -f1)
+
+    if [ -z "$chmod_line" ]; then
+        fail "$script: no 'chmod 0755 \"\$ctx/ch-oauth-ldap\"' found -- under umask 077 the binary would be 0700 and UID 65532 could not exec it"
+        return
+    fi
+    if [ -z "$build_line" ] || [ -z "$docker_line" ]; then
+        fail "$script: could not locate both 'go build' and 'docker build' to order the chmod against"
+        return
+    fi
+    if [ "$build_line" -lt "$chmod_line" ] && [ "$chmod_line" -lt "$docker_line" ]; then
+        pass "$script: go build (line $build_line) < chmod 0755 binary (line $chmod_line) < docker build (line $docker_line)"
+    else
+        fail "$script: expected go build (line $build_line) < chmod 0755 binary (line $chmod_line) < docker build (line $docker_line)"
+    fi
+
+    assert_match "$script" 'chmod 0644 "$ctx/Dockerfile"'
 }
 
 # _ia_script_trap_and_candidate_ordering SCRIPT
@@ -318,91 +394,14 @@ _ia_script_arch_parity() {
 # =============================================================================
 
 # _ia_script_sigint_regression SCRIPT
-# See the file header and plan section 29 for the exact procedure. Runs the
-# real, unmodified script; never a special test mode. Interrupted during
-# the run-directory mkdir itself, so the script's own docker/push path is
-# never reached.
+# See the file header and plan section 29. Delegates to common.sh's
+# gate_sigint_regression (shared with test.sh's self-regression) against
+# the real, unmodified script with its `ch-oauth-ldap-image.` run-directory
+# prefix; the script is a hard requirement, so its absence fails.
 _ia_script_sigint_regression() {
     local script="$1"
-
-    if [ ! -f "$script" ]; then
-        skip "SIGINT regression: $script not present"
-        return
-    fi
-
-    local iso_parent="$RUN_TMP_DIR/sigint-image"
-    local shim_dir="$RUN_TMP_DIR/sigint-image-shim"
-    command mkdir -p "$iso_parent" "$shim_dir"
-
-    # The shim intercepts only ch-oauth-ldap-image.* targets: it runs the
-    # real `mkdir` (so the directory genuinely exists on disk for the poll
-    # loop below to find, and for the script's own subsequent state-writes
-    # to succeed against), then sleeps -- holding the script inside this
-    # one foreground `mkdir` call long enough for the whole-process-group
-    # SIGINT below to land while it is still running. Every other mkdir
-    # call (e.g. `mkdir -p "$TMPDIR"`, per-arch `mkdir -p "$ctx"`) passes
-    # straight through untouched.
-    cat >"$shim_dir/mkdir" <<'SHIM'
-#!/bin/bash
-for _ia_shim_arg in "$@"; do
-    case "$_ia_shim_arg" in
-        *ch-oauth-ldap-image.*)
-            command -p mkdir "$@"
-            _ia_shim_rc=$?
-            sleep 5
-            exit "$_ia_shim_rc"
-            ;;
-    esac
-done
-exec command -p mkdir "$@"
-SHIM
-    chmod +x "$shim_dir/mkdir"
-
-    local was_monitor=0
-    case "$-" in
-        *m*) was_monitor=1 ;;
-    esac
-    set -m
-
-    TMPDIR="$iso_parent" PATH="$shim_dir:$PATH" bash "$script" \
-        >"$RUN_TMP_DIR/sigint-image.out" 2>"$RUN_TMP_DIR/sigint-image.err" &
-    local child_pid=$!
-
-    local target="" waited=0
-    while [ "$waited" -lt 200 ]; do
-        target=$(command find "$iso_parent" -maxdepth 1 -type d -name 'ch-oauth-ldap-image.*' 2>/dev/null | command head -n1)
-        if [ -n "$target" ]; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [ -z "$target" ]; then
-        kill -INT -- "-$child_pid" 2>/dev/null
-        wait "$child_pid" 2>/dev/null
-        [ "$was_monitor" -eq 0 ] && set +m
-        fail "SIGINT regression: no ch-oauth-ldap-image.* run directory appeared under $iso_parent within 20s (see $RUN_TMP_DIR/sigint-image.err)"
-        return
-    fi
-
-    kill -INT -- "-$child_pid"
-    wait "$child_pid"
-    local status=$?
-
-    [ "$was_monitor" -eq 0 ] && set +m
-
-    if [ "$status" -ne 0 ]; then
-        pass "SIGINT regression: $script exited non-zero/signal ($status) after whole-process-group SIGINT"
-    else
-        fail "SIGINT regression: $script exited 0 after whole-process-group SIGINT (expected non-zero/signal)"
-    fi
-
-    if [ -e "$target" ]; then
-        fail "SIGINT regression: run directory $target still present after SIGINT + wait (cleanup did not run or did not know RUN_TMP_DIR)"
-    else
-        pass "SIGINT regression PASS: run directory $target removed after SIGINT + wait"
-    fi
+    _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
+    gate_sigint_regression "SIGINT regression" "$script" "ch-oauth-ldap-image." "$RUN_TMP_DIR/sigint-image"
 }
 
 # =============================================================================
@@ -423,6 +422,19 @@ _ia_workflow_assertions() {
     assert_match "$workflow" 'workflow_dispatch'
     assert_match "$workflow" 'tag_prefix'
     assert_not_match "$workflow" 'pull_request'
+
+    # The dispatch input reaches the shell only through `env:` -- exactly
+    # one `${{ inputs.` reference in the whole file (the env mapping), and
+    # never the inlined `prefix="${{ inputs.tag_prefix }}"` form -- and is
+    # shape-checked before use.
+    assert_count "$workflow" '${{ inputs.' 1 F
+    assert_match "$workflow" 'TAG_PREFIX: ${{ inputs.tag_prefix }}'
+    assert_not_match "$workflow" 'prefix="${{'
+    assert_match "$workflow" '"$prefix" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}$'
+
+    # The compiled binary is chmod 0755 before it enters the build context
+    # (COPY preserves mode; the image runs as UID 65532).
+    assert_match "$workflow" 'chmod 0755 "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/ch-oauth-ldap"'
 
     # All seven path filters (plan section 25).
     assert_match "$workflow" 'cmd/ch-oauth-ldap/**'

@@ -10,7 +10,7 @@ guarantee either.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "ch-oauth-ldap.fullname" . }}
+  name: {{ include "ch-oauth-ldap.fullname" . | quote }}
   labels:
     {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
 spec:

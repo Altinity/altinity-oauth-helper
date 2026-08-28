@@ -58,9 +58,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - id: vars
+        # The dispatch input reaches the shell only through `env:` (never
+        # inlined into `run:`), and is shape-checked before use.
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
         run: |
-          prefix="${{ inputs.tag_prefix }}"
-          echo "tag=${prefix:-ldap}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          prefix="${TAG_PREFIX:-ldap}"
+          if ! [[ "$prefix" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}$ ]]; then
+            echo "invalid tag_prefix" >&2
+            exit 1
+          fi
+          echo "tag=${prefix}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
         with:
@@ -70,11 +78,16 @@ jobs:
         run: mkdir -p "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}"
 
       - name: Cross-compile static binary into owned temp context
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build \
-            -ldflags="-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
+            -ldflags="-s -w -X main.version=${TAG}" \
             -o "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/ch-oauth-ldap" \
             ./cmd/ch-oauth-ldap
+          # COPY preserves the context mode and the image runs as UID 65532:
+          # the binary must be 0755 (see Dockerfile.ch-oauth-ldap).
+          chmod 0755 "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/ch-oauth-ldap"
 
       - name: Copy Dockerfile into owned temp context
         run: cp Dockerfile.ch-oauth-ldap "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/Dockerfile"

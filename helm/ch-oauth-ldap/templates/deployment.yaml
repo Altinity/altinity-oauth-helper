@@ -11,11 +11,18 @@ ch-oauth-ldap.selectorLabels for every selector so they can never disagree.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ch-oauth-ldap.fullname" . }}
+  name: {{ include "ch-oauth-ldap.fullname" . | quote }}
   labels:
     {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  {{- /*
+  Every value interpolated below as a bare Kubernetes scalar is either
+  coerced (`int`) or quoted (`quote`), and validate (rules 16-18) has
+  already constrained its shape. Never add a raw `{{ .Values.x }}` scalar
+  here: an unquoted string containing a newline would land in this pod
+  spec as extra keys (e.g. `hostNetwork: true`).
+  */}}
+  replicas: {{ .Values.replicaCount | int }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -63,7 +70,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.priorityClassName }}
-      priorityClassName: {{ . }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
@@ -81,17 +88,17 @@ spec:
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: {{ .Values.podAntiAffinity.weight }}
+            - weight: {{ .Values.podAntiAffinity.weight | int }}
               podAffinityTerm:
-                topologyKey: {{ .Values.podAntiAffinity.topologyKey }}
+                topologyKey: {{ .Values.podAntiAffinity.topologyKey | quote }}
                 labelSelector:
                   matchLabels:
                     {{- include "ch-oauth-ldap.selectorLabels" . | nindent 20 }}
       {{- end }}
       containers:
         - name: ch-oauth-ldap
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ printf "%s:%s" (toString .Values.image.repository) (toString .Values.image.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           args:
             - --config=/etc/ch-oauth-ldap/config.yaml
           env:
@@ -147,4 +154,4 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ include "ch-oauth-ldap.fullname" . }}-config
+            name: {{ printf "%s-config" (include "ch-oauth-ldap.fullname" .) | quote }}

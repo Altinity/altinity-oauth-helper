@@ -28,8 +28,8 @@ arbitrary pod labels, so a `podLabels` value can never make the pod
 template disagree with what those resources select on.
 */}}
 {{- define "ch-oauth-ldap.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "ch-oauth-ldap.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/name: {{ include "ch-oauth-ldap.name" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end -}}
 
 {{/*
@@ -38,19 +38,19 @@ Full common labels. Every one of these keys is chart-managed and reserved
 never these.
 */}}
 {{- define "ch-oauth-ldap.labels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | quote }}
 {{ include "ch-oauth-ldap.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end -}}
 
 {{/*
 The reserved config-checksum pod-template annotation key. The Deployment
-template (owned elsewhere) sets this itself from the rendered ConfigMaps to
-force a rolling replacement on config change; `podAnnotations` must never
-be allowed to define it.
+template (templates/deployment.yaml) sets this itself from the rendered
+config ConfigMap to force a rolling replacement on config change;
+`podAnnotations` must never be allowed to define it.
 */}}
 {{- define "ch-oauth-ldap.configChecksumAnnotationKey" -}}
 checksum/ch-oauth-ldap-config
@@ -99,6 +99,53 @@ is the selector value itself (not the root), so call as e.g.:
 {{- end -}}
 
 {{/*
+True ("true") iff a LabelSelector-shaped value contains at least one term
+that can only match a *subset* of pods/namespaces: a matchLabels entry, or
+a matchExpressions entry whose operator is In or Exists. A selector built
+solely from DoesNotExist / NotIn expressions (e.g. `{key: bogus, operator:
+DoesNotExist}`) is syntactically substantive but matches every object that
+lacks the key — an allow-all NetworkPolicy peer in disguise — so it is NOT
+positive. Unknown operators are not positive either (fail closed). Context
+is the selector value itself, as for selectorSubstantive.
+*/}}
+{{- define "ch-oauth-ldap.selectorPositive" -}}
+{{- $sel := . | default dict }}
+{{- $ok := false }}
+{{- if $sel }}
+{{- $ml := $sel.matchLabels | default dict }}
+{{- if gt (len $ml) 0 }}
+{{- $ok = true }}
+{{- end }}
+{{- range ($sel.matchExpressions | default list) }}
+{{- if kindIs "map" . }}
+{{- if has (toString (index . "operator" | default "")) (list "In" "Exists") }}
+{{- $ok = true }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $ok }}true{{- end -}}
+{{- end -}}
+
+{{/*
+Regex vocabulary for the validation rules below. Names/keys interpolated
+into Kubernetes fields are constrained to the shapes the API server itself
+accepts, which as a side effect excludes every YAML-significant character
+(newline, quote, `: `, `#`, ...) from those fields.
+*/}}
+{{- define "ch-oauth-ldap.re.dnsLabel" -}}^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?${{- end -}}
+{{- define "ch-oauth-ldap.re.dnsSubdomain" -}}^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+{{- end -}}
+{{- define "ch-oauth-ldap.re.topologyKey" -}}^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(/[a-zA-Z0-9]([-a-zA-Z0-9_.]*[a-zA-Z0-9])?)?$
+{{- end -}}
+{{- define "ch-oauth-ldap.re.imageRepository" -}}^[a-z0-9]([-a-z0-9._]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([-a-z0-9._]*[a-z0-9])?)*$
+{{- end -}}
+{{- define "ch-oauth-ldap.re.imageTag" -}}^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$
+{{- end -}}
+{{- define "ch-oauth-ldap.re.integer" -}}^[0-9]+$
+{{- end -}}
+
+{{/*
 Centralized fail-closed validation (plan §5). Every emitted resource
 template invokes this exactly once, e.g.:
   {{- include "ch-oauth-ldap.validate" . }}
@@ -108,8 +155,21 @@ non-zero `helm template`/install/upgrade exit. Rule order follows the
 plan's numbered list; sabotage/negative-render-matrix cases are one
 violation at a time from otherwise-valid values, so ordering does not
 affect which message a given case gets.
+
+Two families of rules exist purely to keep the rendered YAML injection-
+proof (rules 16-20 below): (a) no value that is written into a YAML block
+scalar (the two ConfigMaps' embedded payloads) may contain a line break,
+and (b) every value interpolated as a bare Kubernetes scalar must match
+the shape the API server accepts for that field. The templates ALSO quote
+or `toYaml` every such interpolation, so these rules are the first of two
+independent layers, not the only one.
 */}}
 {{- define "ch-oauth-ldap.validate" -}}
+
+{{- /* 0. replicaCount must be an integer (not a string that merely starts with digits). */ -}}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.integer" .) (toString .Values.replicaCount)) }}
+{{- fail "replicaCount must be an integer" }}
+{{- end }}
 
 {{- /* 1. replicaCount must be at least 1. */ -}}
 {{- if lt (.Values.replicaCount | int) 1 }}
@@ -224,4 +284,178 @@ Deployment/Service/PDB/NetworkPolicy selector labels.
 {{- fail "podAnnotations must not override checksum/ch-oauth-ldap-config" }}
 {{- end }}
 
+{{- /*
+16. No line breaks in any value written into an embedded block scalar or a
+resource name/label. The ClickHouse ldap.xml and the helper config.yaml are
+emitted as YAML scalars built by `toYaml` (injection-proof by construction);
+this rule is the independent second layer, and it also keeps the XML text
+nodes single-line as ClickHouse's config expects.
+*/ -}}
+{{- range $name, $value := (dict
+      "ldap.user_base_dn" $ldap.user_base_dn
+      "ldap.group_base_dn" $ldap.group_base_dn
+      "ldap.user_rdn_attribute" $ldap.user_rdn_attribute
+      "ldap.role_cn_prefix" $ldap.role_cn_prefix
+      "clusterDomain" .Values.clusterDomain
+      "nameOverride" .Values.nameOverride
+      "fullnameOverride" .Values.fullnameOverride
+      "image.repository" .Values.image.repository
+      "image.tag" .Values.image.tag
+      "priorityClassName" .Values.priorityClassName
+      "podAntiAffinity.topologyKey" .Values.podAntiAffinity.topologyKey) }}
+{{- $s := $value | default "" | toString }}
+{{- if or (contains "\n" $s) (contains "\r" $s) }}
+{{- fail (printf "%s must not contain line breaks" $name) }}
+{{- end }}
+{{- end }}
+
+{{- /*
+17. Names interpolated into Kubernetes metadata/labels/pod-spec fields
+must be exactly the shapes the API server accepts (RFC 1123 label for the
+chart-name overrides, RFC 1123 subdomain for clusterDomain and
+priorityClassName, the qualified-name shape for topologyKey).
+*/ -}}
+{{- if .Values.nameOverride }}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.dnsLabel" .) (toString .Values.nameOverride)) }}
+{{- fail "nameOverride must be a lowercase RFC 1123 label (a-z, 0-9, '-'; max 63 chars)" }}
+{{- end }}
+{{- end }}
+{{- if .Values.fullnameOverride }}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.dnsLabel" .) (toString .Values.fullnameOverride)) }}
+{{- fail "fullnameOverride must be a lowercase RFC 1123 label (a-z, 0-9, '-'; max 63 chars)" }}
+{{- end }}
+{{- end }}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.dnsSubdomain" .) (toString .Values.clusterDomain)) }}
+{{- fail "clusterDomain must be a lowercase DNS domain (e.g. cluster.local)" }}
+{{- end }}
+{{- if .Values.priorityClassName }}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.dnsSubdomain" .) (toString .Values.priorityClassName)) }}
+{{- fail "priorityClassName must be a lowercase RFC 1123 subdomain" }}
+{{- end }}
+{{- end }}
+{{- if .Values.podAntiAffinity.enabled }}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.topologyKey" .) (toString .Values.podAntiAffinity.topologyKey)) }}
+{{- fail "podAntiAffinity.topologyKey must be a Kubernetes label key (e.g. kubernetes.io/hostname)" }}
+{{- end }}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.integer" .) (toString .Values.podAntiAffinity.weight)) }}
+{{- fail "podAntiAffinity.weight must be an integer between 1 and 100" }}
+{{- end }}
+{{- if or (lt (.Values.podAntiAffinity.weight | int) 1) (gt (.Values.podAntiAffinity.weight | int) 100) }}
+{{- fail "podAntiAffinity.weight must be an integer between 1 and 100" }}
+{{- end }}
+{{- end }}
+
+{{- /* 18. Image reference components: an OCI repository path and an OCI tag. */ -}}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.imageRepository" .) (toString .Values.image.repository)) }}
+{{- fail "image.repository must be a lowercase OCI repository reference (registry[:port]/path)" }}
+{{- end }}
+{{- if not (regexMatch (include "ch-oauth-ldap.re.imageTag" .) (toString .Values.image.tag)) }}
+{{- fail "image.tag must be an OCI tag ([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})" }}
+{{- end }}
+{{- if not (has (toString .Values.image.pullPolicy) (list "Always" "IfNotPresent" "Never")) }}
+{{- fail "image.pullPolicy must be one of Always, IfNotPresent, Never" }}
+{{- end }}
+
+{{- /*
+19. NetworkPolicy selectors must be *positive*: a selector whose only terms
+are DoesNotExist/NotIn expressions matches every pod/namespace lacking the
+key, i.e. it is allow-all in disguise. Rules 8-9 reject the empty shapes;
+this rejects the non-empty-but-allow-all ones.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- if ne (include "ch-oauth-ldap.selectorPositive" .Values.networkPolicy.clickhousePodSelector) "true" }}
+{{- fail "networkPolicy.clickhousePodSelector must include a positive term (a matchLabels entry or an In/Exists matchExpression); DoesNotExist/NotIn-only selectors match every pod" }}
+{{- end }}
+{{- if gt (len $nsSel) 0 }}
+{{- if ne (include "ch-oauth-ldap.selectorPositive" $nsSel) "true" }}
+{{- fail "networkPolicy.clickhouseNamespaceSelector must include a positive term (a matchLabels entry or an In/Exists matchExpression); DoesNotExist/NotIn-only selectors match every namespace" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- /*
+20. The one boolean the helper config.yaml emits bare must really be a
+boolean — a string here would be interpolated unquoted into the embedded
+YAML.
+*/ -}}
+{{- if not (kindIs "bool" .Values.identity.require_email_verified) }}
+{{- fail "identity.require_email_verified must be a boolean (true/false), not a string" }}
+{{- end }}
+
 {{- end -}}
+
+{{/*
+The ClickHouse-side ldap.xml payload, as one multi-line string. The
+ConfigMap template emits `include "ch-oauth-ldap.ldapXML" . | toYaml`, so
+the payload is serialized as a YAML scalar by construction — a value can
+never terminate the block scalar and start a new resource, whatever it
+contains. Every value-derived text node is XML-escaped (& before < before
+>); the membership filter is already escaped in the fixture and is emitted
+verbatim, exactly once — do not run it through the escape helper. Ends
+with a newline so the decoded payload is byte-identical to the former
+`ldap.xml: |` (clip) block-scalar form.
+*/}}
+{{- define "ch-oauth-ldap.ldapXML" -}}
+<clickhouse>
+    <ldap_servers>
+        <oauth_helper>
+            <host>{{ include "ch-oauth-ldap.xmlEscape" (include "ch-oauth-ldap.clickhouseServiceHost" .) }}</host>
+            <port>389</port>
+            <bind_dn>{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.user_rdn_attribute }}={user_name},{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.user_base_dn }}</bind_dn>
+            <verification_cooldown>0</verification_cooldown>
+            <enable_tls>no</enable_tls>
+        </oauth_helper>
+    </ldap_servers>
+
+    <user_directories>
+        <ldap>
+            <server>oauth_helper</server>
+            <role_mapping>
+                <base_dn>{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.group_base_dn }}</base_dn>
+                <scope>subtree</scope>
+                <search_filter>(&amp;(objectClass=groupOfNames)(member={bind_dn}))</search_filter>
+                <attribute>cn</attribute>
+                <prefix>{{ include "ch-oauth-ldap.xmlEscape" .Values.ldap.role_cn_prefix }}</prefix>
+            </role_mapping>
+        </ldap>
+    </user_directories>
+</clickhouse>
+{{ end -}}
+
+{{/*
+The helper's own config.yaml payload, as one multi-line string; emitted by
+templates/configmap.yaml through `toYaml` for the same by-construction
+reason as ldapXML above. Mirrors cmd/ch-oauth-ldap/config.go's Config
+exactly: the four top-level families oauth/identity/roles/ldap plus the
+chart-fixed `listen`. Every value-derived scalar goes through `quote`;
+lists/maps through `toYaml`; the one boolean renders bare (validate rule 20
+guarantees it is a real boolean).
+*/}}
+{{- define "ch-oauth-ldap.configYAML" -}}
+oauth:
+  expected_issuer: {{ .Values.oauth.expected_issuer | quote }}
+  jwks_url: {{ .Values.oauth.jwks_url | quote }}
+  expected_audiences: {{- toYaml .Values.oauth.expected_audiences | nindent 4 }}
+  username_claim: {{ .Values.oauth.username_claim | quote }}
+  groups_claim: {{ .Values.oauth.groups_claim | quote }}
+  verifier_leeway: {{ .Values.oauth.verifier_leeway | quote }}
+  required_scopes: {{- toYaml .Values.oauth.required_scopes | nindent 4 }}
+  jwks_cache_lifetime: {{ .Values.oauth.jwks_cache_lifetime | quote }}
+  token_cache_lifetime: {{ .Values.oauth.token_cache_lifetime | quote }}
+identity:
+  username_match: {{ .Values.identity.username_match | quote }}
+  require_email_verified: {{ .Values.identity.require_email_verified }}
+  allowed_email_domains: {{- toYaml .Values.identity.allowed_email_domains | nindent 4 }}
+  allowed_hosted_domains: {{- toYaml .Values.identity.allowed_hosted_domains | nindent 4 }}
+  denied_usernames: {{- toYaml .Values.identity.denied_usernames | nindent 4 }}
+roles:
+  roles_mapping: {{- toYaml .Values.roles.roles_mapping | nindent 4 }}
+  roles_filter: {{ .Values.roles.roles_filter | quote }}
+  roles_transform: {{ .Values.roles.roles_transform | quote }}
+ldap:
+  user_base_dn: {{ .Values.ldap.user_base_dn | quote }}
+  group_base_dn: {{ .Values.ldap.group_base_dn | quote }}
+  user_rdn_attribute: {{ .Values.ldap.user_rdn_attribute | quote }}
+  role_cn_prefix: {{ .Values.ldap.role_cn_prefix | quote }}
+  listen: ":3389"
+{{ end -}}

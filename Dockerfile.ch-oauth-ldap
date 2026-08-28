@@ -22,7 +22,18 @@ RUN test -x /bin/sleep
 
 # The binary is compiled OUTSIDE this Dockerfile (see the build script/
 # workflow above) and supplied by the build context — never built in-image.
+#
+# File mode: COPY preserves the context file's mode and the file is owned by
+# root in the image, while the process runs as UID 65532 (USER below). The
+# binary therefore MUST be world-readable+executable (0755) in the build
+# context — a private umask on the build host (the manual script runs under
+# `umask 077`) would otherwise yield a 0700 binary that builds fine and then
+# fails to exec at container start. Both build paths chmod 0755 explicitly;
+# the check below fails the image build loudly if the mode is still wrong.
+# (`COPY --chmod` is not used because the legacy DOCKER_BUILDKIT=0 builder
+# rejects it.)
 COPY ch-oauth-ldap /bin/ch-oauth-ldap
+RUN stat -c '%a' /bin/ch-oauth-ldap | grep -Eq '^[0-7]?[0-7][0-7][5-7]$'
 
 LABEL org.opencontainers.image.source="https://github.com/Altinity/altinity-oauth-helper"
 

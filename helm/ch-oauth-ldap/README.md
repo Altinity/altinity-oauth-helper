@@ -108,9 +108,49 @@ startup validation already refuses to run without them:
 
 The chart deliberately does **not** re-implement RFC 4514 Distinguished
 Name syntax checking — it only rejects the empty/whitespace-only inputs
-that would silently break the deployment. A syntactically malformed but
-non-empty DN remains the binary's own startup-validation responsibility,
-not this chart's.
+that would silently break the deployment, plus (see the next section) any
+DN containing a line break. A syntactically malformed but non-empty DN
+remains the binary's own startup-validation responsibility, not this
+chart's.
+
+## Value-shape validation (template injection guards)
+
+Values are untrusted input to the templates. Two independent layers keep a
+value from ever changing the *structure* of what the chart renders:
+
+1. **Serialization by construction.** Both ConfigMap payloads (the helper's
+   `config.yaml` and the ClickHouse `ldap.xml`) are built as one string by
+   a helper and emitted through Helm's `toYaml`, so each is a single YAML
+   scalar whatever characters it contains — a value cannot terminate the
+   payload and add a sibling key or a further resource to the manifest.
+   Every scalar the Deployment interpolates (`image`, `imagePullPolicy`,
+   `priorityClassName`, `topologyKey`, resource names, label values) is
+   emitted through `quote`; `replicas` and the anti-affinity `weight` are
+   coerced with `int`; lists/maps go through `toYaml`.
+2. **Fail-closed shape rules** in the central validation helper, each with a
+   fixed error message:
+   - no line break (`\n` or `\r`) in `ldap.user_base_dn`,
+     `ldap.group_base_dn`, `ldap.user_rdn_attribute`, `ldap.role_cn_prefix`,
+     `clusterDomain`, `nameOverride`, `fullnameOverride`, `image.repository`,
+     `image.tag`, `priorityClassName`, or `podAntiAffinity.topologyKey`;
+   - `nameOverride` / `fullnameOverride` must be RFC 1123 labels;
+     `clusterDomain` and `priorityClassName` must be RFC 1123 subdomains;
+     `podAntiAffinity.topologyKey` must be a Kubernetes label key
+     (`[prefix/]name`);
+   - `image.repository` must be a lowercase OCI repository reference,
+     `image.tag` an OCI tag (`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}` — so a `"`
+     can never close the quotes around `image:`), and `image.pullPolicy` one
+     of `Always`, `IfNotPresent`, `Never`;
+   - `replicaCount` and `podAntiAffinity.weight` must be real integers
+     (`weight` in 1–100), not strings that merely start with digits;
+   - `identity.require_email_verified` must be a real boolean — it is the
+     one field the embedded `config.yaml` emits bare.
+
+`helm/ch-oauth-ldap/test.sh` carries a negative render case for each of
+these (a line break in `group_base_dn` that used to render an extra
+`LoadBalancer` Service; a `priorityClassName` that used to inject
+`hostNetwork: true`; a `"` in `image.tag`; `DoesNotExist`-only selectors;
+and so on), each asserting the fixed message and that nothing was rendered.
 
 ## Invocation and log level
 
@@ -325,19 +365,31 @@ chart's central validation applies different rules to each:
   empty `matchExpressions: []`, or both empty together, all fail rendering
   with a fixed error. There is no such thing as a valid "select nothing"
   pod selector here — it would defeat the point of the policy.
+- It must also be *positive*: at least one `matchLabels` entry, or a
+  `matchExpressions` entry whose operator is `In` or `Exists`. A selector
+  made **only** of `DoesNotExist` / `NotIn` expressions (for example
+  `{matchExpressions: [{key: bogus, operator: DoesNotExist}]}`) is
+  syntactically non-empty but matches every pod that lacks the key — an
+  allow-all peer in disguise — and fails rendering with its own fixed
+  error. Unknown operators count as not positive.
 - **`clickhouseNamespaceSelector`** treats an entirely empty outer `{}` as
   "not supplied" (meaning: no namespace restriction, ClickHouse must be in
   this release's own namespace) — that shape is valid. But once you supply
   *any* key at all (`matchLabels` and/or `matchExpressions`), the content
-  must be substantive by the same rule as above; a non-empty-but-nested-empty
-  shape like `{matchLabels: {}}` is rejected, because it looks like an
+  must be substantive **and positive** by the same two rules as above; a
+  non-empty-but-nested-empty shape like `{matchLabels: {}}` and a
+  `NotIn`-only shape are both rejected, because they look like an
   intentional restriction that actually restricts nothing.
 
-When the policy renders, it always combines a substantive pod selector
-with an optional, only-if-substantive namespace selector in the **same**
-ingress peer, allows only TCP to the named `ldap` target port, sets
-`policyTypes: [Ingress]` only (no egress rule is rendered), and never emits
-an empty/allow-all source peer.
+When the policy renders, it always combines a positive pod selector with
+an optional, only-if-positive namespace selector in the **same** ingress
+peer, allows only TCP to the named `ldap` target port, and sets
+`policyTypes: [Ingress]` only (no egress rule is rendered). Every selector
+shape the chart knows to be allow-all — empty, nested-empty, and
+`DoesNotExist`/`NotIn`-only — fails rendering rather than producing an
+allow-all source peer. (A selector that is positive but simply *wrong* —
+labels no ClickHouse pod carries — is still your responsibility; the
+chart cannot know your ClickHouse pods' labels.)
 
 Example (the ClickHouse label below is a **placeholder** — substitute
 your actual ClickHouse pod labels):
@@ -395,7 +447,9 @@ validation helper:
    `toYaml`; booleans render as real YAML booleans — never as
    interpolated raw strings — specifically so that a value containing a
    YAML-significant character (`#`, `: `, `&`, `*`, `!`) can't corrupt the
-   binary's own config parse.
+   binary's own config parse. The whole payload is then serialized into
+   the ConfigMap with `toYaml` (not a hand-written `|` block scalar), so
+   no value can escape it into the surrounding manifest either.
 2. **`<fullname>-clickhouse-config`** — the ClickHouse-side `ldap.xml`,
    meant to be mounted into ClickHouse's own `config.d/` (ClickHouse is
    not deployed by this chart). The LDAP server identifier inside it is
@@ -412,7 +466,10 @@ components, the group base DN, the role prefix) is escaped through one
 fixed-order helper (`&` first, then `<`, then `>`) before being written
 into the XML. The one exception is the group-membership search filter,
 which is a fixed, already-escaped literal emitted verbatim exactly once —
-running it back through the escape helper would double-escape it.
+running it back through the escape helper would double-escape it. The
+finished XML is written into the ConfigMap through `toYaml` as a single
+scalar, and every XML-bound value is additionally rejected at render if it
+contains a line break (see [Value-shape validation](#value-shape-validation-template-injection-guards)).
 
 ## Security exception: plaintext OAuth bearer over LDAP
 

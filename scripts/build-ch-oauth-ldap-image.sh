@@ -140,7 +140,16 @@ build_one() {
         -ldflags="-s -w -X main.version=${TAG}" \
         -o "$ctx/ch-oauth-ldap" ./cmd/ch-oauth-ldap
 
+    # `umask 077` above keeps the run directory private, but it also makes
+    # `go build` write the binary 0700. `COPY` preserves the source mode, the
+    # image runs as UID 65532 (not the root owner), so a 0700 binary would
+    # build fine and then fail to exec at container start. Normalize both
+    # context files explicitly; Dockerfile.ch-oauth-ldap re-checks the mode
+    # at build time.
+    chmod 0755 "$ctx/ch-oauth-ldap"
+
     cp "$REPO/Dockerfile.ch-oauth-ldap" "$ctx/Dockerfile"
+    chmod 0644 "$ctx/Dockerfile"
 
     docker pull --platform "linux/$arch" "$ALPINE_BASE" >/dev/null
 

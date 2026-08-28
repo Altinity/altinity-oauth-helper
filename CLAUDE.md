@@ -102,8 +102,10 @@ fork that logic — extend the SDK instead when the need is generic (not
   owner Boris Tyshkevich / `@BorisTyshkevich`; see `README.md`). The
   compensating controls are: the Service stays `ClusterIP`-only with no
   public-exposure knobs, and the chart renders a default-on
-  source-restricting NetworkPolicy that fails closed on an allow-all/empty
-  ClickHouse selector — but a NetworkPolicy is reachability control, not
+  source-restricting NetworkPolicy that fails closed on every allow-all
+  ClickHouse selector shape (empty, nested-empty, and `DoesNotExist`/`NotIn`-
+  only expressions, which match everything lacking the key) — but a
+  NetworkPolicy is reachability control, not
   transport confidentiality, so don't describe it as one in docs or review.
   Removing the exception means TLS on the LDAP listener or moving to a
   loopback sidecar, not relaxing the NetworkPolicy default.

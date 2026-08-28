@@ -41,7 +41,7 @@
 #     contract comment on why.
 #
 # Explicitly NOT part of this file's job: the full positive/negative render
-# matrix (plan §37/§38, owned by the chart-core gate module), kubeconform
+# matrix (plan §37/§38, ci/lib/chart-assertions.sh), kubeconform
 # schema checks, Dockerfile/script/workflow assertions, or documentation
 # checks. This file only proves the *embedded* config.yaml/ldap.xml payload
 # is structurally correct once a render has already succeeded.
@@ -688,8 +688,7 @@ EA_EXPECT_EOF
 # encoding/xml decodes entities in one linear pass — so a double-escaped
 # "&amp;lt;" decodes back to the literal text "&lt;", not "<", making the
 # Go verifier's exact bind_dn/base_dn string comparison fail on any such
-# ordering bug, not only the specific &/< swap named in this file's
-# doneWhen check.
+# ordering bug, not only the specific &/< swap.
 _ea_case_ampersand_dn() {
     local values="$RUN_TMP_DIR/values-ampersand-dn.yaml"
     local render="$RUN_TMP_DIR/render-ampersand-dn.yaml" xmlonly="$RUN_TMP_DIR/xmlonly-ampersand-dn.yaml" expect="$RUN_TMP_DIR/expect-ampersand-dn.json"
@@ -769,7 +768,10 @@ run_embedded_assertions() {
 
     local end_failures="${GATE_FAILURES:-0}"
     if [ "$end_failures" -gt "$start_failures" ]; then
-        fail "embedded-assertions: $((end_failures - start_failures)) embedded-content assertion(s) failed"
+        # A summary line, not another `fail`: every failure above is already
+        # counted once in $GATE_FAILURES, and the driver reports the section
+        # delta itself -- re-failing here would inflate the count.
+        note "embedded-assertions: $((end_failures - start_failures)) embedded-content assertion(s) failed"
         return 1
     fi
 

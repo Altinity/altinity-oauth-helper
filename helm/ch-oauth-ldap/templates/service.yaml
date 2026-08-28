@@ -10,7 +10,7 @@ see templates/deployment.yaml).
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ch-oauth-ldap.fullname" . }}
+  name: {{ include "ch-oauth-ldap.fullname" . | quote }}
   labels:
     {{- include "ch-oauth-ldap.labels" . | nindent 4 }}
 spec:
