@@ -74,12 +74,24 @@
 #       scan). Never echoes the captured body in a `die` message.
 #   leakscan_require_artifacts_complete DEST_DIR
 #       The completeness gate: `die`s unless every artifact the scan is
-#       about to trust actually exists AND is non-empty — the three compose
-#       logs, both nodes' on-disk clickhouse-server.log, the runner
-#       transcript, and every captured auth-failure body. A scan over an
-#       empty corpus is trivially "clean" and proves nothing, so an empty
-#       artifact is a hard failure, not a pass. The one deliberate
-#       exception, logged explicitly rather than silently: a node's on-disk
+#       about to trust actually exists AND is non-empty. The required
+#       corpus is built from the ACTIVE arrays, not a hardcoded list, so it
+#       automatically widens for an HA-shaped caller instead of trivially
+#       passing over a corpus that quietly dropped a service's logs:
+#         - one compose log per LEAKSCAN_COMPOSE_SERVICES entry;
+#         - one on-disk clickhouse-server.log per LEAKSCAN_NODES entry;
+#         - the runner transcript (always required, exactly one);
+#         - one file per LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS entry (empty by
+#           default in phase-3 normal mode; an HA caller populates it, e.g.
+#           with the persistent session probe's captured output).
+#       Phase-3's own unreassigned defaults yield exactly the same six
+#       required files this function has always required (three compose
+#       logs, two node server logs, the transcript) — this refactor changes
+#       WHERE the required set comes from, not what it evaluates to for the
+#       caller that never touches the arrays. A scan over an empty corpus
+#       is trivially "clean" and proves nothing, so an empty artifact is a
+#       hard failure, not a pass. The one deliberate exception, logged
+#       explicitly rather than silently: a node's on-disk
 #       clickhouse-server.err.log MAY legitimately be zero bytes when the
 #       server emitted no warnings/errors during the run (the file itself
 #       must still have been readable — see leakscan_collect_artifacts).
@@ -105,24 +117,43 @@
 #       scanner itself is not a valid proof, so nothing it reports
 #       afterward can be trusted either.
 #
+#   LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS
+#       Caller-populated array of additional filenames (relative to the
+#       artifact DEST_DIR, e.g. "session-probe.log") that
+#       leakscan_require_artifacts_complete must also require non-empty,
+#       beyond the compose logs/node logs/transcript it already derives
+#       from LEAKSCAN_COMPOSE_SERVICES/LEAKSCAN_NODES. Empty by default
+#       (phase-3 normal mode requires nothing extra); an HA run reassigns
+#       it (e.g. to hold the persistent session probe's captured output)
+#       the same way it reassigns LEAKSCAN_NODES/LEAKSCAN_COMPOSE_SERVICES
+#       below — see the sourcing-guard note on those two arrays.
+#
 # Every function above takes credential VARIABLE NAMES as arguments,
 # resolving each to its value only internally via bash indirect expansion
 # (`"${!name}"`), exactly like oauth.sh's own documented
 # OAUTH_RETAINED_TOKEN_NAMES contract — callers should pass
 # `"${OAUTH_RETAINED_TOKEN_NAMES[@]}"` through, never a value directly.
-# Guards only the `readonly` declaration below against a second `source`
-# of this file within the same shell (harmless either way here, since
-# run.sh's scenarios/*.sh files each source their own libraries once — see
-# lib/common.sh's sourcing-contract header — but this matches lib/oauth.sh's
-# own idempotent-sourcing discipline rather than assuming it). The function
-# definitions below are always safe to redefine, so they are not guarded.
+# Guards the `readonly` declaration AND the three arrays below (LEAKSCAN_
+# NODES, LEAKSCAN_COMPOSE_SERVICES, LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS)
+# against a second `source` of this file within the same shell — this
+# matters in practice, not just in theory: scenarios/80-leak-scan.sh
+# sources this file itself (see its own header), so a caller such as a
+# future run-ha.sh that sources this file once and then reassigns these
+# three arrays to its HA-shaped values would otherwise have that
+# reassignment silently wiped back to the phase-3 defaults the moment
+# 80-leak-scan.sh's own `source lib/leakscan.sh` line runs later in the
+# same shell. Guarding the assignment (rather than, say, only sourcing this
+# file once ever) is what lets a caller reassign the arrays AFTER its own
+# first source and have that reassignment survive every subsequent source.
+# The function definitions below are always safe to redefine, so they stay
+# unguarded, matching lib/oauth.sh's own idempotent-sourcing discipline.
 if [ -z "${LEAKSCAN_SH_LOADED:-}" ]; then
     LEAKSCAN_SH_LOADED=1
     readonly LEAKSCAN_PROBE_USERNAME="leakscan-probe@example.com"
+    LEAKSCAN_NODES=(clickhouse-origin clickhouse-remote)
+    LEAKSCAN_COMPOSE_SERVICES=(ch-oauth-ldap clickhouse-origin clickhouse-remote)
+    LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS=()
 fi
-
-LEAKSCAN_NODES=(clickhouse-origin clickhouse-remote)
-LEAKSCAN_COMPOSE_SERVICES=(ch-oauth-ldap clickhouse-origin clickhouse-remote)
 
 # leakscan_collect_artifacts DEST_DIR — see contract above.
 leakscan_collect_artifacts() {
@@ -194,20 +225,34 @@ leakscan_capture_auth_failure_bodies() {
 # leakscan_require_artifacts_complete DEST_DIR — see contract above.
 leakscan_require_artifacts_complete() {
     local dir="$1"
-    local f
-    local -a required=(
-        "$dir/compose-ch-oauth-ldap.log"
-        "$dir/compose-clickhouse-origin.log"
-        "$dir/compose-clickhouse-remote.log"
-        "$dir/clickhouse-origin-clickhouse-server.log"
-        "$dir/clickhouse-remote-clickhouse-server.log"
-        "$dir/run-transcript.log"
-    )
+    local f svc node extra
+    local -a required=()
+
+    for svc in "${LEAKSCAN_COMPOSE_SERVICES[@]}"; do
+        required+=("$dir/compose-${svc}.log")
+    done
+    for node in "${LEAKSCAN_NODES[@]}"; do
+        required+=("$dir/${node}-clickhouse-server.log")
+    done
+    required+=("$dir/run-transcript.log")
+    # The `:-` default here is the standard workaround for pre-4.4 bash
+    # treating `"${arr[@]}"` on a declared-but-empty array as an unbound
+    # variable under `set -u` — LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS is empty
+    # by default (phase-3 normal mode), unlike LEAKSCAN_COMPOSE_SERVICES/
+    # LEAKSCAN_NODES which are never intentionally empty. The `-n` guard
+    # below then skips the single empty-string element that idiom yields
+    # when the array truly has nothing in it.
+    for extra in "${LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS[@]:-}"; do
+        [ -n "$extra" ] || continue
+        required+=("$dir/$extra")
+    done
+
     for f in "${required[@]}"; do
         [ -f "$f" ] || die "leak-scan: required artifact '$f' was not collected"
         [ -s "$f" ] || die "leak-scan: required artifact '$f' is EMPTY (0 bytes) — a scan over an empty artifact is trivially clean and proves nothing; refusing to continue"
     done
-    for f in "$dir"/clickhouse-*-clickhouse-server.err.log; do
+    for node in "${LEAKSCAN_NODES[@]}"; do
+        f="$dir/${node}-clickhouse-server.err.log"
         [ -f "$f" ] || die "leak-scan: expected on-disk error log capture '$f' was not collected"
         if [ ! -s "$f" ]; then
             log "leak-scan: note — $(basename "$f") is 0 bytes (this build emitted no warnings/errors to its error log during the run); it was readable and is included in the scan, but there is nothing in it to match against"
@@ -220,7 +265,7 @@ leakscan_require_artifacts_complete() {
         [ -s "$f" ] || die "leak-scan: captured auth-failure body '$f' is EMPTY — the probe request produced no response body to scan"
     done
     [ "$body_count" -gt 0 ] || die "leak-scan: no auth-failure bodies were captured"
-    log "leak-scan: artifact corpus complete — ${#required[@]} required log artifacts non-empty, $body_count auth-failure bodies captured"
+    log "leak-scan: artifact corpus complete — ${#required[@]} required log artifacts non-empty (${#LEAKSCAN_COMPOSE_SERVICES[@]} compose logs, ${#LEAKSCAN_NODES[@]} node server logs, 1 run transcript, ${#LEAKSCAN_REQUIRED_EXTRA_ARTIFACTS[@]} extra), $body_count auth-failure bodies captured"
 }
 
 # leakscan_scan_artifacts DIR NAME... — see contract above.
