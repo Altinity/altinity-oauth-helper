@@ -17,6 +17,9 @@
 //	                                             iat_off  (offset from now, signed, default 0)
 //	                                             nbf_off  (offset from now, signed, default 0)
 //	                                             email_verified (default true)
+//	                                             role     (repeatable; emits a "roles" claim
+//	                                                       as a JSON array of strings; omitted
+//	                                                       entirely when no role is supplied)
 //	POST /rotate?kid=<id>                    — add a new RSA key with this kid; becomes current.
 //	POST /retire?kid=<id>                    — remove a kid from the JWKS but keep the key in memory.
 //	POST /jwks/break?on=true|false           — toggle JWKS 503.
@@ -136,6 +139,7 @@ func signHandler(w http.ResponseWriter, r *http.Request) {
 	iatOff := atoiOr(q.Get("iat_off"), 0)
 	nbfOff := atoiOr(q.Get("nbf_off"), 0)
 	emailVerified := q.Get("email_verified") != "false"
+	roles := q["role"]
 
 	mu.RLock()
 	if kid == "" {
@@ -167,6 +171,9 @@ func signHandler(w http.ResponseWriter, r *http.Request) {
 		"iat":            now + int64(iatOff),
 		"nbf":            now + int64(nbfOff),
 		"exp":            now + int64(expSec),
+	}
+	if len(roles) > 0 {
+		claims["roles"] = roles
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {

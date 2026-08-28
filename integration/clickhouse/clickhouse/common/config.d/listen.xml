@@ -1,0 +1,21 @@
+<!--
+  integration/clickhouse/clickhouse/common/config.d/listen.xml
+
+  The fixture mounts a whole directory over /etc/clickhouse-server/config.d
+  on each node (see "ClickHouse config mount policy and network listeners"
+  in the phase-3 plan), which shadows the pinned image's baked
+  docker_related_config.xml — the file that otherwise supplies wildcard
+  listeners. Without this replacement the server only listens on
+  127.0.0.1/::1 and is unreachable from any other container: neither the
+  host's published loopback port 8123 nor an origin -> clickhouse-remote:9000
+  native connection would work.
+
+  This is a verbatim copy of the pinned altinity/clickhouse-server image's
+  own docker_related_config.xml (verified directly against
+  altinity/clickhouse-server:24.8.11.51285.altinitystable).
+-->
+<clickhouse>
+    <listen_host>::</listen_host>
+    <listen_host>0.0.0.0</listen_host>
+    <listen_try>1</listen_try>
+</clickhouse>
