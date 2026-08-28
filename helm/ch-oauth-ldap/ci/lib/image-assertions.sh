@@ -112,6 +112,28 @@
 #     - static proof (review Finding 2) that the manual script's `docker
 #       manifest inspect` tag-existence check precedes its first `docker
 #       push`, with no force-override knob.
+#     - a TAG-IMMUTABILITY FAIL-CLOSED behavioral proof (review pass 4): the
+#       real, unmodified script run against a throwaway repo with a
+#       PATH-stubbed `docker manifest inspect` that exits nonzero with a
+#       generic (non-"not found") error, reproducing the review's own
+#       rc=2 case -- proves the run aborts via the new fail-closed refusal,
+#       distinctly from the ordinary "tag already exists" refusal, and
+#       never reaches a single `docker pull`/`build`/`push` call.
+#     - static proof (review pass 4) that a `check_tag_absent` recheck of
+#       each tag runs a SECOND time, immediately before the mutating call
+#       that actually publishes it (`docker push` per arch, `docker
+#       manifest create` for the shared final tag) -- not just once, in the
+#       batch check before any build/push work.
+#     - an ENV-MARKER INJECTION behavioral proof (review pass 4, Finding 2):
+#       (a) a caller-supplied `_CH_OAUTH_LDAP_IMAGE_SELF_COPY` pointing at an
+#       unrelated file is never deleted by the cleanup trap, proven on an
+#       early exit that predates the point the self re-exec section would
+#       legitimately reassign that variable; (b) a caller-forged
+#       `_CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED=1` does not skip the self
+#       re-exec from HEAD -- proven against a throwaway repo whose on-disk
+#       script is tampered with a PLAIN (non-`--assume-unchanged`) edit
+#       neutralizing both the dirty-tree and tag-republish guards, where
+#       the genuine (HEAD) guard still correctly refuses.
 #     - .github/workflows/build-ch-oauth-ldap.yml (plan sections 51, A7):
 #       image path, `main`-only push plus workflow_dispatch with
 #       tag_prefix reaching the shell only through `env:` (never inlined in
@@ -119,9 +141,13 @@
 #       main.version stamp, amd64/arm64, immutable-tag-only (no `:main` /
 #       `:latest`), per-arch $RUNNER_TEMP/runner.temp context and Docker
 #       build `context:` that is never checkout root, the binary chmod
-#       0755, cancel-in-progress concurrency, and (review Finding 2) that
-#       its `docker buildx imagetools inspect` tag-existence check precedes
-#       the build-push action, with no force-override input.
+#       0755, cancel-in-progress concurrency, (review Finding 2) that its
+#       `docker buildx imagetools inspect` tag-existence check precedes the
+#       build-push action with no force-override input, and (review pass 4)
+#       that both the per-arch guard and the manifest job's own final
+#       recheck (immediately before `docker buildx imagetools create`) use
+#       the same fail-closed "not found" disambiguation as the manual
+#       script's check_tag_absent, rather than a bare nonzero-exit check.
 #     - a final `test ! -e "$REPO_ROOT/ch-oauth-ldap"` proving none of the
 #       above checks (nor anything else already on disk) left a compiled
 #       LDAP binary in the repository root.
@@ -361,6 +387,7 @@ _ia_script_static_assertions() {
     _ia_script_dirty_tree_guard_static "$script"
     _ia_script_head_export_static "$script"
     _ia_script_tag_republish_static "$script"
+    _ia_script_tag_immutability_recheck_static "$script"
 }
 
 # _ia_script_head_export_static SCRIPT
@@ -429,6 +456,50 @@ _ia_script_tag_republish_static() {
     fi
 
     assert_not_match "$script" 'FORCE' F
+}
+
+# _ia_script_tag_immutability_recheck_static SCRIPT
+# Static proof of review pass 4's non-atomicity fix: the batch
+# check_tag_absent loop at the top of the script (before any build/push
+# work) is not the only place the tag is checked -- a second recheck of the
+# SAME tag must run immediately before each point that actually mutates the
+# registry (the per-arch `docker push`, and `docker manifest create` for
+# the shared final tag), narrowing the window a concurrent publisher could
+# slip through while this run's own per-arch builds (which can each take a
+# while) are in flight.
+_ia_script_tag_immutability_recheck_static() {
+    local script="$1"
+    local push_line create_line recheck_arch_line recheck_final_line
+
+    assert_match "$script" 'check_tag_absent()' F
+
+    # Fails open with a fixed count of 2 rather than "at least 2": the batch
+    # check and the mutation-site recheck are the only two legitimate call
+    # sites for each tag form -- a third occurrence would mean either a
+    # dangling leftover from a previous edit or a check that stopped being
+    # where this test expects it.
+    assert_count "$script" 'check_tag_absent "${FULL}:${TAG}-${arch}"' 2 F
+    assert_count "$script" 'check_tag_absent "${FULL}:${TAG}"' 2 F
+
+    push_line=$(command grep -nF 'docker push "${FULL}:${TAG}-${arch}"' "$script" | command tail -n1 | command cut -d: -f1)
+    recheck_arch_line=$(command grep -nF 'check_tag_absent "${FULL}:${TAG}-${arch}"' "$script" | command tail -n1 | command cut -d: -f1)
+    if [ -z "$push_line" ] || [ -z "$recheck_arch_line" ]; then
+        fail "$script: could not locate both the per-arch docker push and a check_tag_absent recheck to order them"
+    elif [ "$recheck_arch_line" -lt "$push_line" ]; then
+        pass "$script: a check_tag_absent recheck (line $recheck_arch_line) immediately precedes the per-arch docker push (line $push_line)"
+    else
+        fail "$script: expected a check_tag_absent recheck to precede the per-arch docker push (line $push_line) -- found the closest check_tag_absent call for this tag form at line $recheck_arch_line"
+    fi
+
+    create_line=$(command grep -nF 'docker manifest create "${FULL}:${TAG}"' "$script" | command tail -n1 | command cut -d: -f1)
+    recheck_final_line=$(command grep -nF 'check_tag_absent "${FULL}:${TAG}"' "$script" | command tail -n1 | command cut -d: -f1)
+    if [ -z "$create_line" ] || [ -z "$recheck_final_line" ]; then
+        fail "$script: could not locate both 'docker manifest create' and a check_tag_absent recheck to order them"
+    elif [ "$recheck_final_line" -lt "$create_line" ]; then
+        pass "$script: a check_tag_absent recheck (line $recheck_final_line) immediately precedes docker manifest create (line $create_line)"
+    else
+        fail "$script: expected a check_tag_absent recheck to precede docker manifest create (line $create_line) -- found the closest check_tag_absent call for this tag form at line $recheck_final_line"
+    fi
 }
 
 # _ia_script_dirty_tree_guard_static SCRIPT
@@ -645,7 +716,31 @@ _ia_script_sigint_regression() {
     local sigint_repo="$RUN_TMP_DIR/sigint-image-repo"
     _ia_dtg_new_repo "$sigint_repo"
 
-    REPO="$sigint_repo" gate_sigint_regression "SIGINT regression" "$script" "ch-oauth-ldap-image." "$RUN_TMP_DIR/sigint-image"
+    # This throwaway repo's HEAD has no tag published against it, so the
+    # tag-existence check reaches a real `docker manifest inspect` against
+    # the script's default ghcr.io/altinity/ch-oauth-ldap -- a live,
+    # unauthenticated network call. Review pass 4 made that check fail
+    # closed on anything that isn't an unambiguous "not found" response,
+    # and ghcr.io itself answers "denied" (ambiguous) rather than
+    # not-found for an unauthenticated inspect of a genuinely absent tag,
+    # so without a stub the script would now abort at that check --
+    # before ever reaching the run-directory `mkdir` this regression
+    # targets. Stub `docker` with the same deterministic "not found"
+    # answer used elsewhere in this file, so this regression stays about
+    # the mkdir/SIGINT/cleanup sequence, not registry/network state.
+    local sigint_stub="$RUN_TMP_DIR/sigint-image-stub"
+    command mkdir -p "$sigint_stub"
+    cat >"$sigint_stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+if [ "$1" = "manifest" ] && [ "$2" = "inspect" ]; then
+    echo "no such manifest: stubbed" >&2
+    exit 1
+fi
+exit 0
+DOCKER_STUB
+    command chmod +x "$sigint_stub/docker"
+
+    REPO="$sigint_repo" PATH="$sigint_stub:$PATH" gate_sigint_regression "SIGINT regression" "$script" "ch-oauth-ldap-image." "$RUN_TMP_DIR/sigint-image"
 }
 
 # _ia_dtg_new_repo DIR
@@ -687,7 +782,7 @@ _ia_script_dirty_tree_guard() {
 
     local base="$RUN_TMP_DIR/dirty-tree-guard"
     local refusal_marker="refusing to publish"
-    command mkdir -p "$base/tmp"
+    command mkdir -p "$base/tmp" "$base/stub"
 
     local clean_dir="$base/clean" tracked_dir="$base/tracked" untracked_dir="$base/untracked"
     _ia_dtg_new_repo "$clean_dir"
@@ -699,9 +794,32 @@ _ia_script_dirty_tree_guard() {
     # untracked-dirty: add a brand-new file, never `git add`ed.
     printf 'stray\n' >"$untracked_dir/stray.txt"
 
+    # The clean-tree case (only) survives the dirty-tree guard and reaches
+    # the real script's tag-existence check, which -- since REPO/IMAGE are
+    # left at their real ghcr.io/altinity/ch-oauth-ldap default here -- would
+    # otherwise be a live, unauthenticated network call. Review pass 4 made
+    # that check fail closed on anything that isn't an unambiguous "not
+    # found" response, and an unauthenticated `docker manifest inspect`
+    # against ghcr.io answers "denied" even for a genuinely absent tag, so
+    # this scenario would flip from "fails later at go build" (the
+    # documented expectation below) to "refused by the tag-existence check"
+    # for a reason that has nothing to do with the dirty-tree guard under
+    # test. Stub `docker` to give the same deterministic "not found" answer
+    # the rest of this file's behavioral tests use, so this check never
+    # depends on network reachability or registry auth state.
+    cat >"$base/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+if [ "$1" = "manifest" ] && [ "$2" = "inspect" ]; then
+    echo "no such manifest: stubbed" >&2
+    exit 1
+fi
+exit 0
+DOCKER_STUB
+    command chmod +x "$base/stub/docker"
+
     local status
 
-    REPO="$clean_dir" TMPDIR="$base/tmp" bash "$script" \
+    REPO="$clean_dir" TMPDIR="$base/tmp" PATH="$base/stub:$PATH" bash "$script" \
         >"$base/clean.out" 2>"$base/clean.err"
     status=$?
     if command grep -qF "$refusal_marker" "$base/clean.err"; then
@@ -759,7 +877,25 @@ _ia_script_dirty_tree_guard_bypasses() {
 
     local base="$RUN_TMP_DIR/dirty-tree-guard-bypasses"
     local refusal_marker="refusing to publish"
-    command mkdir -p "$base/tmp"
+    command mkdir -p "$base/tmp" "$base/stub"
+
+    # Case 2 below is a clean-tree-per-guard scenario (same shape as
+    # _ia_script_dirty_tree_guard's "clean" case) that reaches the real
+    # script's tag-existence check with REGISTRY/IMAGE left at their real
+    # ghcr.io/altinity/ch-oauth-ldap default -- stub `docker` so that check
+    # never depends on live network reachability or registry auth state
+    # (see the matching comment in _ia_script_dirty_tree_guard for why this
+    # matters now that check_tag_absent, added in review pass 4, fails
+    # closed on anything but an unambiguous "not found" response).
+    cat >"$base/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+if [ "$1" = "manifest" ] && [ "$2" = "inspect" ]; then
+    echo "no such manifest: stubbed" >&2
+    exit 1
+fi
+exit 0
+DOCKER_STUB
+    command chmod +x "$base/stub/docker"
 
     local show_untracked_dir="$base/show-untracked-no" gitignored_dir="$base/gitignored"
     _ia_dtg_new_repo "$show_untracked_dir"
@@ -794,7 +930,7 @@ _ia_script_dirty_tree_guard_bypasses() {
         fail "dirty-tree guard bypasses: status.showUntrackedFiles=no + untracked .go in $show_untracked_dir was NOT refused (exit $status): $(command head -n3 "$base/show-untracked.err")"
     fi
 
-    REPO="$gitignored_dir" TMPDIR="$base/tmp" bash "$script" \
+    REPO="$gitignored_dir" TMPDIR="$base/tmp" PATH="$base/stub:$PATH" bash "$script" \
         >"$base/gitignored.out" 2>"$base/gitignored.err"
     status=$?
     if command grep -qF "$refusal_marker" "$base/gitignored.err"; then
@@ -855,6 +991,11 @@ echo "docker $*" >>"$IA_DOCKER_LOG"
 case "$1" in
     manifest)
         if [ "$2" = "inspect" ]; then
+            # An unambiguous "not found" signature -- the real script's
+            # check_tag_absent (review pass 4) now requires this before
+            # treating a nonzero exit as "tag absent" rather than aborting
+            # as an ambiguous inspection failure.
+            echo "no such manifest: stubbed" >&2
             exit 1
         fi
         exit 0
@@ -1148,6 +1289,9 @@ echo "docker $*" >>"$IA_DOCKER_LOG"
 case "$1" in
     manifest)
         if [ "$2" = "inspect" ]; then
+            # Unambiguous "not found" signature -- see check_tag_absent
+            # (review pass 4) in the real script.
+            echo "no such manifest: stubbed" >&2
             exit 1
         fi
         exit 0
@@ -1206,6 +1350,9 @@ echo "docker $*" >>"$IA_DOCKER_LOG"
 case "$1" in
     manifest)
         if [ "$2" = "inspect" ]; then
+            # Unambiguous "not found" signature -- see check_tag_absent
+            # (review pass 4) in the real script.
+            echo "no such manifest: stubbed" >&2
             exit 1
         fi
         exit 0
@@ -1248,6 +1395,223 @@ DOCKER_STUB
         fail "realistic re-exec proof (failure): a ch-oauth-ldap-image.* run directory leaked under $fdir/tmp after a mid-build failure"
     else
         pass "realistic re-exec proof (failure): no ch-oauth-ldap-image.* run directory left under $fdir/tmp after a mid-build failure"
+    fi
+}
+
+# _ia_script_tag_immutability_fail_closed_behavioral SCRIPT
+# Behavioral proof of review pass 4's Finding 1: a `docker manifest
+# inspect` failure that is NOT an unambiguous "not found" response (an
+# auth/transport/registry error -- reproduced here the same way the review
+# did, with an inspect that exits nonzero and prints an unrelated error) must
+# abort the whole run before any build/push work, not be silently treated as
+# "tag absent". Runs the real, unmodified script against a throwaway repo
+# with a PATH-stubbed `docker` whose `manifest inspect` always exits 2 with
+# a generic (non-"not found") error, and asserts: (a) the run fails, (b) the
+# failure text is the new ambiguous-inspection-failure refusal, distinct
+# from the ordinary "tag already exists" refusal, and (c) the run never
+# reaches `docker pull`/`docker build`/`docker push` -- fail-closed means no
+# build work happens on doubt, not just "eventually fails at push time".
+_ia_script_tag_immutability_fail_closed_behavioral() {
+    local script="$1"
+    _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
+
+    if ! command -v git >/dev/null 2>&1; then
+        fail "tag-immutability fail-closed proof: git not on PATH"
+        return
+    fi
+
+    local base="$RUN_TMP_DIR/tag-immutability-fail-closed"
+    local repo="$base/repo"
+    command mkdir -p "$repo/cmd/ch-oauth-ldap" "$base/stub" "$base/tmp"
+
+    git -C "$repo" init -q
+    git -C "$repo" config user.email gate@example.invalid
+    git -C "$repo" config user.name gate
+    printf 'FROM scratch\n' >"$repo/Dockerfile.ch-oauth-ldap"
+    printf 'module example.com/ia-fail-closed\n\ngo 1.22\n' >"$repo/go.mod"
+    printf 'package main\n\nfunc main() {}\n' >"$repo/cmd/ch-oauth-ldap/main.go"
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m init
+
+    local docker_log="$base/docker.log"
+    : >"$docker_log"
+    cat >"$base/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+echo "docker $*" >>"$IA_DOCKER_LOG"
+if [ "$1" = "manifest" ] && [ "$2" = "inspect" ]; then
+    # Neither "success" (tag exists) nor a recognized "not found" response --
+    # simulates an auth/transport/registry error, exactly the class the
+    # review reproduced with rc=2.
+    echo "docker: error requesting authorization" >&2
+    exit 2
+fi
+exit 0
+DOCKER_STUB
+    command chmod +x "$base/stub/docker"
+
+    REPO="$repo" \
+        TMPDIR="$base/tmp" \
+        PATH="$base/stub:$PATH" \
+        IA_DOCKER_LOG="$docker_log" \
+        bash "$script" \
+        >"$base/run.out" 2>"$base/run.err"
+    local status=$?
+
+    if [ "$status" -eq 0 ]; then
+        fail "tag-immutability fail-closed proof: script exited 0 despite an inspect failure that is neither a match nor a recognized \"not found\" response -- an ambiguous registry-inspection error was silently treated as \"tag absent\": $(command tail -n5 "$base/run.out")"
+        return
+    fi
+
+    if command grep -qF "could not determine whether" "$base/run.err"; then
+        pass "tag-immutability fail-closed proof: an ambiguous docker manifest inspect failure (exit 2, non-\"not found\" text) aborts the run via the new fail-closed refusal (exit $status)"
+    else
+        fail "tag-immutability fail-closed proof: script exited nonzero ($status) but not via the expected fail-closed refusal -- see $base/run.err: $(command tail -n5 "$base/run.err")"
+    fi
+
+    if command grep -qF "already exist in the registry" "$base/run.err"; then
+        fail "tag-immutability fail-closed proof: the ambiguous inspect failure was reported as the ordinary \"tag already exists\" refusal, not distinguished as an inspection failure: $(command tail -n5 "$base/run.err")"
+    else
+        pass "tag-immutability fail-closed proof: the ambiguous inspect failure is reported distinctly from the ordinary \"tag already exists\" refusal"
+    fi
+
+    if command grep -qE '^docker (pull|build|push)' "$docker_log"; then
+        fail "tag-immutability fail-closed proof: the run reached a docker pull/build/push call despite the ambiguous inspect failure -- fail-closed must stop before any build/push work, not just fail later: $(cat "$docker_log")"
+    else
+        pass "tag-immutability fail-closed proof: no docker pull/build/push call was reached -- the run stopped before any build/push work"
+    fi
+}
+
+# _ia_script_env_marker_injection_behavioral SCRIPT
+# Behavioral proof of review pass 4's Finding 2: neither
+# _CH_OAUTH_LDAP_IMAGE_SELF_COPY nor _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED may
+# be trusted when inherited from an external caller's environment.
+#
+# Part (a) -- arbitrary file deletion: a caller sets ONLY
+# _CH_OAUTH_LDAP_IMAGE_SELF_COPY to an unrelated "victim" file and points
+# REPO at a directory that fails the very first check the real script
+# performs (a missing Dockerfile.ch-oauth-ldap) -- deliberately BEFORE the
+# self re-exec section would ever reassign that variable to its own
+# legitimate temp-file path, isolating exactly the vulnerable window the
+# review reproduced (their own repro used only the trap/cleanup lines in
+# isolation; this drives the real, complete script to the same place). The
+# victim file must survive.
+#
+# Part (b) -- provenance-bypass: a throwaway repo commits the REAL script
+# content (copied from SCRIPT, never a hand-duplicated copy), then the
+# on-disk copy is tampered with a PLAIN edit (deliberately NOT
+# --assume-unchanged, which _ia_script_self_tamper_behavioral already
+# covers as a separate vector) neutralizing both the dirty-tree guard's and
+# the tag-republish guard's `exit 1`. The tampered copy is then run with
+# _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED=1 forged in the environment. Before the
+# fix, a bare `-n` check on that marker would skip the self re-exec entirely
+# and run the tampered on-disk bytes as-is, including their own neutralized
+# guards -- no --assume-unchanged trickery required, just one env var. After
+# the fix, the forged marker (not equal to this process's own PID) is
+# rejected, the real re-exec fires, and the genuine (HEAD, untampered)
+# dirty-tree guard correctly refuses on the actual (git-status-visible)
+# dirty tree.
+_ia_script_env_marker_injection_behavioral() {
+    local script="$1"
+    _ia_require_file "scripts/build-ch-oauth-ldap-image.sh" "$script" || return
+
+    # --- part (a): SELF_COPY must not be honored as a deletion target -------
+    local adir="$RUN_TMP_DIR/env-marker-injection-copy"
+    command mkdir -p "$adir/emptyrepo"
+    local victim="$adir/victim.txt"
+    printf 'do not delete me\n' >"$victim"
+
+    REPO="$adir/emptyrepo" \
+        TMPDIR="$adir/tmp" \
+        _CH_OAUTH_LDAP_IMAGE_SELF_COPY="$victim" \
+        bash "$script" \
+        >"$adir/run.out" 2>"$adir/run.err"
+    local a_status=$?
+
+    if [ "$a_status" -eq 0 ]; then
+        fail "env-marker injection proof (deletion): expected the script to fail the Dockerfile precheck against $adir/emptyrepo (which has no Dockerfile.ch-oauth-ldap), got exit 0 -- see $adir/run.out"
+    elif [ -e "$victim" ]; then
+        pass "env-marker injection proof (deletion): a caller-supplied _CH_OAUTH_LDAP_IMAGE_SELF_COPY pointing at an unrelated file is NOT deleted by the cleanup trap"
+    else
+        fail "env-marker injection proof (deletion): cleanup trap deleted a caller-supplied _CH_OAUTH_LDAP_IMAGE_SELF_COPY path ($victim) on an early, pre-re-exec exit -- the private marker was trusted straight from the environment instead of being bound to this process's own PID"
+    fi
+
+    # --- part (b): SELF_VERIFIED must not skip the self re-exec -------------
+    if ! command -v git >/dev/null 2>&1; then
+        fail "env-marker injection proof (provenance bypass): git not on PATH"
+        return
+    fi
+
+    local base="$RUN_TMP_DIR/env-marker-injection-verified"
+    local repo="$base/repo"
+    command mkdir -p "$repo/scripts" "$repo/cmd/ch-oauth-ldap" "$base/stub" "$base/tmp"
+
+    git -C "$repo" init -q
+    git -C "$repo" config user.email gate@example.invalid
+    git -C "$repo" config user.name gate
+    printf 'FROM scratch\n' >"$repo/Dockerfile.ch-oauth-ldap"
+    printf 'module example.com/ia-env-marker\n\ngo 1.22\n' >"$repo/go.mod"
+    printf 'package main\n\nfunc main() {}\n' >"$repo/cmd/ch-oauth-ldap/main.go"
+    command cp "$script" "$repo/scripts/build-ch-oauth-ldap-image.sh"
+    command chmod +x "$repo/scripts/build-ch-oauth-ldap-image.sh"
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m init
+
+    # Plain edit -- no --assume-unchanged -- neutralizing both guards'
+    # `exit 1`. This intentionally makes the working tree dirty per an
+    # ordinary `git status`; the point of this test is that the OLD
+    # (vulnerable) code never even reaches that check, because a forged
+    # SELF_VERIFIED alone was enough to skip straight to running these
+    # tampered bytes.
+    local tampered="$repo/scripts/build-ch-oauth-ldap-image.sh"
+    local dtg_anchor dtg_exit_line trg_anchor trg_exit_line
+    dtg_anchor=$(command grep -nF 'so canonical publication requires a clean tree' "$tampered" | command head -n1 | command cut -d: -f1)
+    trg_anchor=$(command grep -nF 'There is no force override.' "$tampered" | command head -n1 | command cut -d: -f1)
+    if [ -z "$dtg_anchor" ] || [ -z "$trg_anchor" ]; then
+        fail "env-marker injection proof (provenance bypass): could not locate both guards' refusal text in the committed script to tamper"
+        return
+    fi
+    dtg_exit_line=$((dtg_anchor + 2))
+    trg_exit_line=$((trg_anchor + 1))
+    command awk -v d="$dtg_exit_line" -v t="$trg_exit_line" '
+        NR == d { sub(/exit 1/, ": # tampered: dirty-tree guard neutralized") }
+        NR == t { sub(/exit 1/, ": # tampered: tag-republish guard neutralized") }
+        { print }
+    ' "$tampered" >"$tampered.new"
+    command mv "$tampered.new" "$tampered"
+    command chmod +x "$tampered"
+    if ! command grep -qF 'tampered: dirty-tree guard neutralized' "$tampered" || \
+        ! command grep -qF 'tampered: tag-republish guard neutralized' "$tampered"; then
+        fail "env-marker injection proof (provenance bypass): failed to tamper both guards (dirty-tree line $dtg_exit_line, tag-republish line $trg_exit_line were not the expected 'exit 1')"
+        return
+    fi
+
+    # This test expects the dirty-tree guard to refuse before the script
+    # ever reaches a tag-existence check, so this stub should never
+    # actually run -- kept only as defensive scaffolding in case ordering
+    # changes; "denied" + nonzero mirrors ghcr.io's real (ambiguous)
+    # response rather than signaling "tag exists" (exit 0).
+    cat >"$base/stub/docker" <<'DOCKER_STUB'
+#!/bin/bash
+if [ "$1" = "manifest" ] && [ "$2" = "inspect" ]; then
+    echo "denied" >&2
+    exit 1
+fi
+exit 0
+DOCKER_STUB
+    command chmod +x "$base/stub/docker"
+
+    REPO="$repo" \
+        TMPDIR="$base/tmp" \
+        PATH="$base/stub:$PATH" \
+        _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED=1 \
+        bash "$tampered" \
+        >"$base/run.out" 2>"$base/run.err"
+    local b_status=$?
+
+    if [ "$b_status" -ne 0 ] && command grep -qF "refusing to publish" "$base/run.err"; then
+        pass "env-marker injection proof (provenance bypass): a caller-forged _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED=1 does not skip the self re-exec from HEAD -- the genuine (untampered) guard still refused (exit $b_status)"
+    else
+        fail "env-marker injection proof (provenance bypass): script exited $b_status without the genuine guard's refusal -- a caller-forged _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED=1 skipped the self re-exec, letting the tampered on-disk copy's neutralized guards run: $(command tail -n5 "$base/run.err")"
     fi
 }
 
@@ -1312,6 +1676,7 @@ _ia_workflow_assertions() {
     assert_match "$workflow" 'cancel-in-progress: true'
 
     _ia_workflow_tag_republish_static "$workflow"
+    _ia_workflow_tag_immutability_fail_closed_static "$workflow"
 }
 
 # _ia_workflow_tag_republish_static WORKFLOW
@@ -1366,6 +1731,50 @@ _ia_workflow_tag_republish_static() {
     assert_not_match "$workflow" 'FORCE' F
 }
 
+# _ia_workflow_tag_immutability_fail_closed_static WORKFLOW
+# Static proof of review pass 4's two workflow fixes, mirroring the manual
+# script's check_tag_absent:
+#   (1) fail-closed disambiguation -- both the per-arch guard step (build
+#       job) and the manifest job's own recheck must require an unambiguous
+#       "not found" signature in the inspect output before treating a tag as
+#       absent, never a bare nonzero-exit check (a registry auth/transport
+#       error looks identical to a genuine absence on exit code alone).
+#   (2) non-atomicity -- the manifest job must recheck the shared final tag
+#       immediately before `docker buildx imagetools create` mutates it,
+#       rather than relying solely on the per-arch guard that ran earlier,
+#       in a different job, against a possibly-stale registry state.
+_ia_workflow_tag_immutability_fail_closed_static() {
+    local workflow="$1"
+    local recheck_step_line create_line manifest_job_line
+
+    # NOT_FOUND_PATTERN appears exactly four times -- a definition and a
+    # use in the build job's per-arch guard, and the same pair again in the
+    # manifest job's final recheck. Any other count means one of the two
+    # guard steps regressed to a bare truthiness check (or the pattern was
+    # factored out somewhere this test would no longer see it).
+    assert_count "$workflow" 'NOT_FOUND_PATTERN' 4 F
+
+    manifest_job_line=$(command grep -nE '^[[:space:]]*manifest:' "$workflow" | command head -n1 | command cut -d: -f1)
+    recheck_step_line=$(command grep -nF 'Refuse to republish an already-published tag (final recheck)' "$workflow" | command head -n1 | command cut -d: -f1)
+    create_line=$(command grep -nF 'docker buildx imagetools create' "$workflow" | command head -n1 | command cut -d: -f1)
+
+    if [ -z "$manifest_job_line" ] || [ -z "$recheck_step_line" ] || [ -z "$create_line" ]; then
+        fail "$workflow: could not locate the manifest job, its final-recheck step, and 'docker buildx imagetools create' to order them"
+        return
+    fi
+    if [ "$recheck_step_line" -lt "$manifest_job_line" ]; then
+        fail "$workflow: the final-recheck step (line $recheck_step_line) must be inside the manifest job (which starts at line $manifest_job_line), not before it"
+        return
+    fi
+    if [ "$recheck_step_line" -lt "$create_line" ]; then
+        pass "$workflow: the manifest job's final-recheck step (line $recheck_step_line) precedes 'docker buildx imagetools create' (line $create_line)"
+    else
+        fail "$workflow: expected the manifest job's final-recheck step (line $recheck_step_line) to precede 'docker buildx imagetools create' (line $create_line)"
+    fi
+
+    assert_not_match "$workflow" 'FORCE' F
+}
+
 # =============================================================================
 # Entry point
 # =============================================================================
@@ -1398,6 +1807,8 @@ run_image_assertions() {
     _ia_script_self_tamper_behavioral "$_IA_SCRIPT"
     _ia_script_realistic_reexec_behavioral "$_IA_SCRIPT"
     _ia_script_head_export_behavioral "$_IA_SCRIPT"
+    _ia_script_tag_immutability_fail_closed_behavioral "$_IA_SCRIPT"
+    _ia_script_env_marker_injection_behavioral "$_IA_SCRIPT"
     _ia_workflow_assertions
 
     if [ -e "$REPO_ROOT/ch-oauth-ldap" ]; then

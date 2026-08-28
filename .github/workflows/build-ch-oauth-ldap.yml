@@ -24,6 +24,28 @@ name: Build & push ch-oauth-ldap image
 # it to a different manifest. Re-run from a new commit, or dispatch with a
 # different `tag_prefix`.
 #
+# Review pass 4 hardened this guard twice more. (1) Fail closed on doubt:
+# a bare nonzero exit from `docker buildx imagetools inspect` no longer
+# means "tag absent" -- an auth/transport/registry error looks identical to
+# a genuine absence on exit code alone (ghcr.io itself returns "denied",
+# not a not-found error, for an unauthenticated/under-scoped inspect of a
+# tag that IS genuinely absent), so every guard step now requires an
+# unambiguous "not found" signature in the inspect output before treating
+# a tag as absent; anything else aborts the job. (2) Non-atomicity: the
+# per-arch `build` job's guard only ever inspected the shared final tag
+# once, before ITS OWN push -- the separate `manifest` job that later
+# assembles that tag never rechecked it, leaving a window (the full
+# duration of both arches' builds) in which a concurrent publisher (an
+# Actions run against the same commit, or a manual
+# `scripts/build-ch-oauth-ldap-image.sh` run -- the two are disjoint
+# processes with no shared lock) could publish the tag first. The
+# `manifest` job now rechecks immediately before `docker buildx imagetools
+# create` mutates it. Full atomicity across two disjoint publisher
+# processes still is not achievable without a registry-side conditional
+# create or a distributed lock (out of scope here); this recheck narrows
+# the race window from "the whole build" to "immediately before the
+# mutating call" for both the per-arch guard and this one.
+#
 # Read-only post-publication note (plan §26): the first time this workflow
 # publishes an image, do NOT assume the GHCR package's repository linkage,
 # its exact manifest contents, or whether anonymous/unauthenticated pulls
@@ -125,10 +147,31 @@ jobs:
           TAG: ${{ steps.vars.outputs.tag }}
           ARCH: ${{ matrix.arch }}
         run: |
+          # Review pass 4: a bare truthiness check on `docker buildx
+          # imagetools inspect`'s exit code cannot tell "tag genuinely
+          # absent" apart from an auth/transport/registry error -- both
+          # come back nonzero, and treating every nonzero as "absent" lets
+          # an operational failure silently wave publication through
+          # (some registries make this worse: an unauthenticated/
+          # under-scoped inspect against ghcr.io returns "denied" for a
+          # tag that's genuinely absent too, so exit code alone is not
+          # enough on every registry). Require an unambiguous "not found"
+          # signature in the inspect output before treating a tag as
+          # absent; anything else aborts the job rather than proceeding --
+          # fail closed on doubt, per the tag-immutability guarantee in
+          # helm/ch-oauth-ldap/README.md.
           FULL="${REGISTRY}/${IMAGE}"
+          NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
           for CANDIDATE in "${FULL}:${TAG}" "${FULL}:${TAG}-${ARCH}"; do
-            if docker buildx imagetools inspect "${CANDIDATE}" >/dev/null 2>&1; then
+            OUT=$(docker buildx imagetools inspect "${CANDIDATE}" 2>&1)
+            RC=$?
+            if [ "$RC" -eq 0 ]; then
               echo "refusing to publish: ${CANDIDATE} already exists in the registry and would be silently moved to a possibly different manifest. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
+              exit 1
+            fi
+            if ! printf '%s' "$OUT" | grep -qiE "$NOT_FOUND_PATTERN"; then
+              echo "refusing to publish: could not determine whether ${CANDIDATE} already exists in the registry -- 'docker buildx imagetools inspect' exited ${RC} with a response that is not a recognized \"not found\" signature, so this is being treated as an operational/transport/auth failure rather than proof the tag is absent. Fix the underlying registry-inspection error and re-run. Raw output:" >&2
+              printf '%s\n' "$OUT" >&2
               exit 1
             fi
           done
@@ -153,6 +196,33 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to republish an already-published tag (final recheck)
+        run: |
+          # Review pass 4: the per-arch `build` job's own guard (above)
+          # inspected this shared final tag once, before that arch's push --
+          # but this job runs separately, after BOTH arches finished
+          # building and pushing, which is exactly the window a concurrent
+          # publisher (another Actions run, or someone running
+          # scripts/build-ch-oauth-ldap-image.sh by hand) on the same
+          # commit could have published this tag in. Recheck immediately
+          # before `docker buildx imagetools create` mutates it, with the
+          # same fail-closed-on-ambiguous-error handling as the per-arch
+          # guard (see its comment for the ghcr.io "denied" rationale).
+          TAG="${{ needs.build.outputs.tag }}"
+          FULL="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
+          OUT=$(docker buildx imagetools inspect "${FULL}:${TAG}" 2>&1)
+          RC=$?
+          if [ "$RC" -eq 0 ]; then
+            echo "refusing to publish: ${FULL}:${TAG} already exists in the registry and would be silently moved to a possibly different manifest -- it must have been published by another run while this job's per-arch builds were in progress. Re-run from a new commit, or dispatch with a different tag_prefix. There is no force override." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$OUT" | grep -qiE "$NOT_FOUND_PATTERN"; then
+            echo "refusing to publish: could not determine whether ${FULL}:${TAG} already exists in the registry -- 'docker buildx imagetools inspect' exited ${RC} with a response that is not a recognized \"not found\" signature, so this is being treated as an operational/transport/auth failure rather than proof the tag is absent. Fix the underlying registry-inspection error and re-run. Raw output:" >&2
+            printf '%s\n' "$OUT" >&2
+            exit 1
+          fi
 
       - name: Assemble multi-arch manifest
         run: |

@@ -94,18 +94,46 @@
 
 set -euo pipefail
 
+# --- neutralize caller-supplied private markers -----------------------------
+# _CH_OAUTH_LDAP_IMAGE_SELF_COPY and _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED are
+# BOTH meant to be private, internal-only state: the self re-exec section
+# further down sets and exports them immediately before `exec`, so the
+# re-exec'd child inherits them from the very same process (`exec` overlays
+# the running program but never changes the process's own PID). Before this
+# fix, a caller could set either directly -- `_CH_OAUTH_LDAP_IMAGE_SELF_COPY`
+# to an arbitrary path, which the cleanup trap below unconditionally `rm
+# -f`s on every exit, or `_CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED` to any
+# non-empty value, which made the self re-exec section (guarded by a bare
+# `-z` check) skip re-running from `git show HEAD:...` entirely -- the exact
+# provenance step that neutralizes an on-disk tamper of this script's own
+# bytes (see the header comment above). Bind the marker to something an
+# external caller cannot supply in advance: this process's own PID ($$),
+# which a legitimate re-exec'd child always inherits unchanged (exec
+# preserves PID) but which a caller starting a *new* process cannot predict
+# before that process exists. Any inherited value that does not match is
+# untrusted -- reject both markers together, before the cleanup trap
+# (installed immediately below) can act on a forged SELF_COPY, and before
+# the Dockerfile precheck / self re-exec sections further down can honor a
+# forged SELF_VERIFIED.
+if [[ "${_CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED:-}" != "$$" ]]; then
+    unset _CH_OAUTH_LDAP_IMAGE_SELF_COPY _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED
+fi
+
 # --- cleanup, installed FIRST, before anything else can fail ---------------
 # A single EXIT/INT/TERM trap for every piece of private run state this
 # script (or its self-re-exec'd child below) creates: RUN_TMP_DIR (the
 # per-run build-context directory, assigned much later) and
 # _CH_OAUTH_LDAP_IMAGE_SELF_COPY (the temp copy of this script's own HEAD
 # bytes the self re-exec section creates, inherited by the child via the
-# environment). Both are empty here; cleanup() tolerates that. Installed
-# before the Dockerfile precheck, the self re-exec's own git/mkdir calls, or
-# any other early exit, so a failure at any of those points still removes
-# whatever this run has already created. Bash has exactly one EXIT trap --
-# combine both cleanup responsibilities into this one function rather than
-# a second `trap` call later that would silently replace this one.
+# environment -- now that the block above neutralizes any value that did not
+# survive a genuine self re-exec, this can only ever be empty or a path this
+# same run itself created). Both are empty here; cleanup() tolerates that.
+# Installed before the Dockerfile precheck, the self re-exec's own git/mkdir
+# calls, or any other early exit, so a failure at any of those points still
+# removes whatever this run has already created. Bash has exactly one EXIT
+# trap -- combine both cleanup responsibilities into this one function
+# rather than a second `trap` call later that would silently replace this
+# one.
 RUN_TMP_DIR=""
 _CH_OAUTH_LDAP_IMAGE_SELF_COPY="${_CH_OAUTH_LDAP_IMAGE_SELF_COPY:-}"
 
@@ -232,7 +260,13 @@ if [[ -z "${_CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED:-}" ]]; then
         export _CH_OAUTH_LDAP_IMAGE_SELF_COPY
         git show "HEAD:$_SELF_REL_PATH" >"$_SELF_HEAD_COPY"
         chmod 0700 "$_SELF_HEAD_COPY"
-        export _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED=1
+        # Bound to this process's own PID (see the marker-neutralization
+        # block at the top of this script) rather than a fixed sentinel:
+        # `exec` below preserves the PID, so the child's own top-of-script
+        # check sees this same value for its own "$$" and trusts it, while
+        # an external caller cannot know this PID before this process
+        # exists.
+        export _CH_OAUTH_LDAP_IMAGE_SELF_VERIFIED="$$"
         exec bash "$_SELF_HEAD_COPY" "$@"
     fi
     unset _SELF_REL_PATH
@@ -279,12 +313,50 @@ set -- $ARCHES
 # drift), so silently overwriting an already-published tag risks moving it
 # to a different manifest. There is no force override: publish from a new
 # commit, or pass a different tag-prefix argument.
+#
+# Review pass 4: a bare truthiness check on `docker manifest inspect`'s exit
+# code cannot tell "manifest genuinely absent" apart from any OTHER failure
+# (expired auth, a network/transport error, a registry 5xx) -- both come
+# back nonzero, and treating every nonzero result as "tag absent" lets an
+# operational failure silently wave publication through. Some registries
+# make this worse: an unauthenticated (or under-scoped) `docker manifest
+# inspect` against ghcr.io returns exit 1 with "denied" for a tag that is
+# genuinely absent too, so exit code alone can never disambiguate the two on
+# every registry. `check_tag_absent` instead requires an UNAMBIGUOUS
+# "not found" signature in the inspect output before treating a tag as
+# absent; any other nonzero result aborts the whole run rather than
+# proceeding -- fail closed on doubt, per the tag-immutability guarantee
+# documented in helm/ch-oauth-ldap/README.md.
+_TAG_NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
+
+# check_tag_absent REF
+# Returns 0 (bash "true") if REF is confirmed absent from the registry, 1 if
+# confirmed present (docker manifest inspect exited 0). Aborts the entire
+# script — not just this check — if the inspect call fails in a way that is
+# not a recognized "not found" response, since that failure could just as
+# easily be an auth/transport/registry error masking a tag that actually
+# exists.
+check_tag_absent() {
+    local ref="$1" out rc
+    out=$(docker manifest inspect "$ref" 2>&1)
+    rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+        return 1
+    fi
+    if printf '%s' "$out" | grep -qiE "$_TAG_NOT_FOUND_PATTERN"; then
+        return 0
+    fi
+    echo "refusing to publish: could not determine whether ${ref} already exists in the registry — 'docker manifest inspect' exited ${rc} with a response that is not a recognized \"not found\" signature, so this is being treated as an operational/transport/auth failure rather than proof the tag is absent (see helm/ch-oauth-ldap/README.md's tag-immutability guarantee). Fix the underlying registry-inspection error and re-run. Raw output:" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+}
+
 EXISTING_TAGS=()
-if docker manifest inspect "${FULL}:${TAG}" >/dev/null 2>&1; then
+if ! check_tag_absent "${FULL}:${TAG}"; then
     EXISTING_TAGS+=("${FULL}:${TAG}")
 fi
 for arch in "$@"; do
-    if docker manifest inspect "${FULL}:${TAG}-${arch}" >/dev/null 2>&1; then
+    if ! check_tag_absent "${FULL}:${TAG}-${arch}"; then
         EXISTING_TAGS+=("${FULL}:${TAG}-${arch}")
     fi
 done
@@ -398,6 +470,18 @@ build_one() {
         exit 1
     fi
 
+    # Narrow (not close — see the header rationale) the TOCTOU window
+    # between the batch existence check above and this push: a concurrent
+    # publisher (this script run manually, alongside an Actions run, on the
+    # same commit) could have published this exact sub-tag in the time this
+    # arch spent building. check_tag_absent aborts the whole run — fail
+    # closed — the same way on an ambiguous inspect result here as it does
+    # in the batch check.
+    if ! check_tag_absent "${FULL}:${TAG}-${arch}"; then
+        echo "refusing to publish: ${FULL}:${TAG}-${arch} was published by another run while this build was in progress — the tag-immutability guarantee means this run must not overwrite it. Publish from a new commit, or pass a different tag-prefix argument." >&2
+        exit 1
+    fi
+
     docker push "${FULL}:${TAG}-${arch}"
 }
 
@@ -410,6 +494,18 @@ done
 if [[ "$#" -gt 1 ]]; then
     echo
     echo "==> manifest ${TAG}"
+    # Recheck the shared final tag immediately before assembling it — not
+    # just once, in the batch check at the top of this script, before any
+    # of the (potentially long-running, per-arch) build/push work ran. A
+    # concurrent publisher on the same commit could have published this
+    # exact tag while this run's builds were in flight; check_tag_absent
+    # aborts (fail closed) on both "it now exists" and any ambiguous
+    # inspect failure, rather than silently moving it to a different
+    # manifest.
+    if ! check_tag_absent "${FULL}:${TAG}"; then
+        echo "refusing to publish: ${FULL}:${TAG} was published by another run while this build was in progress — the tag-immutability guarantee means this run must not overwrite it. Publish from a new commit, or pass a different tag-prefix argument." >&2
+        exit 1
+    fi
     # This only clears any stale LOCAL manifest-list cache for this tag
     # (harmless if none exists, hence `|| true`) — it has no effect on the
     # registry, and is not part of the tag-existence enforcement above.
