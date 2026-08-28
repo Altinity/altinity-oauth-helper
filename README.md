@@ -126,6 +126,7 @@ configuration below is copied verbatim from that working fixture
 `role_mapping` sits **directly under `<ldap>`**, not nested inside a `<roles>`
 element:
 
+<!-- config-source: integration/clickhouse/clickhouse/common/config.d/ldap.xml -->
 ```xml
 <clickhouse>
     <ldap_servers>
@@ -135,6 +136,7 @@ element:
             <bind_dn>uid={user_name},ou=users,dc=altinity,dc=internal</bind_dn>
             <verification_cooldown>0</verification_cooldown>
             <enable_tls>no</enable_tls>
+            <search_limit>256</search_limit>
         </oauth_helper>
     </ldap_servers>
 
@@ -168,6 +170,13 @@ What the fixture proves, and what you should expect in production:
 - **Local users take precedence.** A user defined in ClickHouse itself is
   authenticated by ClickHouse; the LDAP directory is consulted only for
   names that do not exist locally (scenario G).
+- **`search_limit` must cover a user's maximum mapped-role count.**
+  `<search_limit>256</search_limit>` makes ClickHouse's own built-in default
+  explicit. Acceptance scenario G' measured, live, that a Search returning
+  `sizeLimitExceeded` fails the whole authentication attempt outright on
+  both tested ClickHouse builds (24.8 and 25.8) — see
+  [`docs/ch-oauth-ldap-operator-guide.md`](docs/ch-oauth-ldap-operator-guide.md#6-clickhouse-search-limits--measured-not-assumed)
+  for the exact measured wire tuple and consequence.
 - **Distributed queries carry the external roles to remote nodes** via
   `push_external_roles_in_interserver_queries` over secret-authenticated
   interserver connections — **with an important compatibility caveat.** The
@@ -255,6 +264,12 @@ For worked end-to-end examples (Superset, Grafana, …), see
 [`examples/`](examples/) — the [`examples/README.md`](examples/README.md)
 matrix tracks which consumer × deploy-style combinations are working.
 
+Operating `ch-oauth-ldap` in production — OIDC/Auth0/JWKS field reference,
+identity and role-pipeline behavior, the cache invariant, measured
+ClickHouse Search-limit behavior, the trust boundary, and HA/capacity
+(including the Kubernetes runbook) — is consolidated in
+[`docs/ch-oauth-ldap-operator-guide.md`](docs/ch-oauth-ldap-operator-guide.md).
+
 ## Building images
 
 There are two independent image publication pipelines, one per binary. Both
@@ -327,7 +342,10 @@ sub-tag) that already exists in the registry; there is no force override.
 cmd/ch-jwt-verify/     # the sidecar binary (main, config, settings, verify)
 cmd/ch-oauth-ldap/     # the standalone LDAPv3 server (main, config)
 internal/ldap/         # LDAP session/DN/filter/entry primitives + Bind/Search handlers
+internal/securitytest/ # phase-5 AST redaction inventory, SDK contract, docs contract (see its doc.go)
+docs/                  # ch-oauth-ldap-operator-guide.md: config/roles/cache/Search-limit/trust/HA consolidated
 integration/clickhouse/ # real-ClickHouse acceptance suite for ch-oauth-ldap (manual; see its README)
+                       # scenarios/65-ldap-search-limits.sh (G'), compose-ha.yml/run-ha.sh/ha/ (Docker HA harness)
 helm/ch-jwt-verify/    # Helm chart (ConfigMaps + container fragment, no Deployment)
 helm/ch-oauth-ldap/    # Helm chart (Deployment + ClusterIP Service + NetworkPolicy + PDB + ConfigMaps)
 scripts/build-image.sh # multi-arch image build & push (ch-jwt-verify)
