@@ -1,0 +1,74 @@
+<!--
+  integration/clickhouse/clickhouse/common/config.d/ldap.xml
+
+  Mounted identically on both clickhouse-origin and clickhouse-remote (the
+  fixture's whole-directory config.d mount already picks this file up on
+  both nodes with no compose.yml change — see "ClickHouse config mount
+  policy and network listeners" in the phase-3 plan). Points ClickHouse's
+  LDAP user-directory storage at the production ch-oauth-ldap binary built
+  from this branch, which impersonates an external LDAP directory for
+  Basic-authenticated Bind+Search only (see "Why the remote node has the
+  LDAP directory but not helper connectivity": the remote never actually
+  reaches this server over the network because it has no auth-net route to
+  ch-oauth-ldap — this file merely lets it resolve the *name*
+  `oauth_helper` the same way origin does, should any local config
+  resolution require it).
+
+  Verbatim from the plan's "ClickHouse LDAP configuration" block, with the
+  rules that block calls out:
+    - enable_tls=no: TLS/LDAPS/StartTLS are explicitly out of MVP scope for
+      this phase.
+    - verification_cooldown=0: every fresh ClickHouse authentication must
+      reach the helper and see its current role snapshot rather than an
+      LDAP-directory-side cached Bind result — required for acceptance
+      scenario F (role refresh on reconnect) to be a real proof.
+    - bind_dn uses uid={user_name} under ou=users,dc=altinity,dc=internal,
+      matching this fixture's helper/config.yaml
+      (user_base_dn/user_rdn_attribute) and internal/ldap's UserBaseDN
+      parsing (see dn.go: the leading RDN attribute type must match
+      user_rdn_attribute exactly).
+    - role_mapping sits directly under <ldap>, NOT nested under an
+      illustrative <roles><role_mapping> — the exact 24.8 LDAP storage
+      parser reads role_mapping directly beneath the LDAP-directory prefix
+      (see the plan: "Do not preserve the issue's illustrative nesting
+      when the real parser says otherwise").
+    - the search_filter's `&` is XML-escaped as `&amp;`; the filter,
+      base_dn, scope, attribute, and prefix exactly match what
+      internal/ldap's synthetic group entries emit (filter.go:
+      AuthorizeGroupMembershipFilter requires exactly
+      (&(objectClass=groupOfNames)(member={bind_dn})); entry.go: each
+      synthetic group's cn is role_cn_prefix + role, i.e.
+      "clickhouse_" + a roles_mapping value such as "ch_readonly" — so
+      ClickHouse's own <prefix>clickhouse_</prefix> strips the same prefix
+      back off to recover the local role name it must already have from
+      bootstrap/common.sql).
+
+  The pinned runtime remains the final proof of this XML (see the plan's
+  "Real ClickHouse LDAP interoperability contingency" for the widening
+  order to follow if the real 24.8 LDAP client turns out to need a
+  variant this exact shape does not already satisfy).
+-->
+<clickhouse>
+    <ldap_servers>
+        <oauth_helper>
+            <host>ch-oauth-ldap</host>
+            <port>389</port>
+            <bind_dn>uid={user_name},ou=users,dc=altinity,dc=internal</bind_dn>
+            <verification_cooldown>0</verification_cooldown>
+            <enable_tls>no</enable_tls>
+        </oauth_helper>
+    </ldap_servers>
+
+    <user_directories>
+        <ldap>
+            <server>oauth_helper</server>
+            <role_mapping>
+                <base_dn>ou=groups,dc=altinity,dc=internal</base_dn>
+                <scope>subtree</scope>
+                <search_filter>(&amp;(objectClass=groupOfNames)(member={bind_dn}))</search_filter>
+                <attribute>cn</attribute>
+                <prefix>clickhouse_</prefix>
+            </role_mapping>
+        </ldap>
+    </user_directories>
+</clickhouse>
