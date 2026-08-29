@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -44,6 +45,13 @@ import (
 //   - Every external `uses:` is pinned to a full 40-hex commit SHA. A floating
 //     tag (`@v4`) is mutable by the action's owner, so the gate that decides
 //     what may merge would execute code chosen after review.
+//   - Every pinned action is at or above the first release that declares the
+//     `node24` runtime (`actions/checkout` >= v6.0.0, `actions/setup-go` >=
+//     v7.0.0). GitHub Actions runners stopped shipping Node 20 on 2026-09-23;
+//     a `node20`-declared action only keeps working because the runner
+//     silently re-executes it on Node 24 in the meantime — a compatibility
+//     shim, not a contract. Pinning below the node24 line means the gate
+//     depends on that shim and breaks outright once it is withdrawn.
 //
 // The job name `Required PR gate` is an externally consumed interface, not an
 // internal label: it is the exact check-run context that branch protection on
@@ -118,6 +126,26 @@ var prGatePathFilterKeys = []string{"paths", "paths-ignore"}
 // only immutable form of an action reference. A tag or branch ref does not
 // match by construction.
 var prGatePinnedRefRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// prGateNode24FloorByAction is the first release of each pinned action that
+// declares `using: node24` in its action.yml, keyed by action identity
+// (verified against the real actions/checkout and actions/setup-go
+// repositories: v6.0.0 and v7.0.0 respectively — setup-go v6.x is still
+// node20). A pin below this floor only runs because GitHub's runners
+// currently re-execute node20-declared actions on the Node 24 runtime as a
+// compatibility shim; that shim is withdrawn with Node 20's removal from
+// runner images on 2026-09-23, at which point a below-floor pin breaks the
+// gate outright rather than merely running on borrowed time.
+var prGateNode24FloorByAction = map[string][3]int{
+	"actions/checkout": {6, 0, 0},
+	"actions/setup-go": {7, 0, 0},
+}
+
+// prGateVersionCommentRE extracts the semantic version from a pin's trailing
+// `# actions/<name>@vX.Y.Z` comment, the only place the human-readable
+// version lives (the invariant is SHA immutability, so the version cannot be
+// read back out of the pin itself — see this file's header comment).
+var prGateVersionCommentRE = regexp.MustCompile(`@v(\d+)\.(\d+)\.(\d+)\s*$`)
 
 // loadPRGateWorkflow reads and parses pr-gate.yml into its top-level mapping
 // node. yaml.Node rather than a typed struct or map[string]any is deliberate:
@@ -441,4 +469,70 @@ func TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA(t *testing.T) {
 	if strings.Join(identities, ",") != strings.Join(prGateExpectedActions, ",") {
 		t.Errorf("securitytest: %s uses actions %v, want exactly %v — the gate deliberately runs only first-party checkout/setup-go; any additional third-party action is new code with access to the verification job", prGateWorkflowRelPath, identities, prGateExpectedActions)
 	}
+}
+
+// TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor guards against
+// re-pinning either action back onto a `node20`-declared release. The SHA
+// itself carries no version information (that is the point of pinning to a
+// commit rather than a tag), so the check reads the trailing human-readable
+// comment every pin in this file already carries and compares it against
+// prGateNode24FloorByAction's literal floor per action identity.
+func TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor(t *testing.T) {
+	top := loadPRGateWorkflow(t)
+	_, job := prGateSingleJob(t, top)
+
+	steps := yamlMapValue(job, "steps")
+	if steps == nil || steps.Kind != yaml.SequenceNode {
+		t.Fatalf("securitytest: %s job has no `steps:` sequence", prGateWorkflowRelPath)
+	}
+
+	checked := map[string]bool{}
+	for _, step := range steps.Content {
+		uses := yamlMapValue(step, "uses")
+		if uses == nil {
+			continue
+		}
+		ref := uses.Value
+		at := strings.LastIndex(ref, "@")
+		if at < 0 {
+			continue // already reported by TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA
+		}
+		identity := ref[:at]
+		floor, tracked := prGateNode24FloorByAction[identity]
+		if !tracked {
+			continue // not one of the two actions this invariant tracks
+		}
+
+		m := prGateVersionCommentRE.FindStringSubmatch(uses.LineComment)
+		if m == nil {
+			t.Errorf("securitytest: %s pin for %s (line %d) has no trailing `# %s@vX.Y.Z` comment — that comment is the only place the human-readable version lives once the ref itself is a bare commit SHA, so without it there is no way to confirm the pin is not a floating-to-node20 release", prGateWorkflowRelPath, identity, uses.Line, identity)
+			continue
+		}
+		major, _ := strconv.Atoi(m[1])
+		minor, _ := strconv.Atoi(m[2])
+		patch, _ := strconv.Atoi(m[3])
+		got := [3]int{major, minor, patch}
+
+		checked[identity] = true
+		if versionLess(got, floor) {
+			t.Errorf("securitytest: %s pins %s to v%d.%d.%d (line %d), below the node24 floor v%d.%d.%d — a pin below this floor is still declared `using: node20` in its action.yml and only runs today because GitHub's runners re-execute node20 actions on Node 24 as a compatibility shim; that shim is withdrawn with Node 20's removal from runner images on 2026-09-23, at which point this step stops running at all", prGateWorkflowRelPath, identity, major, minor, patch, uses.Line, floor[0], floor[1], floor[2])
+		}
+	}
+
+	for identity := range prGateNode24FloorByAction {
+		if !checked[identity] {
+			t.Errorf("securitytest: %s never pins %s at all — TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA should also have caught this", prGateWorkflowRelPath, identity)
+		}
+	}
+}
+
+// versionLess reports whether a is a strictly earlier semantic version than
+// b, comparing major, then minor, then patch.
+func versionLess(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }
