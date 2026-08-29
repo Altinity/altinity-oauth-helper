@@ -38,6 +38,7 @@ no native Bearer/JWT auth path; Antalya does).
 | `scripts/build-synthetic-idp-image.sh` | image build for the synthetic IdP used in examples |
 | `Dockerfile` / `Dockerfile.synthetic-idp` / `Dockerfile.ch-oauth-ldap` | consumed by the three build scripts above (`Dockerfile.ch-oauth-ldap` by `scripts/build-ch-oauth-ldap-image.sh`) |
 | `.github/workflows/build-ch-oauth-ldap.yml` | push-to-main image publication for `ghcr.io/altinity/ch-oauth-ldap` (tag `ldap-<short-sha>`), mirroring `build-ch-jwt-verify.yml`'s structure |
+| `.github/workflows/pr-gate.yml` | the non-publishing PR/push verification workflow (`PR gate`) — one job, `Required PR gate`, running the five mandatory commands on every pull request and every push to `main`; publishes nothing and holds only `contents: read` |
 
 JWKS fetching, JWT validation, and identity-policy helpers (verified-email,
 allowed domains, `iss`/`aud` checks) live upstream in
@@ -52,17 +53,37 @@ fork that logic — extend the SDK instead when the need is generic (not
 - `go test ./...` — the test suite; `cmd/ch-jwt-verify/verify_test.go` spins
   up an in-process test IdP (RSA-signed JWTs against an httptest JWKS
   server) rather than depending on any shared fixture, since the sidecar is
-  independent of any e2e test elsewhere. There is no coverage gate. There
-  are **two** push-to-main image-publication workflows —
-  `.github/workflows/build-ch-jwt-verify.yml` (path-filtered to
+  independent of any e2e test elsewhere. There is no coverage gate.
+  `.github/workflows/pr-gate.yml` (workflow `PR gate`, single job
+  `Required PR gate`) is the **mandatory PR-time verification gate**: it runs
+  on every pull request and every push to `main`, with no path filters, and
+  executes exactly these five commands in order —
+
+  ```
+  go build ./...
+  go vet ./...
+  go test -race ./...
+  go test -tags phase5release ./internal/securitytest -count=1
+  bash integration/clickhouse/tests/lib-tests.sh
+  ```
+
+  Any one of them failing fails the whole job, and `Required PR gate` is the
+  stable check name branch protection requires for merges to `main` — treat
+  that job name as an externally consumed interface: renaming it means
+  migrating branch protection in the same change. The real Docker ClickHouse
+  suite (`integration/clickhouse/run.sh`, `run-all-builds.sh`, `run-ha.sh`)
+  deliberately stays **out** of that gate and remains manual/local. Separately
+  from verification there are still **two** push-to-main image-publication
+  workflows — `.github/workflows/build-ch-jwt-verify.yml` (path-filtered to
   `cmd/ch-jwt-verify/**`, `go.mod`/`go.sum`, `Dockerfile`) and
   `.github/workflows/build-ch-oauth-ldap.yml` (path-filtered to
   `cmd/ch-oauth-ldap/**`, `internal/**`, `third_party/**`, `go.mod`/`go.sum`,
-  `Dockerfile.ch-oauth-ldap`) — and **neither is a PR-time test/lint gate**;
-  both only build+push an image on push to `main`. Run the gate yourself
-  before calling a change done; write tests for new behavior, especially
-  around cache-key isolation and identity-policy edge cases, since those are
-  the security-relevant surface.
+  `Dockerfile.ch-oauth-ldap`) — those two only build+push an image on push to
+  `main` and are **not** verification gates; do not treat a green publish as
+  a substitute for `Required PR gate`. Run the gate locally yourself before
+  calling a change done rather than discovering it in hosted CI; write tests
+  for new behavior, especially around cache-key isolation and identity-policy
+  edge cases, since those are the security-relevant surface.
 - `go vet ./...` before sending a change, plus
   `go vet -tags phase5release ./internal/securitytest` (amendment A5) so the
   release-gate build tag itself never bit-rots even though `go vet ./...`
@@ -103,9 +124,11 @@ fork that logic — extend the SDK instead when the need is generic (not
   check on `.github/workflows/build-ch-oauth-ldap.yml`, informational-only
   against `build-ch-jwt-verify.yml`). Like the Go gate, it is not run by any
   workflow — run it yourself when touching `helm/ch-oauth-ldap/**`.
-- No Makefile, no linter config committed yet — if you add `golangci-lint`
-  or similar, wire it into a real CI workflow in the same change, not just
-  locally.
+- No Makefile and no linter configuration is committed. If `golangci-lint`
+  or similar is added later, commit the agreed configuration and wire it into
+  `.github/workflows/pr-gate.yml` in the same change — or document in that
+  change why a deliberately separate CI gate is required instead. Do not add
+  a local-only linter gate.
 
 ## Conventions
 
@@ -159,6 +182,11 @@ fork that logic — extend the SDK instead when the need is generic (not
   only enforces that marked config fences don't drift from their source, not
   that prose elsewhere stays current — a stale unmarked paragraph is still a
   docs bug a test won't catch.
-- There is no PR-time CI gate. Before calling a change done, actually run
-  `go build ./...`, `go vet ./...`, and `go test ./...` yourself rather than
-  assuming a gate will catch it.
+- `.github/workflows/pr-gate.yml` enforces the five commands above at merge
+  time, but hosted CI is merge *enforcement*, not permission to skip local
+  verification. Before calling a change done, actually run `go build ./...`,
+  `go vet ./...`, `go test ./...` (and the `-race`/`phase5release`/shell-library
+  gate commands the change touches) yourself, plus the manual gates hosted CI
+  deliberately does not run — `helm/ch-oauth-ldap/test.sh` and the Docker
+  ClickHouse suite. Discovering a break in `Required PR gate` instead of
+  locally is a process failure, not a workflow success.

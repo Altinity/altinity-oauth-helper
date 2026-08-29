@@ -1,0 +1,42 @@
+name: PR gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  required-pr-gate:
+    name: Required PR gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # actions/setup-go@v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Race tests
+        run: go test -race ./...
+
+      - name: Phase 5 security tests
+        run: go test -tags phase5release ./internal/securitytest -count=1
+
+      - name: ClickHouse shell library tests
+        run: bash integration/clickhouse/tests/lib-tests.sh

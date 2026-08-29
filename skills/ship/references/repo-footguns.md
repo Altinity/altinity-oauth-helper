@@ -53,17 +53,29 @@ exercising the relevant recipe under `examples/`:
   locally the first time on this repo; simplify if bare `gh issue view` turns out fine
   here. Never `$(cat …)`/`sed` inside a quoted heredoc to build a body.
 - **CI waits must key on the head SHA**: `gh run list --limit 1` right after a push
-  reports the *previous* head's run. Match on `headSha`. This repo has **two**
-  push-to-main image-publication workflows — `build-ch-jwt-verify.yml`
-  (path-filtered to `cmd/ch-jwt-verify/**`/`go.mod`/`go.sum`/`Dockerfile`) and
+  reports the *previous* head's run. Match on `headSha` — always, for every workflow
+  in this repo, without exception.
+- **`Required PR gate` is this repo's PR verification status** (workflow `PR gate`,
+  `.github/workflows/pr-gate.yml`, one job). It runs unfiltered on every pull request
+  and every push to `main` and executes `go build ./...`, `go vet ./...`,
+  `go test -race ./...`, `go test -tags phase5release ./internal/securitytest
+  -count=1`, and `bash integration/clickhouse/tests/lib-tests.sh`. When waiting on it,
+  resolve the run/check for the **exact current head SHA** of the branch you are about
+  to merge; treat missing, pending, cancelled, or failed gate state as *not ready*.
+  Never accept a run whose `headSha` is an earlier push.
+- **The two image-publication workflows are not that gate.**
+  `build-ch-jwt-verify.yml` (path-filtered to
+  `cmd/ch-jwt-verify/**`/`go.mod`/`go.sum`/`Dockerfile`) and
   `build-ch-oauth-ldap.yml` (path-filtered to `cmd/ch-oauth-ldap/**`/`internal/**`/
-  `third_party/**`/`go.mod`/`go.sum`/`Dockerfile.ch-oauth-ldap`) — and **neither is a
-  PR-time test gate**; both only build+publish an image on push to `main`, so there
-  is no PR-time CI to wait on. Local/phase gates (`go build/vet/test ./...`,
-  `helm/ch-oauth-ldap/test.sh`) remain the real pre-merge proof. The `headSha`-keying
-  rule above applies to both workflows if you ever do wait on one of them (e.g. to
-  confirm a post-merge publish actually ran) — never assume `gh run list --limit 1`
-  without SHA-matching for either.
+  `third_party/**`/`go.mod`/`go.sum`/`Dockerfile.ch-oauth-ldap`) only build+publish an
+  image on push to `main`. They verify nothing and are never a substitute for
+  `Required PR gate` — a green publish is not a green gate, and a *skipped* publish
+  (path filters) is not a failure. The `headSha`-keying rule applies to them too if
+  you ever wait on one (e.g. to confirm a post-merge publish actually ran).
+- **Local verification is still required before handoff.** Hosted CI is merge
+  enforcement, not a substitute: run the five gate commands plus the gates CI
+  deliberately does not run (`helm/ch-oauth-ldap/test.sh`, the Docker ClickHouse
+  suite) yourself before calling a unit done.
 - A present-but-expired `GITHUB_TOKEN` breaks `git push` and `gh` identically — it
   looks like a network/allowlist failure but isn't; tell the user.
 
