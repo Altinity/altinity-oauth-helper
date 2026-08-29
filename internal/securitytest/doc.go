@@ -35,11 +35,15 @@
 //  3. release_gate_test.go, built only with -tags phase5release, is the
 //     final closure gate: it fails while any manifest row remains
 //     classified blocked_external, or the resolved SDK version diverges
-//     from auditedSDKVersion. Per plan §4/A1, it is EXPECTED to fail right
-//     now on the go-mcp-oauth-sdk@v0.2.0 kid-rotation row while
-//     SDK_REDACTION_AUTHORIZATION_GATE remains open — that failure is a
-//     correct report of a known, externally-owned defect, not a bug in
-//     this package, and must never be silenced by relaxing the gate.
+//     from auditedSDKVersion. Per plan §4.4, SDK_REDACTION_AUTHORIZATION_GATE
+//     was closed by bumping to go-mcp-oauth-sdk@v0.2.1 (which drops the raw
+//     `kid` field from the JWKS-rotation success log), so this gate now
+//     PASSES — the go-mcp-oauth-sdk@v0.2.0 kid-rotation row that used to be
+//     the sole, expected, documented failure here no longer exists in the
+//     manifest. A failure of this gate from this point on is a real
+//     regression (a manifest row reverting to blocked_external, or the
+//     resolved SDK version drifting from auditedSDKVersion) and must never
+//     be silenced by relaxing the gate.
 //
 // See CLAUDE.md and plan-19p5.md §5 for the full security model this
 // package enforces, and testdata/redaction-sites.tsv's own header comment
@@ -67,7 +71,7 @@ import (
 // every external-pinned manifest row) is exactly the drift sdk_contract_test
 // exists to catch — see plan §5.3 and the high-risk invariant map's "SDK
 // version is audited" row.
-const auditedSDKVersion = "v0.2.0"
+const auditedSDKVersion = "v0.2.1"
 
 // sdkModulePath is the module path sdk_contract_test.go and
 // release_gate_test.go look for in build info / go.mod.
