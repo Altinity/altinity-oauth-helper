@@ -71,10 +71,12 @@ fork that logic — extend the SDK instead when the need is generic (not
   consistency gate (see `internal/securitytest/doc.go`); this must stay
   green in normal development. `go test -tags phase5release
   ./internal/securitytest -count=1` is the separate, stricter final release
-  gate — it is currently **expected to fail** on the known, externally-owned
-  `go-mcp-oauth-sdk@v0.2.0` `kid`-rotation row while
-  `SDK_REDACTION_AUTHORIZATION_GATE` remains open (coordinator amendment A1);
-  do not treat that specific failure as a regression, and never silence it
+  gate — it now **must pass**: `SDK_REDACTION_AUTHORIZATION_GATE` was closed
+  by bumping to `go-mcp-oauth-sdk@v0.2.1` (which drops the raw `kid` field
+  from the JWKS-rotation success log) and re-auditing every external-pinned
+  manifest row (`fix(#19): consume go-mcp-oauth-sdk v0.2.1 and close
+  SDK_REDACTION_AUTHORIZATION_GATE`). A failure of this gate from this point
+  on is a real regression, not a known/expected condition — never silence it
   by relaxing the gate.
 - `go test -race ./internal/ldap` — the LDAP package's race gate; run it
   whenever touching connection-local session state or the critical-control

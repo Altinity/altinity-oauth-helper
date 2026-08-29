@@ -14,31 +14,31 @@ import (
 //
 //	go test -tags phase5release ./internal/securitytest -count=1
 //
-// Normal development (go test ./internal/securitytest, no build tag) must
-// stay green while the known, externally-owned go-mcp-oauth-sdk@v0.2.0
-// kid-rotation defect remains open — that's what lets SDK-independent
-// phase-5 work proceed per amendment A1. This file is the opposite: it is
-// the ONE place that must fail while that defect's manifest row is still
-// blocked_external, so the phase can never be silently certified complete
-// while SDK_REDACTION_AUTHORIZATION_GATE is open.
+// Normal development (go test ./internal/securitytest, no build tag) has
+// always been required to stay green — including while the now-resolved,
+// externally-owned go-mcp-oauth-sdk@v0.2.0 kid-rotation defect was open,
+// which is what let SDK-independent phase-5 work proceed per amendment A1.
+// This file is the opposite: it is the ONE place that fails while any
+// manifest row is blocked_external, so the phase could never be silently
+// certified complete while SDK_REDACTION_AUTHORIZATION_GATE stayed open.
 //
-// Per plan §4/A1/§28, this test is EXPECTED to fail right now, naming
-// exactly the go-mcp-oauth-sdk@v0.2.0 / parseAndFetchKeys row — that is a
-// correct report of a real, known, externally-owned blocker, not a defect
-// in this test or in this sub-task. Resolving it requires either (a) a
-// separately authorized go-mcp-oauth-sdk release that drops the raw `kid`
-// field (plan §4.4: bump go.mod/go.sum, re-audit every external row, flip
-// this row's state to safe, update the rotation test to require the kid
-// marker's ABSENCE), or (b) a recorded decision that `kid` is allowed
-// non-credential metadata, flipping the row to safe on that basis instead.
-// Neither resolution is this sub-task's to make — see plan-19p5.md's
-// coordinator amendment A1.
+// Per plan §4.4, SDK_REDACTION_AUTHORIZATION_GATE is now closed: the
+// go-mcp-oauth-sdk@v0.2.0 / parseAndFetchKeys row was resolved by option (a)
+// — bumping to go-mcp-oauth-sdk@v0.2.1, which drops the raw `kid` field from
+// the JWKS-rotation success log — re-auditing every external-pinned row,
+// flipping that row's state to safe, and reshaping the rotation test
+// (TestJWKSRotation_KidNeverLogged, internal/verification) to require the
+// kid marker's ABSENCE. This test now PASSES, and must keep passing: a
+// future failure here is a real regression (a manifest row reverting to
+// blocked_external, or an SDK bump made without re-auditing the external
+// rows and updating auditedSDKVersion), not an expected/known condition.
 
 // TestReleaseGate_NoBlockedExternalRowsRemain fails while any manifest row
-// is classified blocked_external — currently exactly the SDK kid-rotation
-// row. The failure message intentionally names only that row (or whatever
-// set of rows is actually blocked at the time this runs); it does not fail
-// for any other reason.
+// is classified blocked_external. No row is blocked_external as of this
+// writing (see the top-of-file comment) — a future failure here means the
+// manifest has regressed, and the failure message names exactly whichever
+// row(s) are actually blocked, and their gate(s), at the time this runs; it
+// does not fail for any other reason.
 func TestReleaseGate_NoBlockedExternalRowsRemain(t *testing.T) {
 	var blocked []string
 	for _, r := range loadRealManifest(t) {
@@ -52,13 +52,14 @@ func TestReleaseGate_NoBlockedExternalRowsRemain(t *testing.T) {
 	}
 	sort.Strings(blocked)
 	t.Fatalf("release gate: %d blocked_external redaction row(s) remain — phase 5 cannot be certified complete "+
-		"until each is resolved (bump+re-audit the SDK, or record kid as allowed non-credential metadata):\n%s",
+		"until each is resolved per its named gate below: bump+re-audit that row's owning dependency, "+
+		"or record its flagged field as allowed non-credential metadata:\n%s",
 		len(blocked), strings.Join(blocked, "\n"))
 }
 
 // TestReleaseGate_ResolvedSDKVersionMatchesAudited re-runs the sdk_contract
 // version check under the release tag. It passes today (go.mod already
-// pins the audited v0.2.0) — this test exists so a version bump made
+// pins the audited v0.2.1) — this test exists so a version bump made
 // without also updating auditedSDKVersion and re-auditing the external
 // rows fails release closure too, not just normal development.
 func TestReleaseGate_ResolvedSDKVersionMatchesAudited(t *testing.T) {

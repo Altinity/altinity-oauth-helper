@@ -198,7 +198,7 @@ func TestRedactionInventory_CredentialReachableLocalSinksHaveMarkerProof(t *test
 // (cmd/ch-jwt-verify, internal/verification) is exactly where T3/T6/T7's
 // marker/characterization proofs for those SDK-adjacent sinks live, and
 // those sub-tasks have since merged (see e.g.
-// TestJWKSRotation_PreBumpCharacterization,
+// TestJWKSRotation_KidNeverLogged,
 // TestVerifyDebugLogRedaction_MalformedHeaderMarker,
 // TestVerifyDebugLogRedaction_UnknownKidMarker) — an earlier version of
 // this test exempted external-pinned rows because those sibling sub-tasks

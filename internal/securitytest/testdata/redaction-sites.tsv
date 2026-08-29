@@ -75,8 +75,12 @@
 #   ownership             "local" (this repo owns and can patch the source,
 #                         including the vendored third_party/ldapserver
 #                         fork) or "external-pinned" (go-mcp-oauth-sdk;
-#                         changes require a separately authorized SDK
-#                         release, per SDK_REDACTION_AUTHORIZATION_GATE).
+#                         a change to a blocked_external row's underlying
+#                         defect requires a separately authorized SDK
+#                         release naming its gate in the `gate` column, e.g.
+#                         the now-closed SDK_REDACTION_AUTHORIZATION_GATE —
+#                         see go-mcp-oauth-sdk@v0.2.1's parseAndFetchKeys row
+#                         below for the resolved example).
 #   proof_type            "non-credential" (fixed literal/no attacker data
 #                         ever reaches it — no dynamic test required),
 #                         "structural" (safety follows from a call-graph
@@ -97,7 +101,7 @@
 #                         corpus (checked by AST) — including
 #                         external-pinned rows: T3/T6/T7's marker/
 #                         characterization tests for the SDK-adjacent rows
-#                         below (TestJWKSRotation_PreBumpCharacterization,
+#                         below (TestJWKSRotation_KidNeverLogged,
 #                         TestVerifyDebugLogRedaction_MalformedHeaderMarker,
 #                         TestVerifyDebugLogRedaction_UnknownKidMarker) have
 #                         merged onto this tree, so there is no longer a
@@ -108,12 +112,18 @@
 #   state                 "safe" (proven and currently non-disclosing),
 #                         "unreachable" (constructed but provably never
 #                         surfaces from this repo's current call graph), or
-#                         "blocked_external" (permitted ONLY for the exact
-#                         audited external-pinned SDK site while
-#                         SDK_REDACTION_AUTHORIZATION_GATE stays open).
+#                         "blocked_external" (permitted ONLY for an audited
+#                         external-pinned SDK site while its named
+#                         authorization gate stays open — no row is
+#                         currently blocked_external; the go-mcp-oauth-sdk@
+#                         v0.2.0 parseAndFetchKeys row that used to hold this
+#                         state was resolved to safe by the v0.2.1 bump, see
+#                         below).
 #   gate                  "-" for every row except a blocked_external row,
 #                         which must name its authorization gate exactly
-#                         (currently only SDK_REDACTION_AUTHORIZATION_GATE).
+#                         (the only gate ever used here so far,
+#                         SDK_REDACTION_AUTHORIZATION_GATE, is now closed —
+#                         no row currently names it).
 #
 # Local sinks proven by an existing dynamic test are pointed at tests that
 # exist on this tree today (TestProtocol_*, TestAdversarial_*, TestVerify*,
@@ -127,7 +137,7 @@
 # TestRedactionBoundary_SearchTelemetryOmitsRoleValues. T3's boundary-matrix
 # extensions, T6's verifier redaction/rotation matrix, and T7's
 # cmd/ch-jwt-verify debug-log matrix have SINCE merged onto this tree — their
-# proof tests (TestJWKSRotation_PreBumpCharacterization,
+# proof tests (TestJWKSRotation_KidNeverLogged,
 # TestVerifyDebugLogRedaction_MalformedHeaderMarker,
 # TestVerifyDebugLogRedaction_UnknownKidMarker, and the
 # TestVerifyDebugLogRedaction_* rejection-cause matrix cited by the
@@ -242,7 +252,7 @@ third_party/ldapserver	third_party/ldapserver/server.go	Server.serve	vendored-lo
 third_party/ldapserver	third_party/ldapserver/server.go	Server.serve	vendored-logger-print	lit:Connection client [%d] from %s accepted,sel:Numero,call:sel:String()	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
 third_party/ldapserver	third_party/ldapserver/server.go	Server.Stop	vendored-logger-print	lit:gracefully closing client connections...	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
 third_party/ldapserver	third_party/ldapserver/server.go	Server.Stop	vendored-logger-print	lit:all clients connection closed	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
-external-pinned	go-mcp-oauth-sdk@v0.2.0	parseAndFetchKeys	zerolog-terminal	oauth/jwt.go:117 log.Info().Str("kid", keyID).Msg(...)	yes	jwt-content	external-pinned	characterization	TestJWKSRotation_PreBumpCharacterization	blocked_external	SDK_REDACTION_AUTHORIZATION_GATE
-external-pinned	go-mcp-oauth-sdk@v0.2.0	ValidateStrictJWT	fmt-errorf	lit:unable to parse or validate JWT header	yes	jwt-header-sanitized-text	external-pinned	marker	TestVerifyDebugLogRedaction_MalformedHeaderMarker	safe	-
-external-pinned	go-mcp-oauth-sdk@v0.2.0	ValidateStrictJWT	fmt-errorf	lit:failed to resolve a JWK for the token's key id: %w	yes	jwt-kid-sanitized-text	external-pinned	marker	TestVerifyDebugLogRedaction_UnknownKidMarker	safe	-
-external-pinned	go-mcp-oauth-sdk@v0.2.0	fetchJWKSet	zerolog-terminal	lit:can't close %s response body	no	jwks-uri-and-error-no-bearer	external-pinned	structural	n/a	unreachable	-
+external-pinned	go-mcp-oauth-sdk@v0.2.1	parseAndFetchKeys	zerolog-terminal	oauth/jwt.go:177 log.Info().Int("matched_keys", len(keys)).Msg(...)	no	numeric-count-only	external-pinned	marker	TestJWKSRotation_KidNeverLogged	safe	-
+external-pinned	go-mcp-oauth-sdk@v0.2.1	ValidateStrictJWT	fmt-errorf	lit:unable to parse or validate JWT header	yes	jwt-header-sanitized-text	external-pinned	marker	TestVerifyDebugLogRedaction_MalformedHeaderMarker	safe	-
+external-pinned	go-mcp-oauth-sdk@v0.2.1	ValidateStrictJWT	fmt-errorf	lit:failed to resolve a JWK for the token's key id: %w	yes	jwt-kid-sanitized-text	external-pinned	marker	TestVerifyDebugLogRedaction_UnknownKidMarker	safe	-
+external-pinned	go-mcp-oauth-sdk@v0.2.1	fetchJWKSet	zerolog-terminal	lit:can't close %s response body	no	jwks-uri-and-error-no-bearer	external-pinned	structural	n/a	unreachable	-

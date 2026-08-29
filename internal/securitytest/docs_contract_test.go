@@ -451,6 +451,46 @@ func TestDocsContract_ServerGoCapCommentDoesNotClaimOneMebibyte(t *testing.T) {
 	}
 }
 
+// TestDocsContract_ReleaseGateWordingStaysGeneric fails if
+// release_gate_test.go's blocked_external release-gate doc comment or
+// failure message ever again hardcode the (now-resolved) SDK kid-rotation
+// row by name. That row was the only blocked_external row for a while, but
+// the gate fails for ANY blocked_external row, present or future, for any
+// dependency — wording that still says "currently exactly the SDK
+// kid-rotation row" or steers every reader toward "bump+re-audit the SDK"
+// specifically would misdiagnose a future, unrelated blocked_external row.
+// The gate's prose and remediation text must stay generic to whichever
+// row(s) are actually blocked (and their named gate) at the time it fails.
+func TestDocsContract_ReleaseGateWordingStaysGeneric(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("securitytest: locate module root: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "internal", "securitytest", "release_gate_test.go"))
+	if err != nil {
+		t.Fatalf("securitytest: read internal/securitytest/release_gate_test.go: %v", err)
+	}
+	// Normalize away Go comment markers and line-wrap whitespace so a
+	// phrase that happens to wrap across "// "-prefixed comment lines (as
+	// the stale wording did) is still matched as one contiguous phrase.
+	normalized := strings.Join(strings.Fields(strings.ReplaceAll(string(data), "//", " ")), " ")
+	staleReleaseGateWordingPhrases := []string{
+		"currently exactly the SDK kid-rotation row",
+		"bump+re-audit the SDK, or record kid as allowed non-credential metadata",
+	}
+	var bad []string
+	for _, phrase := range staleReleaseGateWordingPhrases {
+		normalizedPhrase := strings.Join(strings.Fields(phrase), " ")
+		if strings.Contains(normalized, normalizedPhrase) {
+			bad = append(bad, "release_gate_test.go: contains stale kid-specific release-gate wording \""+phrase+"\"")
+		}
+	}
+	if len(bad) > 0 {
+		sort.Strings(bad)
+		t.Fatalf("%d stale release-gate wording violation(s):\n%s", len(bad), strings.Join(bad, "\n"))
+	}
+}
+
 // operatorGuideYAMLProofTest is the exact T13a test function name §21.4/A3
 // cites as the proof that every YAML fence's field set is real: it strict-
 // decodes cmd/ch-oauth-ldap/testdata/operator-guide.yaml (the file every

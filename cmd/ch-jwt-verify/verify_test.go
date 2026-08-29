@@ -111,7 +111,7 @@ func (p *testIdP) mintJWT(t *testing.T, claims map[string]interface{}) string {
 // mintJWTWithKid is mintJWT's counterpart for the debug-log redaction matrix
 // below: mintJWT always signs with the IdP's own configured kid — exactly
 // the value present in its /jwks response — so it can never exercise the
-// unknown-kid rejection path (github.com/altinity/go-mcp-oauth-sdk@v0.2.0's
+// unknown-kid rejection path (github.com/altinity/go-mcp-oauth-sdk@v0.2.1's
 // parseAndFetchKeys, oauth/jwt.go). This mints a well-formed, correctly
 // signed token whose `kid` header is instead an arbitrary caller-supplied
 // value, so JWKS lookup-by-kid genuinely misses.
@@ -1206,15 +1206,16 @@ func assertVerifyDebugLogRedacted(t *testing.T, v *Verifier, token string, extra
 
 // TestVerifyDebugLogRedaction_MalformedHeaderMarker covers a JWT whose
 // header itself fails to parse (an `alg` value outside the SDK's accepted
-// signature-algorithm set): github.com/altinity/go-mcp-oauth-sdk@v0.2.0's
-// parseAndFetchKeys (oauth/jwt.go) wraps go-jose's parse error, which would
-// otherwise interpolate the raw attacker-controlled header content, and
-// ValidateStrictJWT (oauth/strict_jwt.go:308) sanitizes that whole class to
-// the fixed text "unable to parse or validate JWT header" before it ever
-// reaches this sidecar's debug sink. Asserting that exact substring (rather
-// than only marker-absence) means a future SDK change that starts echoing
-// header text back into the error would fail this test even though no
-// marker string happens to match.
+// signature-algorithm set): github.com/altinity/go-mcp-oauth-sdk@v0.2.1's
+// parseAndFetchKeys (oauth/jwt.go) wraps go-jose's parse error in a
+// *jwtHeaderParseError, which would otherwise interpolate the raw
+// attacker-controlled header content, and ValidateStrictJWT
+// (oauth/strict_jwt.go:309) sanitizes that whole class to the fixed text
+// "unable to parse or validate JWT header" before it ever reaches this
+// sidecar's debug sink. Asserting that exact substring (rather than only
+// marker-absence) means a future SDK change that starts echoing header text
+// back into the error would fail this test even though no marker string
+// happens to match.
 func TestVerifyDebugLogRedaction_MalformedHeaderMarker(t *testing.T) {
 	p := newTestIdP(t)
 	v := newTestVerifier(t, baseConfig(p))
@@ -1236,11 +1237,14 @@ func TestVerifyDebugLogRedaction_MalformedHeaderMarker(t *testing.T) {
 
 // TestVerifyDebugLogRedaction_UnknownKidMarker covers a well-formed,
 // correctly signed JWT whose `kid` header names a key absent from the IdP's
-// JWKS. parseAndFetchKeys' one-shot rotation refetch still misses it, and
-// its "no JWK found for kid %q" error — which embeds that raw kid value —
-// is sanitized by ValidateStrictJWT (oauth/strict_jwt.go:321) to the fixed
-// text "failed to resolve a JWK for the token's key id" before reaching this
-// sidecar's debug sink.
+// JWKS. parseAndFetchKeys' one-shot rotation refetch still misses it and
+// returns a structural *kidNotFoundError (oauth/jwt.go) — a fixed, literal
+// "no JWK found for token key id" text that, unlike the pre-v0.2.1 "no JWK
+// found for kid %q" error it replaced, never embeds the raw kid value in
+// the first place. ValidateStrictJWT (oauth/strict_jwt.go:322) still
+// reclassifies it (detected structurally via errors.As, not text-matching)
+// to its own established, fixed text "failed to resolve a JWK for the
+// token's key id" before reaching this sidecar's debug sink.
 func TestVerifyDebugLogRedaction_UnknownKidMarker(t *testing.T) {
 	p := newTestIdP(t)
 	v := newTestVerifier(t, baseConfig(p))

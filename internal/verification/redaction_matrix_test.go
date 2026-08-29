@@ -1,9 +1,9 @@
 package verification
 
 // This file covers plan-19p5 §5.6 (shared verifier redaction marker matrix)
-// and §4.3 (pre-bump JWKS-rotation characterization of the
-// SDK_REDACTION_AUTHORIZATION_GATE blocker), per the phase-5 plan's §23.6
-// implementation-order step 6.
+// and §4.4 (post-bump JWKS-rotation proof that the now-closed
+// SDK_REDACTION_AUTHORIZATION_GATE blocker stays fixed), per the phase-5
+// plan's §23.6 implementation-order step 6.
 //
 // --- A2 global-logger-capture discipline (binding on this file) ---
 //
@@ -20,7 +20,7 @@ package verification
 //     t.Parallel(), neither on itself nor on any t.Run group containing it;
 //   - in practice, every top-level test in THIS file calls captureLog (both
 //     TestRedactionMatrix_RejectionCases and
-//     TestJWKSRotation_PreBumpCharacterization do), so neither one — nor
+//     TestJWKSRotation_KidNeverLogged do), so neither one — nor
 //     either one's t.Run subtests — ever calls t.Parallel() here; a test
 //     that only asserted on the returned error, with no log capture at
 //     all, would be free to call t.Parallel() as usual, but that
@@ -427,25 +427,27 @@ func TestRedactionMatrix_RejectionCases(t *testing.T) {
 	}
 }
 
-// TestJWKSRotation_PreBumpCharacterization is plan §4.3's explicit
-// pre-bump characterization mode for the confirmed go-mcp-oauth-sdk v0.2.0
-// defect gated by SDK_REDACTION_AUTHORIZATION_GATE (plan §4.1/§4.2):
-// oauth/jwt.go's parseAndFetchKeys logs the unverified JWT header's raw
-// `kid` via `log.Info().Str("kid", keyID)...` on a successful post-rotation
-// re-fetch. This is NOT a security pass — it is deliberate evidence that the
-// redaction-sites.tsv `blocked_external` row corresponds to a live,
-// reachable defect while v0.2.0 remains pinned, so the phase-5 helper run
-// can keep `go test ./...` green without silently certifying that defect
-// (the separate `phase5release`-tagged gate is what refuses to certify it —
-// see plan §5.10). This is intentionally a "kid marker present" assertion.
-//
-// §4.4's post-bump transition flips this test the other direction: once the
-// audited SDK version is bumped and the rotation-success log line has a
-// fixed, safe message, this test must instead require the rotation-success
-// event to appear WITHOUT the kid marker (and the redaction-sites.tsv row
-// changes from blocked_external to its fixed classification). Do not make
-// that flip in this change: SDK_REDACTION_AUTHORIZATION_GATE is not
-// authorized in this run (plan Coordinator-approved amendment A1).
+// TestJWKSRotation_KidNeverLogged is plan §4.4's post-bump transition of
+// what was plan §4.3's explicit pre-bump characterization of the confirmed
+// go-mcp-oauth-sdk v0.2.0 defect gated by SDK_REDACTION_AUTHORIZATION_GATE
+// (plan §4.1/§4.2): oauth/jwt.go's parseAndFetchKeys used to log the
+// unverified JWT header's raw `kid` via `log.Info().Str("kid", keyID)...`
+// on a successful post-rotation re-fetch. go-mcp-oauth-sdk@v0.2.1 fixes
+// this: the rotation-success event now logs only a safe numeric
+// `matched_keys` count (`log.Info().Int("matched_keys", n).Msg(...)`), never
+// the `kid` value. SDK_REDACTION_AUTHORIZATION_GATE is closed
+// (redaction-sites.tsv's parseAndFetchKeys row is now `safe`, not
+// `blocked_external`) and this test asserts the fix positively: the
+// rotation-success event still fires (proving the invalidate+re-fetch
+// branch actually executed, not just its absence), but the `kid` marker
+// must be ABSENT from the captured log at both default and trace level —
+// the opposite assertion from this test's pre-bump predecessor,
+// TestJWKSRotation_PreBumpCharacterization. A future regression that
+// reintroduces the raw `kid` into this log line — or downgrades this row
+// back to blocked_external without also flipping this assertion — is
+// exactly what this test exists to catch; see plan §5.10's
+// `phase5release`-tagged release gate for the complementary manifest-level
+// check.
 //
 // The rotation fixture proves the targeted branch actually executed — not
 // just its absence — by warming the SDK Verifier's real internal JWKS cache
@@ -458,7 +460,7 @@ func TestRedactionMatrix_RejectionCases(t *testing.T) {
 //
 // This test does not call t.Parallel(): it captures the process-global
 // zerolog logger — see the file header.
-func TestJWKSRotation_PreBumpCharacterization(t *testing.T) {
+func TestJWKSRotation_KidNeverLogged(t *testing.T) {
 	p := newTestIdP(t)
 	cfg := baseConfig(p)
 	cfg.JWKSCacheTTL = time.Hour // long enough that the cache can't expire on its own mid-test
@@ -488,14 +490,22 @@ func TestJWKSRotation_PreBumpCharacterization(t *testing.T) {
 	require.NoError(t, err, "verification against the rotated key B must succeed once the SDK re-fetches the JWKS")
 	require.Equal(t, "alice@example.com", result.Claims.Email)
 
+	// captureLog runs the process-global zerolog logger at TraceLevel (see
+	// the file header) — the most verbose level the SDK's rotation-success
+	// log line could ever be emitted at. Any content absent from a
+	// TraceLevel capture is therefore also absent at every quieter
+	// (default/Info/etc.) level: this single capture proves absence at
+	// default and trace level both, per plan §4.4.
 	logged := buf.String()
 	require.Contains(t, logged, "JWKS re-fetched after key rotation",
 		"the rotation-success event must have fired — proves the invalidate+re-fetch branch actually executed, not just its absence")
-	// Pre-bump characterization: audited v0.2.0 embeds the raw kid in that
-	// event. This assertion is INTENTIONALLY the opposite of what a security
-	// pass would require — see the doc comment above and plan §4.3/§4.4.
-	require.Contains(t, logged, rotatedKidMarker,
-		"pre-bump characterization: known SDK_REDACTION_AUTHORIZATION_GATE defect — v0.2.0 logs the raw kid on rotation; §4.4 flips this to require absence once the SDK is bumped")
+	// Post-bump fix: go-mcp-oauth-sdk@v0.2.1 replaced the raw `kid` field on
+	// this event with a safe `matched_keys` count. This is the closure of
+	// SDK_REDACTION_AUTHORIZATION_GATE (plan §4.4) — the opposite assertion
+	// from this test's pre-bump predecessor, TestJWKSRotation_PreBumpCharacterization,
+	// which required the marker's PRESENCE against the audited v0.2.0.
+	require.NotContains(t, logged, rotatedKidMarker,
+		"SDK_REDACTION_AUTHORIZATION_GATE is closed: go-mcp-oauth-sdk@v0.2.1 must never log the raw kid on rotation — a reappearance here is a regression, not a known defect")
 
 	require.NotContains(t, logged, rotatedTok, "the raw compact JWT (bearer) must never be logged, rotation or not")
 	require.NotContains(t, logged, rotationPayloadMarker, "no payload claim value may be logged")
