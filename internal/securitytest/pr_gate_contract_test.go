@@ -132,9 +132,11 @@ var prGatePinnedRefRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // prGateNode24FloorByAction is the first release of each pinned action that
 // declares `using: node24` in its action.yml, keyed by action identity
-// (verified against the real actions/checkout and actions/setup-go
-// repositories: v5.0.0 and v7.0.0 respectively — actions/checkout v4.x is
-// still node20, and setup-go v6.x is still node20). A pin below this floor
+// (verified by fetching each action.yml at the tag boundary from the real
+// actions/checkout and actions/setup-go repositories: checkout v4.3.1 is
+// node20 and v5.0.0 is node24; setup-go v6.1.0 is node20 and v6.2.0 is
+// node24 — note it is v6.2.0, NOT v7.0.0, so setup-go's node24 line starts
+// mid-v6 rather than at the major bump). A pin below this floor
 // only runs because GitHub's runners currently re-execute node20-declared
 // actions on the Node 24 runtime as a compatibility shim; that shim is
 // withdrawn with Node 20's removal from runner images on 2026-09-23, at
@@ -142,7 +144,7 @@ var prGatePinnedRefRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // running on borrowed time.
 var prGateNode24FloorByAction = map[string][3]int{
 	"actions/checkout": {5, 0, 0},
-	"actions/setup-go": {7, 0, 0},
+	"actions/setup-go": {6, 2, 0},
 }
 
 // prGateVersionCommentRE extracts the pinned action's identity and semantic
