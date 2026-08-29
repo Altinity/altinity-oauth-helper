@@ -57,10 +57,14 @@ import (
 //   - Every external `uses:` is pinned to a full 40-hex commit SHA. A floating
 //     tag (`@v4`) is mutable by the action's owner, so the gate that decides
 //     what may merge would execute code chosen after review.
-//   - Every pinned action is at or above the first release that declares the
+//   - Every pin's trailing `# <identity>@vX.Y.Z` comment names that step's own
+//     action and a version at or above the first release declaring the
 //     `node24` runtime (`actions/checkout` >= v5.0.0, `actions/setup-go` >=
 //     v6.2.0 — setup-go's node24 line starts mid-v6, not at a major bump; see
 //     prGateNode24FloorByAction below for how each floor was verified).
+//     Read the scope limit in that check's own doc comment before relying on
+//     it: it verifies the COMMENT, because a commit SHA cannot be resolved to
+//     a version or a declared runtime offline.
 //     GitHub Actions runners stopped shipping Node 20 on 2026-09-23;
 //     a `node20`-declared action only keeps working because the runner
 //     silently re-executes it on Node 24 in the meantime — a compatibility
@@ -690,12 +694,32 @@ func checkActionNode24Floor(identity, lineComment string) (tracked bool, problem
 }
 
 // TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor guards against
-// re-pinning either action back onto a `node20`-declared release. The SHA
-// itself carries no version information (that is the point of pinning to a
-// commit rather than a tag), so the check reads the trailing human-readable
-// comment every pin in this file already carries and compares it against
-// prGateNode24FloorByAction's literal floor per action identity — see
-// checkActionNode24Floor for the actual logic.
+// re-pinning either action back onto a `node20`-declared release, by checking
+// the trailing human-readable comment every pin carries: that it names the
+// step's OWN action identity, and a version at or above
+// prGateNode24FloorByAction's literal floor for that action. See
+// checkActionNode24Floor for the logic.
+//
+// SCOPE LIMIT, stated plainly because the test's name promises more than it
+// can deliver: this verifies the COMMENT, not the pin. A commit SHA cannot be
+// resolved to a version — let alone to the runtime its action.yml declares —
+// without network access, which a unit test must not have. So a pin whose SHA
+// was regressed to a node20 release but whose comment was updated to a
+// plausible above-floor version for the same action still passes here.
+//
+// That residual gap is accepted deliberately rather than closed, and the
+// alternatives were considered: hardcoding an approved identity -> SHA ->
+// runtime table would make the binding real, but it converts every legitimate
+// action upgrade into unrelated test churn, and it re-introduces the
+// exact-SHA coupling that pinning-for-immutability deliberately avoids (the
+// invariant issue #23 actually requires is immutability, which
+// TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA proves
+// independently and completely). Treat this check as version-comment hygiene
+// with a floor — genuinely useful against the realistic accident of someone
+// bumping a pin downward or pasting the wrong action's comment, and honestly
+// not a runtime oracle. The Node 20 removal date in
+// prGateNode24FloorByAction's comment is the real deadline; a human reading a
+// pin is still the thing that confirms a SHA is what its comment claims.
 func TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor(t *testing.T) {
 	top := loadPRGateWorkflow(t)
 	_, job := prGateSingleJob(t, top)

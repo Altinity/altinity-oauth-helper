@@ -8,7 +8,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -195,14 +194,6 @@ func account(username, issuer, subject, token string, roles []string) fakeAccoun
 
 // ---- server/client test scaffolding --------------------------------------
 
-// failSafeShutdownTimeout bounds every individual step of startServing's
-// teardown below, so cleanup itself can never hang the test binary. It is
-// deliberately longer than the ~5s bounds individual tests assert on their
-// own explicit shutdown sequences: when one of those bounds is the property
-// actually being violated, the test's own targeted failure message should
-// be what fails, not this cleanup's silent timeout.
-const failSafeShutdownTimeout = 15 * time.Second
-
 // startServing launches srv.Serve(ln) on its own goroutine and returns both
 // the channel carrying Serve's result and an idempotent stop closure that
 // is ALREADY registered with t.Cleanup by the time this function returns.
@@ -238,64 +229,6 @@ const failSafeShutdownTimeout = 15 * time.Second
 // harmless no-op, so tests whose whole point is to assert on this shutdown
 // sequence can call stop() themselves and keep their own bounds and
 // failure messages.
-// errorfer is the subset of *testing.T that runShutdownSequence needs to
-// report a fail-safe timeout without halting the calling goroutine (t.Fatal
-// family is unsafe to call from a non-test goroutine). Satisfied by
-// *testing.T; a fake implementation lets
-// TestStartServing_ServeTimeoutSkipsUnsynchronizedStop exercise the timeout
-// branches deterministically, in microseconds, without a real listener,
-// server, or the production failSafeShutdownTimeout.
-type errorfer interface {
-	Errorf(format string, args ...any)
-}
-
-// runShutdownSequence is startServing's stop() body, extracted so its two
-// fail-safe-timeout branches can be driven directly by a test with fake
-// dependencies and a short timeout. See startServing's doc comment for why
-// the ordering (close listener -> wait on serveErr -> only then Stop) is
-// load-bearing.
-//
-// Critically: t.Errorf is Logf+Fail, NOT Fatal — it marks the test failed
-// and RETURNS, it does not halt execution of the calling goroutine. A
-// serveErr timeout therefore does not, by itself, stop this function from
-// falling through to srv.Stop() below; that fallthrough is exactly the
-// unsynchronized-Stop-racing-Serve hazard the ordering exists to prevent,
-// so the serveErr timeout branch must explicitly return instead of merely
-// reporting and continuing.
-func runShutdownSequence(t errorfer, closeListener func(), serveErr <-chan error, stopServer func(), cancel context.CancelFunc, timeout time.Duration) {
-	closeListener()
-	// Both timeout branches below report rather than proceeding silently.
-	// Closing our own listener is supposed to unblock Accept promptly, so a
-	// timeout here means Serve is genuinely wedged — and continuing to
-	// stopServer() anyway would skip the serveErr synchronization point
-	// this helper's doc comment calls load-bearing, i.e. commit the very
-	// Stop-racing-Serve data race the ordering exists to prevent. A silent
-	// fail-open in shared teardown would let that surface later as an
-	// unexplained race in some unrelated test.
-	select {
-	case <-serveErr:
-	case <-time.After(timeout):
-		t.Errorf("startServing: Serve did not return within %s of closing the listener — skipping Stop() rather than proceeding without the serveErr synchronization point, which would itself be a data race against the still-running Serve goroutine", timeout)
-		if cancel != nil {
-			cancel()
-		}
-		return
-	}
-	stopped := make(chan struct{})
-	go func() {
-		stopServer()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-	case <-time.After(timeout):
-		t.Errorf("startServing: Stop() did not return within %s — leaving a live Stop goroutine behind, which can then touch the vendored server concurrently with a later test's New()", timeout)
-	}
-	if cancel != nil {
-		cancel()
-	}
-}
-
 func startServing(t *testing.T, srv *Server, ln net.Listener, cancel context.CancelFunc) (serveErr chan error, stop func()) {
 	t.Helper()
 
@@ -308,7 +241,38 @@ func startServing(t *testing.T, srv *Server, ln net.Listener, cancel context.Can
 	var once sync.Once
 	stop = func() {
 		once.Do(func() {
-			runShutdownSequence(t, func() { _ = ln.Close() }, serveErr, srv.Stop, cancel, failSafeShutdownTimeout)
+			// Close OUR OWN listener reference first, then WAIT for Serve
+			// to return, and only then call Stop. The vendored
+			// vjeantet/ldapserver stores its listener in a plain,
+			// unsynchronized struct field written by the Serve goroutine
+			// and read by Stop, so calling Stop concurrently with a
+			// still-running Serve is a genuine data race. Closing ln
+			// unblocks Accept; receiving from serveErr is the channel
+			// synchronization point that makes the following Stop
+			// race-free.
+			//
+			// The `<-serveErr` receive is deliberately UNBOUNDED. An
+			// earlier revision of this helper bounded each step with a
+			// 15s fail-safe that reported via t.Errorf and returned, so
+			// cleanup could never hang the binary — but that traded a
+			// bounded hang for something worse: it released the next test
+			// while the previous server was still live, which is exactly
+			// how a wedged Serve turns into an inexplicable
+			// ldapserver.Logger race in some unrelated test later in the
+			// run (that global is reassigned by every New()). A teardown
+			// bug must fail-stop this process, not quietly hand the next
+			// test a contaminated one. If Serve or Stop genuinely wedges,
+			// `go test`'s own timeout panics with a full goroutine dump —
+			// strictly better diagnostics than an Errorf, and it happens
+			// well inside pr-gate.yml's 15-minute job bound. This is also
+			// the pattern startTestServer used unchanged throughout the
+			// #19 series.
+			_ = ln.Close()
+			<-serveErr
+			srv.Stop()
+			if cancel != nil {
+				cancel()
+			}
 		})
 	}
 	t.Cleanup(stop)
@@ -339,126 +303,6 @@ func startTestServer(t *testing.T, v verifier, r roleResolver) (addr string, roo
 	_, stop = startServing(t, srv, ln, cancel)
 
 	return ln.Addr().String(), cancel, stop
-}
-
-// fakeErrorfT is a minimal errorfer that records every Errorf call instead
-// of failing the real *testing.T that owns the test — used to drive
-// runShutdownSequence's fail-safe-timeout branches without also marking the
-// outer test failed, since those branches are SUPPOSED to call Errorf.
-type fakeErrorfT struct {
-	mu   sync.Mutex
-	msgs []string
-}
-
-func (f *fakeErrorfT) Errorf(format string, args ...any) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.msgs = append(f.msgs, fmt.Sprintf(format, args...))
-}
-
-func (f *fakeErrorfT) count() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.msgs)
-}
-
-// TestStartServing_ServeTimeoutSkipsUnsynchronizedStop proves the exact
-// regression pass-2 review flagged: when Serve does not return within the
-// fail-safe timeout after the listener is closed, runShutdownSequence must
-// report the failure and STOP — never fall through to calling Stop()
-// without the serveErr synchronization point, since that would be the very
-// Stop-racing-Serve data race the ordering exists to prevent. Before this
-// fix, t.Errorf (Logf+Fail, which does not halt execution) let control fall
-// through unconditionally to the Stop() call below regardless of whether
-// serveErr was ever received.
-func TestStartServing_ServeTimeoutSkipsUnsynchronizedStop(t *testing.T) {
-	t.Parallel()
-
-	fake := &fakeErrorfT{}
-	serveErr := make(chan error) // never sent to: simulates a wedged Serve
-	var listenerClosed atomic.Bool
-	var stopCalled atomic.Bool
-
-	runShutdownSequence(
-		fake,
-		func() { listenerClosed.Store(true) },
-		serveErr,
-		func() { stopCalled.Store(true) },
-		nil,
-		20*time.Millisecond,
-	)
-
-	if !listenerClosed.Load() {
-		t.Error("runShutdownSequence: listener was never closed — Accept can never unblock")
-	}
-	if stopCalled.Load() {
-		t.Error("runShutdownSequence: stopServer() was called after a serveErr timeout — this is exactly the unsynchronized Stop-racing-Serve data race the ordering exists to prevent")
-	}
-	if got := fake.count(); got != 1 {
-		t.Errorf("runShutdownSequence: got %d Errorf call(s), want exactly 1 reporting the serveErr timeout: %v", got, fake.msgs)
-	}
-}
-
-// TestStartServing_StopTimeoutStillReports proves the second fail-safe
-// branch (a wedged Stop() itself) still reports via Errorf, and that a
-// clean serveErr receipt does let control proceed to calling stopServer.
-func TestStartServing_StopTimeoutStillReports(t *testing.T) {
-	t.Parallel()
-
-	fake := &fakeErrorfT{}
-	serveErr := make(chan error, 1)
-	serveErr <- nil // Serve returned promptly once the listener closed
-
-	block := make(chan struct{}) // held open to simulate a wedged Stop()
-	var stopStarted atomic.Bool
-	runShutdownSequence(
-		fake,
-		func() {},
-		serveErr,
-		func() {
-			stopStarted.Store(true)
-			<-block
-		},
-		nil,
-		20*time.Millisecond,
-	)
-	close(block) // let the leaked goroutine finish before the test exits
-
-	if !stopStarted.Load() {
-		t.Error("runShutdownSequence: stopServer was never invoked after a clean serveErr receipt")
-	}
-	if got := fake.count(); got != 1 {
-		t.Errorf("runShutdownSequence: got %d Errorf call(s), want exactly 1 reporting the Stop() timeout: %v", got, fake.msgs)
-	}
-}
-
-// TestStartServing_CleanShutdownReportsNothing proves the happy path — both
-// serveErr and stopServer complete promptly — calls Errorf zero times and
-// invokes stopServer exactly once, so the two tests above aren't merely
-// exercising a helper that always reports or never calls Stop.
-func TestStartServing_CleanShutdownReportsNothing(t *testing.T) {
-	t.Parallel()
-
-	fake := &fakeErrorfT{}
-	serveErr := make(chan error, 1)
-	serveErr <- nil
-	var stopCalls atomic.Int32
-
-	runShutdownSequence(
-		fake,
-		func() {},
-		serveErr,
-		func() { stopCalls.Add(1) },
-		nil,
-		failSafeShutdownTimeout,
-	)
-
-	if got := stopCalls.Load(); got != 1 {
-		t.Errorf("runShutdownSequence: stopServer called %d times, want exactly 1", got)
-	}
-	if got := fake.count(); got != 0 {
-		t.Errorf("runShutdownSequence: got %d unexpected Errorf call(s): %v", got, fake.msgs)
-	}
 }
 
 func dialTest(t *testing.T, addr string) *goldapclient.Conn {
