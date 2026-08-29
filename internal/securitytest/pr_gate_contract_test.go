@@ -20,11 +20,20 @@ import (
 //
 // What each assertion protects, and what breaks if it is lost:
 //
-//   - Trigger set is exactly unfiltered `pull_request` plus `push` on `main`.
-//     A `paths:`/`paths-ignore:` filter anywhere, or a narrowed trigger, means
-//     some pull requests never run the gate at all — and a required check that
-//     never runs on a documentation-only-looking PR is how an unverified change
-//     reaches `main` looking green.
+//   - Trigger set is exactly `pull_request` (with `types` restricted to
+//     `opened`, `synchronize`, `reopened`, `edited` — no other key, e.g. no
+//     `branches`/`paths`) plus `push` on `main`. A `paths:`/`paths-ignore:`
+//     filter anywhere, or a narrowed `types` list, means some pull requests
+//     never run the gate at all — and a required check that never runs on a
+//     documentation-only-looking PR is how an unverified change reaches
+//     `main` looking green. `edited` specifically is load-bearing, not
+//     decorative: a base-branch retarget is delivered as an `edited`
+//     activity (not a new `synchronize`) and keeps the same head SHA, so
+//     without it a PR proven green against base A can be retargeted onto
+//     protected `main` and keep that same green required check without the
+//     new merge result ever being tested — GitHub's required-check rule
+//     falls back to the head SHA's existing check when the test-merge commit
+//     has none of its own.
 //   - `pull_request_target` is absent. That trigger runs the BASE repository's
 //     workflow with a writable token and repository secrets in the context of
 //     an untrusted fork head; adding it to a job that then builds and tests
@@ -49,8 +58,10 @@ import (
 //     tag (`@v4`) is mutable by the action's owner, so the gate that decides
 //     what may merge would execute code chosen after review.
 //   - Every pinned action is at or above the first release that declares the
-//     `node24` runtime (`actions/checkout` >= v6.0.0, `actions/setup-go` >=
-//     v7.0.0). GitHub Actions runners stopped shipping Node 20 on 2026-09-23;
+//     `node24` runtime (`actions/checkout` >= v5.0.0, `actions/setup-go` >=
+//     v6.2.0 — setup-go's node24 line starts mid-v6, not at a major bump; see
+//     prGateNode24FloorByAction below for how each floor was verified).
+//     GitHub Actions runners stopped shipping Node 20 on 2026-09-23;
 //     a `node20`-declared action only keeps working because the runner
 //     silently re-executes it on Node 24 in the meantime — a compatibility
 //     shim, not a contract. Pinning below the node24 line means the gate
@@ -104,6 +115,14 @@ var prGateRequiredCommands = []string{
 
 // prGateExpectedTriggers is the complete, exact set of `on:` keys allowed.
 var prGateExpectedTriggers = []string{"pull_request", "push"}
+
+// prGateExpectedPullRequestTypes is the complete, exact `on.pull_request.types`
+// list. `edited` is the load-bearing addition over GitHub's own default
+// (opened/synchronize/reopened): a base-branch retarget is delivered as an
+// `edited` activity, not a new `synchronize`, and keeps the same head SHA —
+// see this file's header comment for why omitting it is a fail-open path,
+// not a cosmetic gap.
+var prGateExpectedPullRequestTypes = []string{"opened", "synchronize", "reopened", "edited"}
 
 // prGateExpectedPushBranches is the complete, exact `on.push.branches` list.
 var prGateExpectedPushBranches = []string{"main"}
@@ -308,14 +327,30 @@ func TestPRGateContract_TriggersAreUnfilteredPRAndMainPush(t *testing.T) {
 		t.Fatalf("securitytest: %s triggers are %v, want exactly %v — narrowing or extending this set changes which changes are verified before merge; a removed `pull_request` means PRs merge with no gate result at all", prGateWorkflowRelPath, got, prGateExpectedTriggers)
 	}
 
-	// `pull_request:` must carry no configuration whatsoever (null value):
-	// every filter form (paths, branches, types) can exclude some PR from
-	// verification.
+	// `pull_request:` must carry exactly one key, `types:`, with exactly the
+	// expected activity list — no `branches`/`paths`/`paths-ignore` filter,
+	// which would exclude some PR from verification outright. Unlike those,
+	// `types` is REQUIRED here (not forbidden): GitHub's own default
+	// (opened/synchronize/reopened) omits `edited`, and a base-branch
+	// retarget — which changes the merge/comparison target but is delivered
+	// as an `edited` activity on the same head SHA, not a new `synchronize`
+	// — must not silently skip verification. See this file's header comment.
 	pr := yamlMapValue(on, "pull_request")
-	if pr != nil && pr.Kind != yaml.ScalarNode {
-		t.Errorf("securitytest: %s `on.pull_request` has configuration (keys %v) but must be unfiltered — any branch/paths/types filter there means some pull requests merge without ever running the gate", prGateWorkflowRelPath, yamlMapKeys(pr))
-	} else if pr != nil && pr.Value != "" && pr.Value != "null" && pr.Value != "~" {
-		t.Errorf("securitytest: %s `on.pull_request` must be an empty (unfiltered) value, got %q", prGateWorkflowRelPath, pr.Value)
+	if pr == nil || pr.Kind != yaml.MappingNode {
+		t.Fatalf("securitytest: %s `on.pull_request` must be a mapping with exactly `types: %v`, got %v — without an explicit `types` list a base-branch retarget (delivered as `edited`, not `synchronize`) never re-triggers the gate, letting a PR keep a green required check while merging an untested new base", prGateWorkflowRelPath, prGateExpectedPullRequestTypes, pr)
+	}
+	if keys := yamlMapKeys(pr); strings.Join(keys, ",") != "types" {
+		t.Errorf("securitytest: %s `on.pull_request` keys are %v, want exactly [types] — any other key here (branches, paths, paths-ignore) means some pull requests merge without ever running the gate", prGateWorkflowRelPath, keys)
+	}
+	typesNode := yamlMapValue(pr, "types")
+	var gotTypes []string
+	if typesNode != nil && typesNode.Kind == yaml.SequenceNode {
+		for _, ty := range typesNode.Content {
+			gotTypes = append(gotTypes, ty.Value)
+		}
+	}
+	if strings.Join(gotTypes, ",") != strings.Join(prGateExpectedPullRequestTypes, ",") {
+		t.Errorf("securitytest: %s `on.pull_request.types` is %v, want exactly %v — dropping `edited` reopens the base-retarget fail-open path described in this file's header comment; do not special-case skip title/body-only edits to narrow this back down", prGateWorkflowRelPath, gotTypes, prGateExpectedPullRequestTypes)
 	}
 
 	push := yamlMapValue(on, "push")

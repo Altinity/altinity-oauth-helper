@@ -6,7 +6,18 @@ on:
   # never reported for a queue entry, so entries stall forever. That fails
   # closed, but it presents as an outage rather than as a misconfiguration.
   # Do not add the trigger before a queue actually exists.
+  #
+  # `types` must include `edited`, not just the opened/synchronize/reopened
+  # default: a base-branch retarget is delivered as an `edited` activity, not
+  # a new `synchronize`, and keeps the same head SHA. Without `edited` here, a
+  # PR proven green against base A can be retargeted onto protected `main` and
+  # keep that same green required check without the new merge result ever
+  # being tested — GitHub's required-check rule falls back to the head SHA's
+  # existing check when the test-merge commit has none of its own. Do not
+  # special-case skip title/body-only edits to "optimize" this back down —
+  # that reopens the exact gap this closes.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
