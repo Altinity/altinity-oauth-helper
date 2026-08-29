@@ -15,9 +15,12 @@ repo; when one bites anyway, update this file in the same change.
 ## Go build/test and the gate
 
 - No lifecycle-script gate to worry about (no `package.json`/`.npmrc` in this repo) —
-  the gate is simply `go build ./... && go vet ./... && go test ./...`
-  (`per-issue-cycle.md` step 2). There is no coverage floor enforced anywhere; write
-  tests for new behavior on your own judgment, especially cache-key/identity-policy
+  the **local** gate (`per-issue-cycle.md` step 2) is simply
+  `go build ./... && go vet ./... && go test ./...`. Hosted CI's `Required PR gate`
+  runs a superset of it — the `Required PR gate` bullet under **GitHub CLI**
+  below lists the exact five commands, so passing the local gate is necessary
+  but not sufficient. There is no coverage floor enforced anywhere; write tests
+  for new behavior on your own judgment, especially cache-key/identity-policy
   edge cases (security-relevant surface — see `CLAUDE.md`).
 - `cmd/ch-jwt-verify/verify_test.go` spins up its own in-process test IdP
   (`newTestIdP`, RSA-signed JWTs over an `httptest` JWKS server) rather than sharing a
@@ -68,10 +71,10 @@ exercising the relevant recipe under `examples/`:
   `cmd/ch-jwt-verify/**`/`go.mod`/`go.sum`/`Dockerfile`) and
   `build-ch-oauth-ldap.yml` (path-filtered to `cmd/ch-oauth-ldap/**`/`internal/**`/
   `third_party/**`/`go.mod`/`go.sum`/`Dockerfile.ch-oauth-ldap`) only build+publish an
-  image on push to `main`. They verify nothing and are never a substitute for
-  `Required PR gate` — a green publish is not a green gate, and a *skipped* publish
-  (path filters) is not a failure. The `headSha`-keying rule applies to them too if
-  you ever wait on one (e.g. to confirm a post-merge publish actually ran).
+  image on push to `main` (plus manual `workflow_dispatch`). They verify nothing
+  and are never a substitute for `Required PR gate` — a green publish is not a
+  green gate, and a *skipped* publish (path filters) is not a failure. The
+  `headSha`-keying rule applies to them too if you ever wait on one (e.g. to confirm a post-merge publish actually ran).
 - **Local verification is still required before handoff.** Hosted CI is merge
   enforcement, not a substitute: run the five gate commands plus the gates CI
   deliberately does not run (`helm/ch-oauth-ldap/test.sh`, the Docker ClickHouse

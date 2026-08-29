@@ -6,9 +6,13 @@ real ClickHouse servers, then proves end to end that an otherwise-undefined
 ClickHouse user can authenticate with a JWT through LDAP, receive token-derived
 local roles, and carry those roles across a distributed query.
 
-This is a **manual, local gate** — it is not wired into any CI workflow. Run it
-before calling any change to `cmd/ch-oauth-ldap`, `internal/ldap`, or the
-ClickHouse-facing configuration done.
+This is a **manual, local gate** — the Docker suite is not wired into any CI
+workflow. Run it before calling any change to `cmd/ch-oauth-ldap`,
+`internal/ldap`, or the ClickHouse-facing configuration done. The one exception
+in this directory is `tests/lib-tests.sh`, the daemon-free unit tests for the
+harness's own shell libraries under `lib/`: that script **is** run by
+`.github/workflows/pr-gate.yml` as part of the required `Required PR gate`
+check, so a change under `lib/` that breaks it fails CI.
 
 ## Prerequisites
 

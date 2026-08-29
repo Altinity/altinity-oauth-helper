@@ -490,9 +490,11 @@ review agents on this repo have edited files despite an explicit report-only bou
    workflows (`build-ch-jwt-verify.yml`, `build-ch-oauth-ldap.yml`) are separate
    post-merge publication concerns, path-filtered to push-to-`main`; they verify
    nothing and never substitute for `Required PR gate`. Local verification is still
-   required, not optional: run the gate (`go build ./... && go vet ./... && go test
-   ./...`) yourself, and if the change is consumer-visible (wire contract, Helm chart,
-   an `examples/` recipe), also sanity-check it against the relevant example (e.g.
+   required, not optional: run the local gate (`go build ./... && go vet ./... &&
+   go test ./...`) plus the `-race`, `phase5release` and shell-library commands CI
+   adds — i.e. all five listed above — yourself, and if the change is
+   consumer-visible (wire contract, Helm chart, an `examples/` recipe), also
+   sanity-check it against the relevant example (e.g.
    `examples/curl/verify.sh`, or the `examples/_platform` docker-compose stack) — there
    is no automated e2e suite to catch it otherwise.
 2. **Reconcile per cycle step 4 — this unit's own entry only.** One unit per PR means

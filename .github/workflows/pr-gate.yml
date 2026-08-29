@@ -1,6 +1,11 @@
 name: PR gate
 
 on:
+  # If a merge queue is ever enabled on `main`, a `merge_group:` trigger must be
+  # added here as well: without it the required `Required PR gate` context is
+  # never reported for a queue entry, so entries stall forever. That fails
+  # closed, but it presents as an outage rather than as a misconfiguration.
+  # Do not add the trigger before a queue actually exists.
   pull_request:
   push:
     branches: [main]
