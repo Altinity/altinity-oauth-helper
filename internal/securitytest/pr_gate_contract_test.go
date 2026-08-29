@@ -29,9 +29,12 @@ import (
 //     workflow with a writable token and repository secrets in the context of
 //     an untrusted fork head; adding it to a job that then builds and tests
 //     that head is a straightforward supply-chain compromise of this repo.
-//   - Top-level `permissions` is exactly `{contents: read}`. The gate only
-//     needs to read source. Any broader grant hands the token that runs
-//     PR-authored test code the authority to write to the repository.
+//   - Top-level `permissions` is exactly `{contents: read}`, AND the job
+//     carries no `permissions:` override that isn't the same exact mapping
+//     (job-level permissions REPLACE, not merge with, the top-level grant).
+//     The gate only needs to read source. Any broader grant hands the token
+//     that runs PR-authored test code the authority to write to the
+//     repository.
 //   - Exactly one job, with no `if`, no `needs`, and no `continue-on-error`
 //     anywhere. A conditional or skipped job reports *success* to branch
 //     protection, so an aggregator or a job condition is a silent waiver
@@ -130,22 +133,28 @@ var prGatePinnedRefRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // prGateNode24FloorByAction is the first release of each pinned action that
 // declares `using: node24` in its action.yml, keyed by action identity
 // (verified against the real actions/checkout and actions/setup-go
-// repositories: v6.0.0 and v7.0.0 respectively — setup-go v6.x is still
-// node20). A pin below this floor only runs because GitHub's runners
-// currently re-execute node20-declared actions on the Node 24 runtime as a
-// compatibility shim; that shim is withdrawn with Node 20's removal from
-// runner images on 2026-09-23, at which point a below-floor pin breaks the
-// gate outright rather than merely running on borrowed time.
+// repositories: v5.0.0 and v7.0.0 respectively — actions/checkout v4.x is
+// still node20, and setup-go v6.x is still node20). A pin below this floor
+// only runs because GitHub's runners currently re-execute node20-declared
+// actions on the Node 24 runtime as a compatibility shim; that shim is
+// withdrawn with Node 20's removal from runner images on 2026-09-23, at
+// which point a below-floor pin breaks the gate outright rather than merely
+// running on borrowed time.
 var prGateNode24FloorByAction = map[string][3]int{
-	"actions/checkout": {6, 0, 0},
+	"actions/checkout": {5, 0, 0},
 	"actions/setup-go": {7, 0, 0},
 }
 
-// prGateVersionCommentRE extracts the semantic version from a pin's trailing
-// `# actions/<name>@vX.Y.Z` comment, the only place the human-readable
-// version lives (the invariant is SHA immutability, so the version cannot be
-// read back out of the pin itself — see this file's header comment).
-var prGateVersionCommentRE = regexp.MustCompile(`@v(\d+)\.(\d+)\.(\d+)\s*$`)
+// prGateVersionCommentRE extracts the pinned action's identity and semantic
+// version from a pin's trailing `# <identity>@vX.Y.Z` comment, the only
+// place the human-readable version lives (the invariant is SHA immutability,
+// so the version cannot be read back out of the pin itself — see this
+// file's header comment). Capturing the identity (group 1) rather than only
+// the version numbers is deliberate: without cross-checking it against the
+// step's real `uses:` identity, a stale or copy-pasted comment next to a
+// regressed node20 SHA would still report a passing version and clear the
+// floor check below — see TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor.
+var prGateVersionCommentRE = regexp.MustCompile(`^#\s*(\S+)@v(\d+)\.(\d+)\.(\d+)\s*$`)
 
 // loadPRGateWorkflow reads and parses pr-gate.yml into its top-level mapping
 // node. yaml.Node rather than a typed struct or map[string]any is deliberate:
@@ -343,23 +352,66 @@ func TestPRGateContract_NoPathFiltersAnywhere(t *testing.T) {
 	}
 }
 
+// permissionsMapping reads a `permissions:` mapping node into a
+// scope->access map. ok is false when n is nil (the key is absent
+// entirely) or n is not a mapping node.
+func permissionsMapping(n *yaml.Node) (got map[string]string, ok bool) {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil, false
+	}
+	got = map[string]string{}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		got[n.Content[i].Value] = n.Content[i+1].Value
+	}
+	return got, true
+}
+
+// permissionsMatch reports whether got is exactly want — same scopes, same
+// access levels, nothing more and nothing missing. Shared by the top-level
+// and job-level checks below: GitHub Actions job-level permissions REPLACE
+// rather than merge with the workflow-level grant, so both locations must
+// independently equal the same minimal mapping for the gate to stay
+// read-only end to end.
+func permissionsMatch(got, want map[string]string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for scope, w := range want {
+		if got[scope] != w {
+			return false
+		}
+	}
+	return true
+}
+
 func TestPRGateContract_TopLevelPermissionsAreReadOnly(t *testing.T) {
 	top := loadPRGateWorkflow(t)
-	perms := yamlMapValue(top, "permissions")
-	if perms == nil || perms.Kind != yaml.MappingNode {
+
+	got, ok := permissionsMapping(yamlMapValue(top, "permissions"))
+	if !ok {
 		t.Fatalf("securitytest: %s has no top-level `permissions:` mapping — without an explicit grant the job inherits the repository default, which may be write, handing PR-authored test code repository authority", prGateWorkflowRelPath)
 	}
-	got := map[string]string{}
-	for i := 0; i+1 < len(perms.Content); i += 2 {
-		got[perms.Content[i].Value] = perms.Content[i+1].Value
+	if !permissionsMatch(got, prGateExpectedPermissions) {
+		t.Errorf("securitytest: %s top-level permissions are %v, want exactly %v — every scope beyond `contents: read` is authority granted to code an outside contributor wrote", prGateWorkflowRelPath, got, prGateExpectedPermissions)
 	}
-	if len(got) != len(prGateExpectedPermissions) {
-		t.Fatalf("securitytest: %s top-level permissions are %v, want exactly %v — every scope beyond `contents: read` is authority granted to code an outside contributor wrote", prGateWorkflowRelPath, got, prGateExpectedPermissions)
+
+	// GitHub Actions job-level `permissions:` REPLACES (not merges with)
+	// the workflow-level grant for that job — so the top-level check above,
+	// on its own, cannot catch a `jobs.<id>.permissions:` block added to the
+	// gate job that grants (e.g.) `contents: write`. Every existing test in
+	// this file would still pass in that scenario, so this job-level check
+	// is not redundant with the one above.
+	_, job := prGateSingleJob(t, top)
+	jobPermsNode := yamlMapValue(job, "permissions")
+	if jobPermsNode == nil {
+		return // no job-level override: the read-only top-level grant applies
 	}
-	for scope, want := range prGateExpectedPermissions {
-		if got[scope] != want {
-			t.Errorf("securitytest: %s permission `%s` is %q, want %q — the gate only reads source; anything broader lets PR-authored test code act on this repository", prGateWorkflowRelPath, scope, got[scope], want)
-		}
+	gotJob, ok := permissionsMapping(jobPermsNode)
+	if !ok {
+		t.Fatalf("securitytest: %s job-level `permissions:` is not a mapping, got kind=%v", prGateWorkflowRelPath, jobPermsNode.Kind)
+	}
+	if !permissionsMatch(gotJob, prGateExpectedPermissions) {
+		t.Errorf("securitytest: %s job-level permissions are %v, want exactly %v (or no job-level `permissions:` at all) — a job-level grant REPLACES the workflow-level one for that job, so this can hand PR-authored test code broader repository authority even though the top-level block stays read-only", prGateWorkflowRelPath, gotJob, prGateExpectedPermissions)
 	}
 }
 
@@ -399,30 +451,79 @@ func TestPRGateContract_JobIsUnconditionalAndFailsClosed(t *testing.T) {
 	}
 }
 
+// prGateSafeScriptPrefixLines are non-command lines a `run:` step's script
+// may carry ahead of (or around) its single contractual command without
+// defeating the exact-match reduction in prGateScriptCommand — a shebang or
+// a shell strict-mode header, not a command in its own right.
+var prGateSafeScriptPrefixLines = map[string]bool{
+	"#!/usr/bin/env bash": true,
+	"#!/bin/bash":         true,
+	"#!/bin/sh":           true,
+	"set -e":              true,
+	"set -eu":             true,
+	"set -eo pipefail":    true,
+	"set -euo pipefail":   true,
+}
+
+// prGateScriptCommand reduces a `run:` step's script to the single command
+// it actually executes — after stripping blank lines, comment-only lines,
+// and known-safe shebang/strict-mode headers — or reports ok=false when the
+// script does not reduce to exactly one remaining line.
+//
+// This is a deliberate EXACT match against a contractual command, not
+// substring search: a `run: echo 'go build ./...'` step must not satisfy
+// the contract for `go build ./...` merely because that text appears
+// somewhere in the script — it runs `echo`, never the Go toolchain.
+func prGateScriptCommand(script string) (cmd string, ok bool) {
+	var remaining []string
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || prGateSafeScriptPrefixLines[trimmed] {
+			continue
+		}
+		remaining = append(remaining, trimmed)
+	}
+	if len(remaining) != 1 {
+		return "", false
+	}
+	return remaining[0], true
+}
+
 func TestPRGateContract_FiveCommandsRunExactlyOnceInOrder(t *testing.T) {
 	top := loadPRGateWorkflow(t)
 	_, job := prGateSingleJob(t, top)
 	runs, names := prGateStepRuns(t, job)
 
-	// For each contractual command: count its occurrences across every `run:`
-	// script, and record the index of the step that carries it. The five
-	// commands are mutually non-overlapping strings, so substring counting is
-	// unambiguous while still tolerating a step that wraps a command (e.g. a
-	// `set -euo pipefail` prefix).
+	// Reduce every run: step to the single command it actually executes.
+	// stepCmdOK[si] is false when the step's script does not reduce
+	// cleanly to one line — see prGateScriptCommand.
+	stepCmd := make([]string, len(runs))
+	stepCmdOK := make([]bool, len(runs))
+	for si, script := range runs {
+		stepCmd[si], stepCmdOK[si] = prGateScriptCommand(script)
+	}
+
+	// For each contractual command: find the steps whose ENTIRE reduced
+	// script exactly equals it, and record the index of the first. Exact
+	// equality (not substring containment) is deliberate: a step's script
+	// containing the command text inside a string literal — e.g.
+	// `run: echo 'go build ./...'` — must not count as running it.
 	positions := make([]int, len(prGateRequiredCommands))
 	for ci, cmd := range prGateRequiredCommands {
 		total := 0
 		positions[ci] = -1
-		for si, script := range runs {
-			n := strings.Count(script, cmd)
-			if n > 0 && positions[ci] == -1 {
+		for si := range runs {
+			if !stepCmdOK[si] || stepCmd[si] != cmd {
+				continue
+			}
+			if positions[ci] == -1 {
 				positions[ci] = si
 			}
-			total += n
+			total++
 		}
 		switch {
 		case total == 0:
-			t.Errorf("securitytest: %s never runs %q — that entire class of verification no longer gates merges. (%q in particular is not compiled by plain `go test ./...`, so dropping it means the redaction/SDK release gate stops running anywhere in CI.)", prGateWorkflowRelPath, cmd, prGateRequiredCommands[3])
+			t.Errorf("securitytest: %s never runs %q as a step's entire script — that entire class of verification no longer gates merges. (%q in particular is not compiled by plain `go test ./...`, so dropping it means the redaction/SDK release gate stops running anywhere in CI.)", prGateWorkflowRelPath, cmd, prGateRequiredCommands[3])
 		case total > 1:
 			t.Errorf("securitytest: %s runs %q %d times (steps %v) — the contract is exactly once, so a duplicate hides which invocation actually gates the merge and masks a removed sibling command", prGateWorkflowRelPath, cmd, total, names)
 		}
@@ -434,6 +535,29 @@ func TestPRGateContract_FiveCommandsRunExactlyOnceInOrder(t *testing.T) {
 		}
 		if positions[ci] <= positions[ci-1] {
 			t.Errorf("securitytest: %s runs %q (step %d) at or before %q (step %d), but the contractual order is %v — order matters because the cheap compile/vet steps must fail fast before the expensive ones, and a reordering is usually the visible symptom of a rewritten gate", prGateWorkflowRelPath, prGateRequiredCommands[ci], positions[ci], prGateRequiredCommands[ci-1], positions[ci-1], prGateRequiredCommands)
+		}
+	}
+
+	// Every run: step in this job must reduce to exactly one of the five
+	// contractual commands. A step whose script contains a command's text
+	// without actually consisting of just that command (the exact bypass
+	// above), or that runs something outside the five-command contract
+	// entirely, must fail here even if the counts and ordering above look
+	// satisfied.
+	for si, script := range runs {
+		if !stepCmdOK[si] {
+			t.Errorf("securitytest: %s step %q (index %d) script does not reduce to a single command line: %q — every run: step in this job must consist of exactly one contractual command, optionally preceded by a shebang/strict-mode header line", prGateWorkflowRelPath, names[si], si, script)
+			continue
+		}
+		found := false
+		for _, cmd := range prGateRequiredCommands {
+			if stepCmd[si] == cmd {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("securitytest: %s step %q (index %d) runs %q, which is not one of the five contractual commands %v", prGateWorkflowRelPath, names[si], si, stepCmd[si], prGateRequiredCommands)
 		}
 	}
 }
@@ -471,12 +595,70 @@ func TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA(t *testing.T) {
 	}
 }
 
+// pinVersionComment parses a pin's trailing `# <identity>@vX.Y.Z` comment
+// into the identity and version it names. ok is false when the comment does
+// not match that shape at all (e.g. missing, or arbitrary text). Extracted
+// as its own function — rather than inlined into the loop below — so
+// TestPinVersionComment can exercise the parsing directly, including the
+// case a plain version-only regex would have missed: a comment naming a
+// DIFFERENT identity than the one it is attached to.
+func pinVersionComment(lineComment string) (identity string, version [3]int, ok bool) {
+	m := prGateVersionCommentRE.FindStringSubmatch(lineComment)
+	if m == nil {
+		return "", [3]int{}, false
+	}
+	major, _ := strconv.Atoi(m[2])
+	minor, _ := strconv.Atoi(m[3])
+	patch, _ := strconv.Atoi(m[4])
+	return m[1], [3]int{major, minor, patch}, true
+}
+
+// checkActionNode24Floor validates one pinned action's identity + trailing
+// version comment against prGateNode24FloorByAction. tracked reports
+// whether identity is one of the two actions this invariant tracks at all —
+// an untracked identity is not this function's concern (a wrong or
+// unexpected identity is TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA's
+// job) and yields tracked=false with no problems.
+//
+// Pulled out of TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor as a
+// pure function — no *testing.T, no file I/O — so
+// TestCheckActionNode24Floor can exercise every branch (missing comment,
+// mismatched identity, below-floor version, at-floor version) directly with
+// literal inputs, including the exact bypass pass-2 review flagged: a
+// version comment that parses cleanly but names a DIFFERENT action than the
+// one actually pinned.
+func checkActionNode24Floor(identity, lineComment string) (tracked bool, problems []string) {
+	floor, tracked := prGateNode24FloorByAction[identity]
+	if !tracked {
+		return false, nil
+	}
+
+	commentIdentity, got, ok := pinVersionComment(lineComment)
+	if !ok {
+		return true, []string{fmt.Sprintf("has no trailing `# %s@vX.Y.Z` comment — that comment is the only place the human-readable version lives once the ref itself is a bare commit SHA, so without it there is no way to confirm the pin is not a floating-to-node20 release", identity)}
+	}
+	// The comment's own identity (the text before `@vX.Y.Z`) must match the
+	// step's real `uses:` identity. Without this check a stale or
+	// copy-pasted comment sitting next to a regressed node20-era SHA would
+	// still parse a passing version out of the comment text alone and clear
+	// the floor check below despite pinning the wrong action's version —
+	// the exact bypass this function exists to close.
+	if commentIdentity != identity {
+		return true, []string{fmt.Sprintf("carries a version comment naming %q instead of its own identity — a comment that doesn't match its own `uses:` identity proves nothing about which action's version was actually pinned, so a regression to a node20 SHA with a stale/mismatched comment would pass this check undetected", commentIdentity)}
+	}
+	if versionLess(got, floor) {
+		return true, []string{fmt.Sprintf("pinned to v%d.%d.%d, below the node24 floor v%d.%d.%d — a pin below this floor is still declared `using: node20` in its action.yml and only runs today because GitHub's runners re-execute node20 actions on Node 24 as a compatibility shim; that shim is withdrawn with Node 20's removal from runner images on 2026-09-23, at which point this step stops running at all", got[0], got[1], got[2], floor[0], floor[1], floor[2])}
+	}
+	return true, nil
+}
+
 // TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor guards against
 // re-pinning either action back onto a `node20`-declared release. The SHA
 // itself carries no version information (that is the point of pinning to a
 // commit rather than a tag), so the check reads the trailing human-readable
 // comment every pin in this file already carries and compares it against
-// prGateNode24FloorByAction's literal floor per action identity.
+// prGateNode24FloorByAction's literal floor per action identity — see
+// checkActionNode24Floor for the actual logic.
 func TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor(t *testing.T) {
 	top := loadPRGateWorkflow(t)
 	_, job := prGateSingleJob(t, top)
@@ -498,24 +680,14 @@ func TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor(t *testing.T) {
 			continue // already reported by TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA
 		}
 		identity := ref[:at]
-		floor, tracked := prGateNode24FloorByAction[identity]
+
+		tracked, problems := checkActionNode24Floor(identity, uses.LineComment)
 		if !tracked {
 			continue // not one of the two actions this invariant tracks
 		}
-
-		m := prGateVersionCommentRE.FindStringSubmatch(uses.LineComment)
-		if m == nil {
-			t.Errorf("securitytest: %s pin for %s (line %d) has no trailing `# %s@vX.Y.Z` comment — that comment is the only place the human-readable version lives once the ref itself is a bare commit SHA, so without it there is no way to confirm the pin is not a floating-to-node20 release", prGateWorkflowRelPath, identity, uses.Line, identity)
-			continue
-		}
-		major, _ := strconv.Atoi(m[1])
-		minor, _ := strconv.Atoi(m[2])
-		patch, _ := strconv.Atoi(m[3])
-		got := [3]int{major, minor, patch}
-
 		checked[identity] = true
-		if versionLess(got, floor) {
-			t.Errorf("securitytest: %s pins %s to v%d.%d.%d (line %d), below the node24 floor v%d.%d.%d — a pin below this floor is still declared `using: node20` in its action.yml and only runs today because GitHub's runners re-execute node20 actions on Node 24 as a compatibility shim; that shim is withdrawn with Node 20's removal from runner images on 2026-09-23, at which point this step stops running at all", prGateWorkflowRelPath, identity, major, minor, patch, uses.Line, floor[0], floor[1], floor[2])
+		for _, problem := range problems {
+			t.Errorf("securitytest: %s pin for %s (line %d) %s", prGateWorkflowRelPath, identity, uses.Line, problem)
 		}
 	}
 
@@ -535,4 +707,281 @@ func versionLess(a, b [3]int) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Direct unit tests for the pure helpers behind the pass-2 review findings.
+// These deliberately bypass loadPRGateWorkflow (there is only one real
+// pr-gate.yml to read, and it does not currently exhibit any of the
+// bypasses below) and instead feed literal, adversarial inputs straight to
+// the extracted logic, proving each closed gap would actually be caught.
+// ---------------------------------------------------------------------------
+
+func TestPinVersionComment(t *testing.T) {
+	cases := []struct {
+		name         string
+		lineComment  string
+		wantIdentity string
+		wantVersion  [3]int
+		wantOK       bool
+	}{
+		{
+			name:         "well-formed checkout comment",
+			lineComment:  "# actions/checkout@v7.0.1",
+			wantIdentity: "actions/checkout",
+			wantVersion:  [3]int{7, 0, 1},
+			wantOK:       true,
+		},
+		{
+			name:         "well-formed setup-go comment",
+			lineComment:  "# actions/setup-go@v7.0.0",
+			wantIdentity: "actions/setup-go",
+			wantVersion:  [3]int{7, 0, 0},
+			wantOK:       true,
+		},
+		{
+			name:        "empty comment",
+			lineComment: "",
+			wantOK:      false,
+		},
+		{
+			name:        "comment with no version at all",
+			lineComment: "# pinned for stability",
+			wantOK:      false,
+		},
+		{
+			name:        "comment missing the leading hash",
+			lineComment: "actions/checkout@v7.0.1",
+			wantOK:      false,
+		},
+		{
+			// The parser reports whatever identity the comment names, even
+			// when that identity differs from the pin it is attached to —
+			// cross-checking against the real `uses:` identity is the
+			// caller's job (checkActionNode24Floor), not this parser's.
+			name:         "comment naming a different action than its own uses: line",
+			lineComment:  "# actions/setup-go@v7.0.1",
+			wantIdentity: "actions/setup-go",
+			wantVersion:  [3]int{7, 0, 1},
+			wantOK:       true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			identity, version, ok := pinVersionComment(tc.lineComment)
+			if ok != tc.wantOK {
+				t.Fatalf("pinVersionComment(%q): ok = %v, want %v", tc.lineComment, ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if identity != tc.wantIdentity || version != tc.wantVersion {
+				t.Errorf("pinVersionComment(%q) = (%q, %v), want (%q, %v)", tc.lineComment, identity, version, tc.wantIdentity, tc.wantVersion)
+			}
+		})
+	}
+}
+
+// TestCheckActionNode24Floor_MismatchedIdentityCommentIsRejected is the
+// regression test for the pass-2 finding: a version comment that parses
+// cleanly, and even names a real tracked action, but does not match the
+// identity it is actually attached to (e.g. copy-pasted from the sibling
+// step, or left stale after a `uses:` edit) must be rejected rather than
+// silently validated against the WRONG action's floor. Before this fix,
+// the version-only regex would extract v7.0.1 from this exact comment and
+// compare it against actions/checkout's floor, passing incorrectly.
+func TestCheckActionNode24Floor_MismatchedIdentityCommentIsRejected(t *testing.T) {
+	tracked, problems := checkActionNode24Floor("actions/checkout", "# actions/setup-go@v7.0.1")
+	if !tracked {
+		t.Fatalf("checkActionNode24Floor(%q, ...): tracked = false, want true", "actions/checkout")
+	}
+	if len(problems) != 1 {
+		t.Fatalf("checkActionNode24Floor: got %d problem(s), want exactly 1: %v", len(problems), problems)
+	}
+	if !strings.Contains(problems[0], "actions/setup-go") {
+		t.Errorf("checkActionNode24Floor: problem %q does not name the mismatched comment identity", problems[0])
+	}
+}
+
+// TestCheckActionNode24Floor_BelowFloorSHAWithStaleHighVersionCommentIsCaught
+// covers the same bypass from the opposite direction named in the finding's
+// own suggested repro: a SHA regressed to a real node20-era release, paired
+// with a comment that still names the CORRECT identity but an
+// out-of-date/incorrect version number below the floor, must still fail.
+func TestCheckActionNode24Floor_BelowFloorVersionIsCaught(t *testing.T) {
+	tracked, problems := checkActionNode24Floor("actions/checkout", "# actions/checkout@v4.2.2")
+	if !tracked {
+		t.Fatalf("checkActionNode24Floor: tracked = false, want true")
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "below the node24 floor") {
+		t.Fatalf("checkActionNode24Floor: got problems %v, want exactly one below-floor problem", problems)
+	}
+}
+
+// TestCheckActionNode24Floor_AtOrAboveFloorAndUntracked covers the two
+// non-error paths: a version at/above the floor with a correctly matching
+// identity comment produces no problems, and an identity this invariant
+// does not track (e.g. a third action never added to
+// prGateNode24FloorByAction) is reported untracked rather than validated.
+func TestCheckActionNode24Floor_AtOrAboveFloorAndUntracked(t *testing.T) {
+	if tracked, problems := checkActionNode24Floor("actions/checkout", "# actions/checkout@v7.0.1"); !tracked || len(problems) != 0 {
+		t.Errorf("checkActionNode24Floor(at floor): tracked=%v problems=%v, want tracked=true problems=[]", tracked, problems)
+	}
+	if tracked, problems := checkActionNode24Floor("actions/checkout", "# actions/checkout@v5.0.0"); !tracked || len(problems) != 0 {
+		t.Errorf("checkActionNode24Floor(exactly at floor): tracked=%v problems=%v, want tracked=true problems=[]", tracked, problems)
+	}
+	if tracked, problems := checkActionNode24Floor("actions/some-other-action", "# actions/some-other-action@v1.0.0"); tracked || len(problems) != 0 {
+		t.Errorf("checkActionNode24Floor(untracked identity): tracked=%v problems=%v, want tracked=false problems=nil", tracked, problems)
+	}
+}
+
+func TestPermissionsMapping(t *testing.T) {
+	var readOnly yaml.Node
+	if err := yaml.Unmarshal([]byte("contents: read\n"), &readOnly); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	got, ok := permissionsMapping(readOnly.Content[0])
+	if !ok {
+		t.Fatalf("permissionsMapping: ok = false, want true")
+	}
+	if len(got) != 1 || got["contents"] != "read" {
+		t.Errorf("permissionsMapping = %v, want {contents: read}", got)
+	}
+
+	if _, ok := permissionsMapping(nil); ok {
+		t.Errorf("permissionsMapping(nil): ok = true, want false (absent key)")
+	}
+
+	var scalar yaml.Node
+	if err := yaml.Unmarshal([]byte("write-all\n"), &scalar); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	if _, ok := permissionsMapping(scalar.Content[0]); ok {
+		t.Errorf("permissionsMapping(scalar): ok = true, want false (not a mapping)")
+	}
+}
+
+// TestPermissionsMatch_JobLevelEscalationIsRejected is the regression test
+// for the pass-2 finding: job-level `permissions:` REPLACES rather than
+// merges with the top-level grant, so a job-level block granting broader
+// access than the read-only contract must fail permissionsMatch even
+// though the top-level block, checked in isolation, is still exactly
+// {contents: read}.
+func TestPermissionsMatch_JobLevelEscalationIsRejected(t *testing.T) {
+	want := map[string]string{"contents": "read"}
+
+	cases := []struct {
+		name string
+		got  map[string]string
+		ok   bool
+	}{
+		{"exact match", map[string]string{"contents": "read"}, true},
+		{"escalated to write", map[string]string{"contents": "write"}, false},
+		{"extra scope added", map[string]string{"contents": "read", "issues": "write"}, false},
+		{"empty mapping", map[string]string{}, false},
+	}
+	for _, tc := range cases {
+		if got := permissionsMatch(tc.got, want); got != tc.ok {
+			t.Errorf("permissionsMatch(%v, %v) = %v, want %v", tc.got, want, got, tc.ok)
+		}
+	}
+}
+
+func TestPRGateScriptCommand(t *testing.T) {
+	cases := []struct {
+		name    string
+		script  string
+		wantCmd string
+		wantOK  bool
+	}{
+		{
+			name:    "bare contractual command",
+			script:  "go build ./...",
+			wantCmd: "go build ./...",
+			wantOK:  true,
+		},
+		{
+			name:    "command with a safe strict-mode prefix line",
+			script:  "set -euo pipefail\ngo test -race ./...",
+			wantCmd: "go test -race ./...",
+			wantOK:  true,
+		},
+		{
+			// The exact bypass the finding describes: the command text
+			// appears, but only inside a string literal argument to echo —
+			// the script actually executes `echo`, never the Go toolchain.
+			name:    "command text embedded in an echo string literal",
+			script:  "echo 'go build ./...'",
+			wantCmd: "echo 'go build ./...'",
+			wantOK:  true,
+		},
+		{
+			name:   "two real commands on separate lines",
+			script: "go build ./...\ngo vet ./...",
+			wantOK: false,
+		},
+		{
+			name:   "blank script",
+			script: "",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, ok := prGateScriptCommand(tc.script)
+			if ok != tc.wantOK {
+				t.Fatalf("prGateScriptCommand(%q): ok = %v, want %v (cmd=%q)", tc.script, ok, tc.wantOK, cmd)
+			}
+			if ok && cmd != tc.wantCmd {
+				t.Errorf("prGateScriptCommand(%q) = %q, want %q", tc.script, cmd, tc.wantCmd)
+			}
+		})
+	}
+}
+
+// TestPRGateContract_FiveCommandsRunExactlyOnceInOrder_RejectsEchoedCommandText
+// is the end-to-end regression test for the finding: a workflow whose gate
+// job runs `echo 'go build ./...'` instead of the real command must fail
+// the contract test, not pass it merely because the command text appears
+// somewhere in a `run:` script. This builds a synthetic single-job workflow
+// document in memory — it never touches the real pr-gate.yml — and drives
+// the exact same helpers (prGateSingleJob, prGateStepRuns, prGateScriptCommand)
+// the production test uses.
+func TestPRGateContract_FiveCommandsRunExactlyOnceInOrder_RejectsEchoedCommandText(t *testing.T) {
+	const doc = `
+jobs:
+  required-pr-gate:
+    steps:
+      - name: Build
+        run: echo 'go build ./...'
+      - name: Vet
+        run: go vet ./...
+      - name: Race tests
+        run: go test -race ./...
+      - name: Phase 5 security tests
+        run: go test -tags phase5release ./internal/securitytest -count=1
+      - name: ClickHouse shell library tests
+        run: bash integration/clickhouse/tests/lib-tests.sh
+`
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(doc), &root); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	top := root.Content[0]
+
+	_, job := prGateSingleJob(t, top)
+	runs, _ := prGateStepRuns(t, job)
+
+	total := 0
+	for _, script := range runs {
+		got, ok := prGateScriptCommand(script)
+		if ok && got == "go build ./..." {
+			total++
+		}
+	}
+	if total != 0 {
+		t.Errorf("exact-match reduction counted %q %d time(s) from a step that only echoes it inside a string literal — the pre-fix substring-based check would have counted this as 1 and passed", "go build ./...", total)
+	}
 }
