@@ -194,11 +194,91 @@ func account(username, issuer, subject, token string, roles []string) fakeAccoun
 
 // ---- server/client test scaffolding --------------------------------------
 
+// failSafeShutdownTimeout bounds every individual step of startServing's
+// teardown below, so cleanup itself can never hang the test binary. It is
+// deliberately longer than the ~5s bounds individual tests assert on their
+// own explicit shutdown sequences: when one of those bounds is the property
+// actually being violated, the test's own targeted failure message should
+// be what fails, not this cleanup's silent timeout.
+const failSafeShutdownTimeout = 15 * time.Second
+
+// startServing launches srv.Serve(ln) on its own goroutine and returns both
+// the channel carrying Serve's result and an idempotent stop closure that
+// is ALREADY registered with t.Cleanup by the time this function returns.
+//
+// Registering that teardown up front — rather than trusting each test body
+// to reach its own shutdown sequence — is load-bearing rather than
+// tidiness. A t.Fatalf skips everything after it, so a test that starts a
+// server and then fails an assertion leaves that server live for the
+// remainder of the run; the vendored ldapserver's per-client close() path
+// reads the package-level ldapserver.Logger global, and the NEXT test's
+// New() writes it (server.go's hardening re-asserts DiscardingLogger on
+// every construction), so a leaked server turns into a genuine data race
+// reported against whichever unrelated test happened to run next. Server's
+// own type doc states the precondition a leak like that violates ("at most
+// one Server per process at a time" — production calls New() once per
+// process), which is why the fix belongs in the tests' lifecycle and not in
+// production code.
+//
+// The step ordering inside stop is itself load-bearing: close OUR OWN
+// listener reference first to unblock Serve's Accept, then receive from
+// serveErr as a synchronization point, and only then call srv.Stop() — see
+// cmd/ch-oauth-ldap/main.go's run() for the full explanation. The vendored
+// vjeantet/ldapserver dependency stores the listener in a plain,
+// unsynchronized struct field, written by the background Serve goroutine
+// and read by Stop with no lock between them, so calling Stop()
+// concurrently with a still-running Serve is a data race of its own.
+//
+// serveErr is closed after its single send, which makes EVERY receive from
+// it safe: the first yields Serve's own return value, and any later one —
+// a test body's explicit shutdown assertion and this cleanup both receive
+// from it — returns immediately instead of blocking on an already-drained
+// buffered channel. The sync.Once likewise makes a second stop() call a
+// harmless no-op, so tests whose whole point is to assert on this shutdown
+// sequence can call stop() themselves and keep their own bounds and
+// failure messages.
+func startServing(t *testing.T, srv *Server, ln net.Listener, cancel context.CancelFunc) (serveErr chan error, stop func()) {
+	t.Helper()
+
+	serveErr = make(chan error, 1)
+	go func() {
+		serveErr <- srv.Serve(ln)
+		close(serveErr)
+	}()
+
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			_ = ln.Close()
+			select {
+			case <-serveErr:
+			case <-time.After(failSafeShutdownTimeout):
+			}
+			stopped := make(chan struct{})
+			go func() {
+				srv.Stop()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-time.After(failSafeShutdownTimeout):
+			}
+			if cancel != nil {
+				cancel()
+			}
+		})
+	}
+	t.Cleanup(stop)
+
+	return serveErr, stop
+}
+
 // startTestServer wires the real internal/ldap.Server to a real TCP
 // listener and returns its address plus a stop func safe to call more than
-// once (also registered as t.Cleanup). rootCancel lets a test explicitly
-// drive root-context cancellation (for the shutdown-cancellation proof)
-// without racing the automatic cleanup's own Stop/cancel.
+// once (also registered as t.Cleanup by startServing). rootCancel lets a
+// test explicitly drive root-context cancellation (for the
+// shutdown-cancellation proof) without racing the automatic cleanup's own
+// Stop/cancel.
 func startTestServer(t *testing.T, v verifier, r roleResolver) (addr string, rootCancel context.CancelFunc, stop func()) {
 	t.Helper()
 
@@ -213,29 +293,7 @@ func startTestServer(t *testing.T, v verifier, r roleResolver) (addr string, roo
 		t.Fatalf("net.Listen: %v", err)
 	}
 
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
-
-	var once sync.Once
-	stop = func() {
-		once.Do(func() {
-			// Close OUR OWN listener reference directly instead of calling
-			// srv.Stop() first — see cmd/ch-oauth-ldap/main.go's run() for
-			// the full explanation. The vendored vjeantet/ldapserver
-			// dependency stores the listener in a plain, unsynchronized
-			// struct field, written by the background Serve goroutine and
-			// read by Stop with no lock between them; calling Stop()
-			// concurrently with that goroutine is a genuine data race.
-			// Closing ln here unblocks Serve's Accept() call, and
-			// receiving from serveErr below is a channel synchronization
-			// point that makes the subsequent srv.Stop() call race-free.
-			_ = ln.Close()
-			<-serveErr
-			srv.Stop()
-			cancel()
-		})
-	}
-	t.Cleanup(stop)
+	_, stop = startServing(t, srv, ln, cancel)
 
 	return ln.Addr().String(), cancel, stop
 }

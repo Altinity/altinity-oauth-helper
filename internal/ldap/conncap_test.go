@@ -114,8 +114,7 @@ func TestAdversarial_DefaultConnectionCapRejects257thAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
+	serveErr, stop := startServing(t, srv, ln, cancel)
 	addr := ln.Addr().String()
 
 	const capacity = 256
@@ -269,8 +268,12 @@ func TestAdversarial_DefaultConnectionCapRejects257thAndRecovers(t *testing.T) {
 		t.Fatalf("Serve never returned after closing the listener")
 	}
 
+	// stop() (see startServing) performs the remaining srv.Stop() step and
+	// is idempotent, so the fail-safe cleanup registered when the server
+	// started — which is what keeps an aborted assertion above from leaking
+	// a live server into the next test — is a no-op afterwards.
 	stopDone := make(chan struct{})
-	go func() { srv.Stop(); close(stopDone) }()
+	go func() { stop(); close(stopDone) }()
 	select {
 	case <-stopDone:
 	case <-time.After(5 * time.Second):
