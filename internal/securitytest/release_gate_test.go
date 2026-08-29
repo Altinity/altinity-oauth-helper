@@ -34,10 +34,11 @@ import (
 // rows and updating auditedSDKVersion), not an expected/known condition.
 
 // TestReleaseGate_NoBlockedExternalRowsRemain fails while any manifest row
-// is classified blocked_external — currently exactly the SDK kid-rotation
-// row. The failure message intentionally names only that row (or whatever
-// set of rows is actually blocked at the time this runs); it does not fail
-// for any other reason.
+// is classified blocked_external. No row is blocked_external as of this
+// writing (see the top-of-file comment) — a future failure here means the
+// manifest has regressed, and the failure message names exactly whichever
+// row(s) are actually blocked, and their gate(s), at the time this runs; it
+// does not fail for any other reason.
 func TestReleaseGate_NoBlockedExternalRowsRemain(t *testing.T) {
 	var blocked []string
 	for _, r := range loadRealManifest(t) {
@@ -51,7 +52,8 @@ func TestReleaseGate_NoBlockedExternalRowsRemain(t *testing.T) {
 	}
 	sort.Strings(blocked)
 	t.Fatalf("release gate: %d blocked_external redaction row(s) remain — phase 5 cannot be certified complete "+
-		"until each is resolved (bump+re-audit the SDK, or record kid as allowed non-credential metadata):\n%s",
+		"until each is resolved per its named gate below: bump+re-audit that row's owning dependency, "+
+		"or record its flagged field as allowed non-credential metadata:\n%s",
 		len(blocked), strings.Join(blocked, "\n"))
 }
 
