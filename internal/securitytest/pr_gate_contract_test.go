@@ -700,12 +700,12 @@ func checkVersionCommentNode24Floor(identity, lineComment string) (tracked bool,
 // prGateNode24FloorByAction's literal floor for that action. See
 // checkVersionCommentNode24Floor for the logic.
 //
-// SCOPE LIMIT, stated plainly because the test's name promises more than it
-// can deliver: this verifies the COMMENT, not the pin. A commit SHA cannot be
-// resolved to a version — let alone to the runtime its action.yml declares —
-// without network access, which a unit test must not have. So a pin whose SHA
-// was regressed to a node20 release but whose comment was updated to a
-// plausible above-floor version for the same action still passes here.
+// SCOPE LIMIT, stated plainly: this verifies the COMMENT, not the pin. A
+// commit SHA cannot be resolved to a version — let alone to the runtime its
+// action.yml declares — without network access, which a unit test must not
+// have. So a pin whose SHA was regressed to a node20 release but whose
+// comment was updated to a plausible above-floor version for the same action
+// still passes here.
 //
 // That residual gap is accepted deliberately rather than closed, and the
 // alternatives were considered: hardcoding an approved identity -> SHA ->
