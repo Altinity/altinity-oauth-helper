@@ -385,6 +385,21 @@ func newSingleConnListener(c net.Conn) *singleConnListener {
 var errSingleConnListenerClosed = errors.New("singleConnListener: closed")
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
+	// Check closure FIRST, in its own non-blocking select. A single select
+	// over both channels would let a closed listener still hand out the
+	// queued connection: when several cases are ready, Go picks one
+	// uniformly at random, so Close() followed by Accept() would return the
+	// connection roughly half the time and violate net.Listener's contract
+	// that Accept must fail once Close has been called. Nothing in this
+	// package reaches that ordering today (Serve accepts once, at startup,
+	// long before any Close), but a listener whose contract holds only
+	// because of how its one caller happens to be sequenced is a trap for
+	// the next one.
+	select {
+	case <-l.closed:
+		return nil, errSingleConnListenerClosed
+	default:
+	}
 	select {
 	case c := <-l.handout:
 		return c, nil

@@ -250,9 +250,19 @@ func startServing(t *testing.T, srv *Server, ln net.Listener, cancel context.Can
 	stop = func() {
 		once.Do(func() {
 			_ = ln.Close()
+			// Both timeout branches below report rather than proceeding
+			// silently. Closing our own listener is supposed to unblock
+			// Accept promptly, so a timeout here means Serve is genuinely
+			// wedged — and continuing to srv.Stop() anyway would skip the
+			// serveErr synchronization point this helper's doc comment
+			// calls load-bearing, i.e. commit the very Stop-racing-Serve
+			// data race the ordering exists to prevent. A silent fail-open
+			// in shared teardown would let that surface later as an
+			// unexplained race in some unrelated test.
 			select {
 			case <-serveErr:
 			case <-time.After(failSafeShutdownTimeout):
+				t.Errorf("startServing: Serve did not return within %s of closing the listener — proceeding to Stop() without the serveErr synchronization point, which is itself a data race against the still-running Serve goroutine", failSafeShutdownTimeout)
 			}
 			stopped := make(chan struct{})
 			go func() {
@@ -262,6 +272,7 @@ func startServing(t *testing.T, srv *Server, ln net.Listener, cancel context.Can
 			select {
 			case <-stopped:
 			case <-time.After(failSafeShutdownTimeout):
+				t.Errorf("startServing: Stop() did not return within %s — leaving a live Stop goroutine behind, which can then touch the vendored server concurrently with a later test's New()", failSafeShutdownTimeout)
 			}
 			if cancel != nil {
 				cancel()
