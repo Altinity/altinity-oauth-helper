@@ -178,7 +178,7 @@ var prGateNode24FloorByAction = map[string][3]int{
 // the version numbers is deliberate: without cross-checking it against the
 // step's real `uses:` identity, a stale or copy-pasted comment next to a
 // regressed node20 SHA would still report a passing version and clear the
-// floor check below — see TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor.
+// floor check below — see TestPRGateContract_ActionPinVersionCommentsAreAtOrAboveTheNode24Floor.
 var prGateVersionCommentRE = regexp.MustCompile(`^#\s*(\S+)@v(\d+)\.(\d+)\.(\d+)\s*$`)
 
 // loadPRGateWorkflow reads and parses pr-gate.yml into its top-level mapping
@@ -654,21 +654,21 @@ func pinVersionComment(lineComment string) (identity string, version [3]int, ok 
 	return m[1], [3]int{major, minor, patch}, true
 }
 
-// checkActionNode24Floor validates one pinned action's identity + trailing
+// checkVersionCommentNode24Floor validates one pinned action's identity + trailing
 // version comment against prGateNode24FloorByAction. tracked reports
 // whether identity is one of the two actions this invariant tracks at all —
 // an untracked identity is not this function's concern (a wrong or
 // unexpected identity is TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA's
 // job) and yields tracked=false with no problems.
 //
-// Pulled out of TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor as a
+// Pulled out of TestPRGateContract_ActionPinVersionCommentsAreAtOrAboveTheNode24Floor as a
 // pure function — no *testing.T, no file I/O — so
-// TestCheckActionNode24Floor can exercise every branch (missing comment,
+// TestCheckVersionCommentNode24Floor can exercise every branch (missing comment,
 // mismatched identity, below-floor version, at-floor version) directly with
 // literal inputs, including the exact bypass pass-2 review flagged: a
 // version comment that parses cleanly but names a DIFFERENT action than the
 // one actually pinned.
-func checkActionNode24Floor(identity, lineComment string) (tracked bool, problems []string) {
+func checkVersionCommentNode24Floor(identity, lineComment string) (tracked bool, problems []string) {
 	floor, tracked := prGateNode24FloorByAction[identity]
 	if !tracked {
 		return false, nil
@@ -688,17 +688,17 @@ func checkActionNode24Floor(identity, lineComment string) (tracked bool, problem
 		return true, []string{fmt.Sprintf("carries a version comment naming %q instead of its own identity — a comment that doesn't match its own `uses:` identity proves nothing about which action's version was actually pinned, so a regression to a node20 SHA with a stale/mismatched comment would pass this check undetected", commentIdentity)}
 	}
 	if versionLess(got, floor) {
-		return true, []string{fmt.Sprintf("pinned to v%d.%d.%d, below the node24 floor v%d.%d.%d — a pin below this floor is still declared `using: node20` in its action.yml and only runs today because GitHub's runners re-execute node20 actions on Node 24 as a compatibility shim; that shim is withdrawn with Node 20's removal from runner images on 2026-09-23, at which point this step stops running at all", got[0], got[1], got[2], floor[0], floor[1], floor[2])}
+		return true, []string{fmt.Sprintf("version comment claims v%d.%d.%d, below the node24 floor v%d.%d.%d — a release below this floor is still declared `using: node20` in its action.yml and only runs today because GitHub's runners re-execute node20 actions on Node 24 as a compatibility shim; that shim is withdrawn with Node 20's removal from runner images on 2026-09-23, at which point this step stops running at all", got[0], got[1], got[2], floor[0], floor[1], floor[2])}
 	}
 	return true, nil
 }
 
-// TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor guards against
+// TestPRGateContract_ActionPinVersionCommentsAreAtOrAboveTheNode24Floor guards against
 // re-pinning either action back onto a `node20`-declared release, by checking
 // the trailing human-readable comment every pin carries: that it names the
 // step's OWN action identity, and a version at or above
 // prGateNode24FloorByAction's literal floor for that action. See
-// checkActionNode24Floor for the logic.
+// checkVersionCommentNode24Floor for the logic.
 //
 // SCOPE LIMIT, stated plainly because the test's name promises more than it
 // can deliver: this verifies the COMMENT, not the pin. A commit SHA cannot be
@@ -720,7 +720,7 @@ func checkActionNode24Floor(identity, lineComment string) (tracked bool, problem
 // not a runtime oracle. The Node 20 removal date in
 // prGateNode24FloorByAction's comment is the real deadline; a human reading a
 // pin is still the thing that confirms a SHA is what its comment claims.
-func TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor(t *testing.T) {
+func TestPRGateContract_ActionPinVersionCommentsAreAtOrAboveTheNode24Floor(t *testing.T) {
 	top := loadPRGateWorkflow(t)
 	_, job := prGateSingleJob(t, top)
 
@@ -742,7 +742,7 @@ func TestPRGateContract_ActionPinsAreAtOrAboveTheNode24Floor(t *testing.T) {
 		}
 		identity := ref[:at]
 
-		tracked, problems := checkActionNode24Floor(identity, uses.LineComment)
+		tracked, problems := checkVersionCommentNode24Floor(identity, uses.LineComment)
 		if !tracked {
 			continue // not one of the two actions this invariant tracks
 		}
@@ -819,7 +819,7 @@ func TestPinVersionComment(t *testing.T) {
 			// The parser reports whatever identity the comment names, even
 			// when that identity differs from the pin it is attached to —
 			// cross-checking against the real `uses:` identity is the
-			// caller's job (checkActionNode24Floor), not this parser's.
+			// caller's job (checkVersionCommentNode24Floor), not this parser's.
 			name:         "comment naming a different action than its own uses: line",
 			lineComment:  "# actions/setup-go@v7.0.1",
 			wantIdentity: "actions/setup-go",
@@ -844,7 +844,7 @@ func TestPinVersionComment(t *testing.T) {
 	}
 }
 
-// TestCheckActionNode24Floor_MismatchedIdentityCommentIsRejected is the
+// TestCheckVersionCommentNode24Floor_MismatchedIdentityCommentIsRejected is the
 // regression test for the pass-2 finding: a version comment that parses
 // cleanly, and even names a real tracked action, but does not match the
 // identity it is actually attached to (e.g. copy-pasted from the sibling
@@ -852,48 +852,48 @@ func TestPinVersionComment(t *testing.T) {
 // silently validated against the WRONG action's floor. Before this fix,
 // the version-only regex would extract v7.0.1 from this exact comment and
 // compare it against actions/checkout's floor, passing incorrectly.
-func TestCheckActionNode24Floor_MismatchedIdentityCommentIsRejected(t *testing.T) {
-	tracked, problems := checkActionNode24Floor("actions/checkout", "# actions/setup-go@v7.0.1")
+func TestCheckVersionCommentNode24Floor_MismatchedIdentityCommentIsRejected(t *testing.T) {
+	tracked, problems := checkVersionCommentNode24Floor("actions/checkout", "# actions/setup-go@v7.0.1")
 	if !tracked {
-		t.Fatalf("checkActionNode24Floor(%q, ...): tracked = false, want true", "actions/checkout")
+		t.Fatalf("checkVersionCommentNode24Floor(%q, ...): tracked = false, want true", "actions/checkout")
 	}
 	if len(problems) != 1 {
-		t.Fatalf("checkActionNode24Floor: got %d problem(s), want exactly 1: %v", len(problems), problems)
+		t.Fatalf("checkVersionCommentNode24Floor: got %d problem(s), want exactly 1: %v", len(problems), problems)
 	}
 	if !strings.Contains(problems[0], "actions/setup-go") {
-		t.Errorf("checkActionNode24Floor: problem %q does not name the mismatched comment identity", problems[0])
+		t.Errorf("checkVersionCommentNode24Floor: problem %q does not name the mismatched comment identity", problems[0])
 	}
 }
 
-// TestCheckActionNode24Floor_BelowFloorSHAWithStaleHighVersionCommentIsCaught
+// TestCheckVersionCommentNode24Floor_BelowFloorSHAWithStaleHighVersionCommentIsCaught
 // covers the same bypass from the opposite direction named in the finding's
 // own suggested repro: a SHA regressed to a real node20-era release, paired
 // with a comment that still names the CORRECT identity but an
 // out-of-date/incorrect version number below the floor, must still fail.
-func TestCheckActionNode24Floor_BelowFloorVersionIsCaught(t *testing.T) {
-	tracked, problems := checkActionNode24Floor("actions/checkout", "# actions/checkout@v4.2.2")
+func TestCheckVersionCommentNode24Floor_BelowFloorVersionIsCaught(t *testing.T) {
+	tracked, problems := checkVersionCommentNode24Floor("actions/checkout", "# actions/checkout@v4.2.2")
 	if !tracked {
-		t.Fatalf("checkActionNode24Floor: tracked = false, want true")
+		t.Fatalf("checkVersionCommentNode24Floor: tracked = false, want true")
 	}
 	if len(problems) != 1 || !strings.Contains(problems[0], "below the node24 floor") {
-		t.Fatalf("checkActionNode24Floor: got problems %v, want exactly one below-floor problem", problems)
+		t.Fatalf("checkVersionCommentNode24Floor: got problems %v, want exactly one below-floor problem", problems)
 	}
 }
 
-// TestCheckActionNode24Floor_AtOrAboveFloorAndUntracked covers the two
+// TestCheckVersionCommentNode24Floor_AtOrAboveFloorAndUntracked covers the two
 // non-error paths: a version at/above the floor with a correctly matching
 // identity comment produces no problems, and an identity this invariant
 // does not track (e.g. a third action never added to
 // prGateNode24FloorByAction) is reported untracked rather than validated.
-func TestCheckActionNode24Floor_AtOrAboveFloorAndUntracked(t *testing.T) {
-	if tracked, problems := checkActionNode24Floor("actions/checkout", "# actions/checkout@v7.0.1"); !tracked || len(problems) != 0 {
-		t.Errorf("checkActionNode24Floor(at floor): tracked=%v problems=%v, want tracked=true problems=[]", tracked, problems)
+func TestCheckVersionCommentNode24Floor_AtOrAboveFloorAndUntracked(t *testing.T) {
+	if tracked, problems := checkVersionCommentNode24Floor("actions/checkout", "# actions/checkout@v7.0.1"); !tracked || len(problems) != 0 {
+		t.Errorf("checkVersionCommentNode24Floor(at floor): tracked=%v problems=%v, want tracked=true problems=[]", tracked, problems)
 	}
-	if tracked, problems := checkActionNode24Floor("actions/checkout", "# actions/checkout@v5.0.0"); !tracked || len(problems) != 0 {
-		t.Errorf("checkActionNode24Floor(exactly at floor): tracked=%v problems=%v, want tracked=true problems=[]", tracked, problems)
+	if tracked, problems := checkVersionCommentNode24Floor("actions/checkout", "# actions/checkout@v5.0.0"); !tracked || len(problems) != 0 {
+		t.Errorf("checkVersionCommentNode24Floor(exactly at floor): tracked=%v problems=%v, want tracked=true problems=[]", tracked, problems)
 	}
-	if tracked, problems := checkActionNode24Floor("actions/some-other-action", "# actions/some-other-action@v1.0.0"); tracked || len(problems) != 0 {
-		t.Errorf("checkActionNode24Floor(untracked identity): tracked=%v problems=%v, want tracked=false problems=nil", tracked, problems)
+	if tracked, problems := checkVersionCommentNode24Floor("actions/some-other-action", "# actions/some-other-action@v1.0.0"); tracked || len(problems) != 0 {
+		t.Errorf("checkVersionCommentNode24Floor(untracked identity): tracked=%v problems=%v, want tracked=false problems=nil", tracked, problems)
 	}
 }
 
