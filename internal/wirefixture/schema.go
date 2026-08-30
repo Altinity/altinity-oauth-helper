@@ -132,6 +132,47 @@ const (
 	OperationUnbindRequest  = "unbindRequest"
 )
 
+// FixedTokenClaimRecipe is the committed, human-readable description of the
+// token claims used to mint every phase-1 captured-redacted fixture's
+// credential (plan section 19/26): a fixed HTTP principal
+// (alice@example.com), a fixed role list (idp-readers, idp-unprovisioned),
+// and the synthetic IdP's fixed claim shape (fixed-digit iat/exp, no random
+// jti — cmd/synthetic-idp/main.go's /sign endpoint). It is never the
+// credential itself, only a description of how it was minted, so it is
+// safe to pass as a plain CLI flag value rather than over stdin.
+//
+// integration/clickhouse/capture-ldap-wire.sh passes this exact string to
+// `ldap-wire-recorder sanitize --token-claim-recipe` (matching this
+// constant's value verbatim, since the two cannot share a literal across
+// the Go/shell boundary), and every committed captured-redacted session's
+// token_claim_recipe field equals it.
+const FixedTokenClaimRecipe = "sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
+
+// expectedSemanticsByOperation is the single fixed table mapping a PDU's
+// Operation to its committed, short human-readable expected_semantics text
+// (plan section 27/28's "expected operation semantics needed by Phase 2").
+// Writers (the wirecapture sanitizer) populate every captured PDU's
+// ExpectedSemantics from this table; readers (internal/securitytest's
+// wire-profile contract) verify captured-redacted sessions against the
+// same table — one place for this wording to live, not two independently
+// maintained copies. Constructed fixtures (internal/wirefixture/constructed.go)
+// author their own, more specific ExpectedSemantics text describing the
+// exact BER boundary they exist to prove, and do not draw from this table.
+var expectedSemanticsByOperation = map[string]string{
+	OperationBindRequest:    "simple Bind, version 3",
+	OperationSearchRequest:  "role Search, subtree scope",
+	OperationAbandonRequest: "Abandon targeting the Search MessageID",
+	OperationUnbindRequest:  "Unbind, no credential content",
+}
+
+// ExpectedSemanticsForOperation returns this package's fixed
+// expected_semantics text for the given PDU.Operation value (see the
+// Operation* constants), and whether the operation is recognized at all.
+func ExpectedSemanticsForOperation(operation string) (string, bool) {
+	v, ok := expectedSemanticsByOperation[operation]
+	return v, ok
+}
+
 // Profile is the committed profile.json document for one tracked
 // ClickHouse line: exact source/tool provenance, independent of any one
 // captured session (plan section 26).

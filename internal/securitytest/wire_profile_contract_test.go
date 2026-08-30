@@ -890,6 +890,13 @@ func TestWireProfileContract_FixtureInventory(t *testing.T) {
 			if session.ConnectionCount != 1 {
 				t.Errorf("wire_profile_contract: %s: connection_count %d, want exactly 1 for a captured session (plan §21)", sessionPath, session.ConnectionCount)
 			}
+			// A captured-redacted session's token claim recipe must be the
+			// one fixed, non-secret recipe every capture-ldap-wire.sh run
+			// passes to `sanitize --token-claim-recipe` (plan §27/§28) —
+			// never empty, and never a different ad hoc string.
+			if session.TokenClaimRecipe != wirefixture.FixedTokenClaimRecipe {
+				t.Errorf("wire_profile_contract: %s: token_claim_recipe %q, want %q", sessionPath, session.TokenClaimRecipe, wirefixture.FixedTokenClaimRecipe)
+			}
 		}
 
 		// Expected operation coverage per mode.
@@ -915,6 +922,31 @@ func TestWireProfileContract_FixtureInventory(t *testing.T) {
 				} else if *pdu.AbandonTarget != 2 {
 					t.Errorf("wire_profile_contract: %s: abandon_target %d, want 2 (the Search's MessageID)", sessionPath, *pdu.AbandonTarget)
 				}
+			}
+		}
+
+		// expected_semantics (plan §27/§28's "expected operation semantics
+		// needed by Phase 2") must never be "" for any committed PDU.
+		// Captured-redacted sessions must match wirefixture's fixed
+		// per-operation table exactly (the same table the sanitizer writes
+		// from); constructed fixtures author their own, more specific text
+		// describing the exact BER boundary they exist to prove, so they
+		// are only checked for non-emptiness here.
+		for _, pdu := range session.PDUs {
+			if pdu.ExpectedSemantics == "" {
+				t.Errorf("wire_profile_contract: %s: PDU %s (%s) has empty expected_semantics", sessionPath, pdu.Filename, pdu.Operation)
+				continue
+			}
+			if loc.Category == wirefixture.ConstructedDirName {
+				continue
+			}
+			want, ok := wirefixture.ExpectedSemanticsForOperation(pdu.Operation)
+			if !ok {
+				t.Errorf("wire_profile_contract: %s: PDU %s: operation %q has no registered expected-semantics table entry", sessionPath, pdu.Filename, pdu.Operation)
+				continue
+			}
+			if pdu.ExpectedSemantics != want {
+				t.Errorf("wire_profile_contract: %s: PDU %s (%s) expected_semantics %q, want %q", sessionPath, pdu.Filename, pdu.Operation, pdu.ExpectedSemantics, want)
 			}
 		}
 	}

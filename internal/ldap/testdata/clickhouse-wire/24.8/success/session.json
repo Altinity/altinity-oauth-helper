@@ -8,6 +8,7 @@
   "mode": "success",
   "connection_count": 1,
   "sql": "SELECT currentUser()",
+  "token_claim_recipe": "sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti",
   "placeholder_length": 690,
   "pdus": [
     {
@@ -18,7 +19,7 @@
       "message_id": 1,
       "sanitized_sha256": "aead2a41517b0c9e87082fdaf4ce4b50edf08aa5375baa3a44f2a5798a3d58a9",
       "redaction_status": "redacted",
-      "expected_semantics": ""
+      "expected_semantics": "simple Bind, version 3"
     },
     {
       "sequence": 2,
@@ -28,7 +29,7 @@
       "message_id": 2,
       "sanitized_sha256": "fd08bfb963d4f822a50ba129f9601dba1b22d6f62a8a038d938cbccff6afbb49",
       "redaction_status": "no-credential-present",
-      "expected_semantics": ""
+      "expected_semantics": "role Search, subtree scope"
     },
     {
       "sequence": 3,
@@ -38,7 +39,7 @@
       "message_id": 3,
       "sanitized_sha256": "8faceb94bf3ab745e9a1c939da0b0adcd80e2b6bca426cf6f8470d67a444b9e8",
       "redaction_status": "no-credential-present",
-      "expected_semantics": ""
+      "expected_semantics": "Unbind, no credential content"
     }
   ]
 }

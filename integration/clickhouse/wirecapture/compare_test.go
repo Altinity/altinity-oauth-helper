@@ -135,6 +135,57 @@ func TestCompare_PDUByteDriftDetected(t *testing.T) {
 	}
 }
 
+// TestCompare_TokenClaimRecipeAndExpectedSemanticsAreStable proves
+// Session.TokenClaimRecipe and PDU.ExpectedSemantics (plan §27/§28) are
+// actually part of the stable-comparison projection Compare uses, not
+// merely documented as such: a fresh session that differs from committed
+// only in one of these two fields must be reported as drift.
+func TestCompare_TokenClaimRecipeAndExpectedSemanticsAreStable(t *testing.T) {
+	t.Run("token claim recipe differs", func(t *testing.T) {
+		dir := t.TempDir()
+		committedDir := filepath.Join(dir, "committed")
+		freshDir := filepath.Join(dir, "fresh")
+
+		cSession, cPDUs := baseSession(20, 0)
+		cSession.TokenClaimRecipe = "sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
+		writeFixtureDir(t, committedDir, cSession, cPDUs)
+
+		fSession, fPDUs := baseSession(20, 0)
+		fSession.TokenClaimRecipe = "sub=someone-else@example.com; groups=idp-readers; fixed-digit iat/exp; no jti"
+		writeFixtureDir(t, freshDir, fSession, fPDUs)
+
+		result, err := Compare(CompareInput{CommittedDir: committedDir, FreshDir: freshDir})
+		if err != nil {
+			t.Fatalf("Compare: %v", err)
+		}
+		if result.Equal {
+			t.Fatal("expected a TokenClaimRecipe difference to be detected as stable-metadata drift")
+		}
+	})
+
+	t.Run("expected semantics differs", func(t *testing.T) {
+		dir := t.TempDir()
+		committedDir := filepath.Join(dir, "committed")
+		freshDir := filepath.Join(dir, "fresh")
+
+		cSession, cPDUs := baseSession(20, 0)
+		cSession.PDUs[0].ExpectedSemantics = "simple Bind, version 3"
+		writeFixtureDir(t, committedDir, cSession, cPDUs)
+
+		fSession, fPDUs := baseSession(20, 0)
+		fSession.PDUs[0].ExpectedSemantics = "something else entirely"
+		writeFixtureDir(t, freshDir, fSession, fPDUs)
+
+		result, err := Compare(CompareInput{CommittedDir: committedDir, FreshDir: freshDir})
+		if err != nil {
+			t.Fatalf("Compare: %v", err)
+		}
+		if result.Equal {
+			t.Fatal("expected an ExpectedSemantics difference to be detected as stable-metadata drift")
+		}
+	})
+}
+
 func TestCompare_TimeoutModeDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	committedDir := filepath.Join(dir, "committed")

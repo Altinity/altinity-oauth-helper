@@ -25,6 +25,8 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+
+	"github.com/altinity/altinity-oauth-helper/internal/wirefixture"
 )
 
 func main() {
@@ -101,6 +103,8 @@ func runSanitize(args []string, stdin *fileWriter, stdout *fileWriter) error {
 	line := fs.String("line", "", "tracked line label, e.g. 24.8")
 	mode := fs.String("mode", "", "success | timeout-abandon")
 	sql := fs.String("sql", "", "the controlled SQL statement issued for this session")
+	tokenClaimRecipe := fs.String("token-claim-recipe", wirefixture.FixedTokenClaimRecipe,
+		"fixed, non-secret description of the token claims used to mint the fixture credential (never the credential itself)")
 
 	// Optional profile.json flags (plan §9/§26): profile.json is per-line
 	// provenance, written once via WriteProfileFromInput below when
@@ -132,12 +136,13 @@ func runSanitize(args []string, stdin *fileWriter, stdout *fileWriter) error {
 	}
 
 	session, err := Sanitize(SanitizeInput{
-		RawDir:       *rawDir,
-		SanitizedDir: *sanitizedDir,
-		Credential:   cred,
-		Line:         *line,
-		Mode:         *mode,
-		SQL:          *sql,
+		RawDir:           *rawDir,
+		SanitizedDir:     *sanitizedDir,
+		Credential:       cred,
+		Line:             *line,
+		Mode:             *mode,
+		SQL:              *sql,
+		TokenClaimRecipe: *tokenClaimRecipe,
 	})
 	if err != nil {
 		return err

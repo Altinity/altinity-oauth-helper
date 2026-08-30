@@ -255,7 +255,15 @@ token's *length* must equal the committed `placeholder_length` (its *value*
 is always sanitized away — see below), and the Bind DN / Search filter /
 attribute content never vary run to run. The determinism basis (libldap's
 `ld_msgid` zero-init, the fixed principal, the synthetic IdP's fixed claim
-shape) is spelled out in `capture-ldap-wire.sh`'s own header comment.
+shape) is spelled out in `capture-ldap-wire.sh`'s own header comment. This
+same fixed recipe is what `sanitize --token-claim-recipe` writes verbatim
+into every committed `session.json`'s `token_claim_recipe` field
+(`internal/wirefixture.FixedTokenClaimRecipe`); each PDU's
+`expected_semantics` field is likewise populated from one fixed
+per-operation table (bind/search/abandon/unbind) rather than left blank.
+Both fields are part of the same stable-comparison projection as the raw
+PDU bytes (plan §27/§28), so a verify run that produced a different recipe
+or semantics string would be reported as drift, not silently accepted.
 
 **Topology.** A standalone five-service Compose fixture
 (`compose-wirecapture.yml`, `COMPOSE_PROJECT_NAME=ch-wirecap`) interposes a

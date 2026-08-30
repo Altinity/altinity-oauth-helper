@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -304,6 +305,120 @@ func TestRecorder_StallAfterBind_InjectedDeadline_SimulatedAbandon(t *testing.T)
 	}
 	if len(entries) != 4 {
 		t.Fatalf("raw dir has %d files, want 4", len(entries))
+	}
+}
+
+// TestRecorder_ZeroPDUConnectionCountsTowardN proves Amendment 1: every
+// recorder-accepted client TCP connection counts toward the session's N
+// (plan §8.4/§21), including one that sends zero PDUs before closing —
+// e.g. a stray probe or an empty connection — not only connections that
+// produced at least one recorded PDU. It drives two accepted connections
+// directly through handleConn (the same entry point Serve's Accept loop
+// uses), the second sending no bytes at all, then confirms: (1) two
+// conn-NNNN raw directories exist, (2) the second is empty, and (3) the
+// downstream sanitize N==1 rule (plan §21) then rejects that raw corpus
+// outright, reporting exactly 2 connections.
+func TestRecorder_ZeroPDUConnectionCountsTowardN(t *testing.T) {
+	dir := t.TempDir()
+	rawDir := filepath.Join(dir, "raw")
+
+	results := make(chan ConnResult, 2)
+	rec := &Recorder{
+		Mode:    "pass",
+		RawDir:  rawDir,
+		Results: results,
+	}
+
+	// Connection 1: a normal single-PDU session. The exact operation
+	// carried doesn't matter here — only that this connection is
+	// non-empty, unlike connection 2 below.
+	client1Recorder, client1Test := net.Pipe()
+	upstream1Recorder, upstream1Test := net.Pipe()
+	rec.Dial = func(ctx context.Context) (net.Conn, error) { return upstream1Recorder, nil }
+	go rec.handleConn(context.Background(), client1Recorder, 1)
+
+	// Drain whatever the recorder forwards upstream so pass()'s
+	// io.Copy(client, upstream) goroutine and read loop never block; this
+	// connection ends on the client's own EOF, not on any upstream reply.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		buf := make([]byte, 4096)
+		for {
+			if _, err := upstream1Test.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	unbindReq := buildUnbindRequest(1)
+	if _, err := client1Test.Write(unbindReq); err != nil {
+		t.Fatalf("write unbind on conn 1: %v", err)
+	}
+	client1Test.Close()
+	<-drainDone
+
+	select {
+	case res := <-results:
+		if res.Err != nil {
+			t.Fatalf("conn 1 result error: %v", res.Err)
+		}
+		if len(res.PDUs) != 1 {
+			t.Fatalf("conn 1 recorded %d PDUs, want 1", len(res.PDUs))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("conn 1 result never published")
+	}
+
+	// Connection 2: accepted, then closed immediately with zero bytes
+	// sent — the "zero-PDU" connection Amendment 1 is about.
+	client2Recorder, client2Test := net.Pipe()
+	upstream2Recorder, _ := net.Pipe()
+	rec.Dial = func(ctx context.Context) (net.Conn, error) { return upstream2Recorder, nil }
+	go rec.handleConn(context.Background(), client2Recorder, 2)
+	client2Test.Close()
+
+	select {
+	case res := <-results:
+		if res.Err != nil {
+			t.Fatalf("conn 2 result error: %v", res.Err)
+		}
+		if len(res.PDUs) != 0 {
+			t.Fatalf("conn 2 recorded %d PDUs, want 0 (this connection sends nothing)", len(res.PDUs))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("conn 2 result never published")
+	}
+
+	entries, err := os.ReadDir(rawDir)
+	if err != nil {
+		t.Fatalf("read raw dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("raw dir has %d conn-NNNN directories, want 2 — the zero-PDU connection must still count toward N", len(entries))
+	}
+
+	zeroPDUEntries, err := os.ReadDir(filepath.Join(rawDir, "conn-0002"))
+	if err != nil {
+		t.Fatalf("read conn-0002 dir: %v", err)
+	}
+	if len(zeroPDUEntries) != 0 {
+		t.Fatalf("conn-0002 (the zero-PDU connection) has %d files, want 0", len(zeroPDUEntries))
+	}
+
+	// The downstream sanitize N==1 rule (plan §21) must now reject
+	// promotion of this raw corpus outright, exactly as it would for a
+	// real capture that observed a stray second connection.
+	_, err = Sanitize(SanitizeInput{
+		RawDir:       rawDir,
+		SanitizedDir: filepath.Join(dir, "sanitized"),
+		Credential:   []byte("irrelevant-credential-not-present-anywhere"),
+	})
+	if err == nil {
+		t.Fatal("expected Sanitize to reject a raw corpus with 2 connections, one of them zero-PDU")
+	}
+	if !strings.Contains(err.Error(), "require exactly 1") || !strings.Contains(err.Error(), "2 connections") {
+		t.Fatalf("Sanitize error = %v, want a connection-count-!=1 message reporting 2 connections", err)
 	}
 }
 

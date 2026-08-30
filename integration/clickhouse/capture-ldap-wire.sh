@@ -369,6 +369,14 @@ WIRECAP_CONFIG_PATH="integration/clickhouse/clickhouse/common/config.d/ldap.xml"
 WIRECAP_CONFIG_HOST_FILE="$SCRIPT_DIR/clickhouse/common/config.d/ldap.xml"
 WIRECAP_CONFIG_CONTAINER_PATH="/tmp/wirecap-ldap-config.xml"
 WIRECAP_SQL="SELECT currentUser()"
+# Must equal internal/wirefixture.FixedTokenClaimRecipe verbatim — that Go
+# constant and this shell literal describe the same fixed, non-secret
+# recipe (plan §19/§26/§27) and cannot share a literal across the Go/shell
+# boundary, so wire_profile_contract_test.go's
+# TestWireProfileContract_FixtureInventory is what actually enforces they
+# stay in sync (by checking every committed session against the Go
+# constant), not this comment.
+WIRECAP_TOKEN_CLAIM_RECIPE="sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
 [ -f "$WIRECAP_CONFIG_HOST_FILE" ] || die "canonical LDAP config not found at $WIRECAP_CONFIG_HOST_FILE"
 
 # ── Fresh per-run interserver secret (plan §15.7) ─────────────────────────
@@ -600,6 +608,20 @@ wirecap_transfer_config() {
         || die "could not transfer the canonical LDAP config file into the recorder container for provenance hashing"
 }
 
+# wirecap_session_paths_csv — comma-separated session directory names
+# (e.g. "success,timeout-abandon"), derived from WIRECAP_SESSION_SPECS
+# rather than kept as a second, independently maintained literal. Callable
+# from anywhere after WIRECAP_SESSION_SPECS is set (bash resolves the array
+# reference when the function actually runs, not when it is defined).
+wirecap_session_paths_csv() {
+    local spec names=()
+    for spec in "${WIRECAP_SESSION_SPECS[@]}"; do
+        names+=("${spec%%:*}")
+    done
+    local IFS=,
+    echo "${names[*]}"
+}
+
 # wirecap_sanitize LINE SESSION_MODE TOKEN — invokes the recorder's
 # `sanitize` subcommand inside the fresh container, feeding TOKEN over
 # stdin only (plan §24: never argv, exported env, Docker -e, or a host
@@ -611,11 +633,12 @@ wirecap_sanitize() {
     local line="$1" session_mode="$2" token="$3"
     local out rc
     set +e
-    out="$(compose exec -T ch-oauth-ldap ldap-wire-recorder sanitize \
+    out="$(printf '%s' "$token" | compose exec -T ch-oauth-ldap ldap-wire-recorder sanitize \
         --sanitized-dir /run/ldap-wirecapture/sanitized/session \
         --line "$line" \
         --mode "$session_mode" \
         --sql "$WIRECAP_SQL" \
+        --token-claim-recipe "$WIRECAP_TOKEN_CLAIM_RECIPE" \
         --profile-out /run/ldap-wirecapture/sanitized/profile \
         --tracked-image "${WIRECAP_LINE_IMAGE[$line]}" \
         --clickhouse-repository "${WIRECAP_CH_REPO[$line]}" \
@@ -630,8 +653,8 @@ wirecap_sanitize() {
         --openldap-version "${WIRECAP_OPENLDAP_VERSION[$line]}" \
         --config-path "$WIRECAP_CONFIG_PATH" \
         --config-file "$WIRECAP_CONFIG_CONTAINER_PATH" \
-        --session-paths "success,timeout-abandon" \
-        <<<"$token" 2>&1)"
+        --session-paths "$(wirecap_session_paths_csv)" \
+        2>&1)"
     rc=$?
     set -e
     # The tool's own stdout/stderr never carries raw credential/PDU content

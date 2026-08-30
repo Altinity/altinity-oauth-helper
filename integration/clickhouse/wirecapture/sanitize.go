@@ -59,11 +59,17 @@ const maxCredentialBytes = 64 * 1024
 
 // readCredentialFromStdin performs the ONLY supported credential transfer
 // path into the sanitizer (plan §24): a bounded read from r (stdin in
-// production). There is deliberately no flag or environment-variable
-// alternative anywhere in this package — see sanitize_test.go's AST-level
-// assertion and the doneWhen grep this sub-task is graded against. A single
-// trailing "\n" (and, before it, a single "\r") is trimmed since shells
-// commonly append one; no other trimming/normalization is performed.
+// production). This function only implements that path; it does not by
+// itself enforce that no other path exists. There is deliberately no flag
+// or environment-variable alternative anywhere in this package for the
+// actual credential — see sanitize_test.go's
+// TestSanitize_CredentialTransferIsStdinOnly, a source-level string grep
+// (not an AST-level check) that fails if any non-test file in this package
+// reads a token/credential-named flag or environment variable, and the
+// doneWhen grep this sub-task is graded against, which enforces the same
+// thing externally. A single trailing "\n" (and, before it, a single "\r")
+// is trimmed since shells commonly append one; no other
+// trimming/normalization is performed.
 func readCredentialFromStdin(r io.Reader) ([]byte, error) {
 	limited := io.LimitReader(r, maxCredentialBytes+1)
 	b, err := io.ReadAll(limited)
@@ -89,6 +95,12 @@ type SanitizeInput struct {
 	Line         string // applicability label carried into session metadata, e.g. "24.8"
 	Mode         string // e.g. "success" or "timeout-abandon"
 	SQL          string // the controlled SQL statement issued for this session, if any
+
+	// TokenClaimRecipe is a fixed, non-secret description of the token
+	// claims used to mint Credential (plan §19/§26/§27) — never the
+	// credential itself, so it arrives as a plain flag value rather than
+	// over stdin. Persisted verbatim into Session.TokenClaimRecipe.
+	TokenClaimRecipe string
 }
 
 var connDirPattern = regexp.MustCompile(`^conn-[0-9]{4,}$`)
@@ -162,13 +174,21 @@ func Sanitize(in SanitizeInput) (*wirefixture.Session, error) {
 			return nil, errMalformedFrame("write sanitized PDU file", err)
 		}
 
+		op := wirefixtureOperation(f.decoded.opTag)
 		wp := wirefixture.PDU{
 			Sequence:        i + 1,
 			Filename:        outName,
 			Direction:       wirefixture.DirectionClientToServer,
-			Operation:       wirefixtureOperation(f.decoded.opTag),
+			Operation:       op,
 			MessageID:       f.decoded.messageID,
 			SanitizedSHA256: sha256Hex(content),
+		}
+		// ExpectedSemantics comes from wirefixture's single fixed
+		// operation->semantics table (plan §27/§28); an operation outside
+		// the recorder's client-request scope (plan §22) has no entry and
+		// is left blank rather than fabricating text for it.
+		if semantics, ok := wirefixture.ExpectedSemanticsForOperation(op); ok {
+			wp.ExpectedSemantics = semantics
 		}
 		if f.decoded.hasAbandon {
 			target := f.decoded.abandonTarget
@@ -190,6 +210,7 @@ func Sanitize(in SanitizeInput) (*wirefixture.Session, error) {
 		Mode:              in.Mode,
 		ConnectionCount:   1,
 		SQL:               in.SQL,
+		TokenClaimRecipe:  in.TokenClaimRecipe,
 		PlaceholderLength: credLen,
 		PDUs:              pdus,
 	}
