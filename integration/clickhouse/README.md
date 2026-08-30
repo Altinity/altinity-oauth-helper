@@ -219,6 +219,122 @@ run if this suite's own `run.sh` fixture is already up on the same Docker
 daemon (same "one run per Docker daemon at a time" discipline as above,
 just under a distinct project/network name).
 
+## Wire capture (issue #33 phase 1)
+
+```bash
+# Regenerate the committed ClickHouse LDAP wire corpus (promotes on success)
+./integration/clickhouse/capture-ldap-wire.sh --mode generate --output internal/ldap/testdata/clickhouse-wire
+
+# Verify a fresh capture matches the committed corpus (never writes into --fixtures)
+./integration/clickhouse/capture-ldap-wire.sh --mode verify --fixtures internal/ldap/testdata/clickhouse-wire
+```
+
+This is a separate, also-manual, also-local gate from `run.sh`/`run-ha.sh`
+above. It does not test `ch-oauth-ldap` behavior — it produces and checks the
+non-secret, byte-level ClickHouse LDAP request evidence that backs
+[`docs/clickhouse-ldap-wire-profile.md`](../../docs/clickhouse-ldap-wire-profile.md)
+and the `cryptobyte`-vs-bounded-parser decision for issue #33's later phases.
+Run `--mode generate` only when re-deriving that evidence deliberately (a
+ClickHouse/OpenLDAP source change, a new tracked line); run `--mode verify`
+to prove the committed corpus is still reproducible against the images in
+`run-all-builds.sh`'s `BUILDS`.
+
+**Fixed query and token-claim recipe.** Both tracked lines (`24.8`, `25.8`)
+each get exactly two fresh captures — `success` and `timeout-abandon` — built
+from one fixed HTTP principal and one fixed SQL statement, never varied
+between runs or lines:
+
+```sh
+token="$(oauth_mint alice@example.com idp-readers idp-unprovisioned)"  # fixed email + role list, exp=3600
+# against clickhouse-origin only, no distributed query:
+SELECT currentUser()
+```
+
+Fixing both is what makes verify-mode byte comparison meaningful: a fresh
+token's *length* must equal the committed `placeholder_length` (its *value*
+is always sanitized away — see below), and the Bind DN / Search filter /
+attribute content never vary run to run. The determinism basis (libldap's
+`ld_msgid` zero-init, the fixed principal, the synthetic IdP's fixed claim
+shape) is spelled out in `capture-ldap-wire.sh`'s own header comment. This
+same fixed recipe is what `sanitize --token-claim-recipe` writes verbatim
+into every committed `session.json`'s `token_claim_recipe` field
+(`internal/wirefixture.FixedTokenClaimRecipe`); each PDU's
+`expected_semantics` field is likewise populated from one fixed
+per-operation table (bind/search/abandon/unbind) rather than left blank.
+Both fields are part of the same stable-comparison projection as the raw
+PDU bytes (plan §27/§28), so a verify run that produced a different recipe
+or semantics string would be reported as drift, not silently accepted.
+
+**Topology.** A standalone five-service Compose fixture
+(`compose-wirecapture.yml`, `COMPOSE_PROJECT_NAME=ch-wirecap`) interposes a
+passive recording proxy — `ldap-wire-recorder`, built into this suite's
+shared image and run under the *canonical* `ch-oauth-ldap` service name so
+ClickHouse's unmodified LDAP config still resolves it — between
+`clickhouse-origin` and the real helper binary (renamed
+`ldap-helper-upstream` in this fixture only):
+
+```
+clickhouse-origin --[LDAP simple-bind, JWT-as-password]--> ch-oauth-ldap (recorder)
+                                                                  |  forwards every PDU verbatim
+                                                                  v
+                                                           ldap-helper-upstream (real helper)
+                                                                  |
+                                                                  v
+                                                           synthetic-idp (JWKS)
+```
+
+`ch-wirecap-auth-net` carries synthetic-idp / recorder / upstream helper /
+`clickhouse-origin`; `ch-wirecap-cluster-net` carries `clickhouse-origin` /
+`clickhouse-remote` — the same auth/cluster split as the base fixture above,
+under fixture-specific names. On this sandbox's network-isolator host,
+`capture-ldap-wire.sh` falls back to the same hand-reshaped-network pattern
+`run.sh`/`run-ha.sh` use, giving the fallback recorder the identical private
+tmpfs (below) and reproducing the same alias/network graph; both paths are
+mechanically checked against each other and against `compose.yml` by
+`tests/cases/wirecapture-compose-parity.sh` and
+`tests/cases/wirecapture-fallback-parity.sh`.
+
+**Recorder-private raw staging, and the sanitizer/export boundary.** The
+recorder never writes raw request bytes to host storage. It holds them in a
+container-private tmpfs at `/run/ldap-wirecapture` (mode `0700`, `raw/`
+entries mode `0600`) that is never a host bind mount. The one credential
+this driver ever handles — the minted JWT — reaches the recorder only over
+`compose exec -T ch-oauth-ldap ldap-wire-recorder sanitize`'s **stdin**,
+never argv, an exported environment variable, or a Docker `-e` literal.
+Sanitization happens entirely inside that container: it requires the
+credential to occur exactly once, inside the Bind PDU, replaces it with a
+fixed-length run of ASCII `x`, and writes `session.json`/`profile.json`
+(through `internal/wirefixture`, the same schema
+`internal/securitytest/wire_profile_contract_test.go` and
+`internal/ldap/clickhouse_wire_cryptobyte_test.go` read) plus the sanitized
+`.ber` files under `/run/ldap-wirecapture/sanitized/`. **Only that
+`sanitized/` subtree is ever exported** — via a `tar` stream over `compose
+exec`, never `docker cp` of the raw tree — to private host staging under
+`$RUN_TMP_DIR`, which this driver leak-scans (Amendment 3: transcript,
+diagnostics, all five services' `compose logs`, and the exported staging
+itself) before promoting or comparing it.
+
+**Three-fixture concurrency rule.** Like the base fixture and the HA
+harness, this one is single-instance per Docker daemon, and now there are
+three mutually exclusive fixtures that must never run concurrently on the
+same daemon:
+
+| Fixture | Project | Networks |
+|---|---|---|
+| Normal | `ch-phase3` | `ch-phase3-auth-net`, `ch-phase3-cluster-net` |
+| HA | `ch-phase5-ha` | `ch-phase5-ha-auth-net`, `ch-phase5-ha-cluster-net` |
+| Wire capture | `ch-wirecap` | `ch-wirecap-auth-net`, `ch-wirecap-cluster-net` |
+
+Each script preflights against the *other two* before mutating any Docker
+state — `run.sh` and `run-ha.sh` each refuse a stale `ch-wirecap*` fixture
+(and vice versa is symmetric), and `capture-ldap-wire.sh` refuses `ch-phase3`,
+`ch-phase5-ha`, and a stale leftover `ch-wirecap` fixture of its own, in that
+order, before creating anything. No preflight ever deletes another fixture's
+resources — it only `die`s with the exact `docker rm -f`/`docker network rm`
+commands to run by hand. `tests/cases/wirecapture-collision-preflight.sh`
+proves all five pairwise refusals fire before any mutation, under a stub
+`docker`, with no daemon needed.
+
 ## Diagnostics
 
 - **Health gate timeout** (120 s): `run.sh` dumps `compose ps` and each

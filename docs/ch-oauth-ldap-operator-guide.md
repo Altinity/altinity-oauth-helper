@@ -99,6 +99,13 @@ per-version expectation matrix; this guide does not duplicate it.
 
 [root-caveats]: ../README.md#wiring-clickhouse-to-ch-oauth-ldap
 
+For the byte-level evidence behind this configuration — exact ClickHouse/
+OpenLDAP source citations, the committed sanitized request corpus, and the
+`cryptobyte`-vs-bounded-parser primitive decision for the future replacement
+parser — see [`docs/clickhouse-ldap-wire-profile.md`](clickhouse-ldap-wire-profile.md)
+(issue #33 phase 1); it is engineering evidence for that future work, not a
+second copy of the configuration above.
+
 ## 2. OIDC / Auth0 / JWKS configuration
 
 <!-- config-source: cmd/ch-oauth-ldap/testdata/operator-guide.yaml -->

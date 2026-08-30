@@ -84,6 +84,39 @@ phase3_preflight_no_ha_collision() {
 }
 phase3_preflight_no_ha_collision
 
+# ── Preflight: refuse to run alongside the wire-capture fixture ──────────
+# The reciprocal of the capture fixture's own preflight against this one
+# (issue #33 phase 1, plan §16 "Three-fixture mutual exclusion" —
+# COMPOSE_PROJECT_NAME="ch-wirecap" with ch-wirecap-auth-net/
+# ch-wirecap-cluster-net networks): the capture harness refuses to start
+# while phase-3 resources are present, but nothing previously enforced the
+# same rule in this direction, so starting this fixture while a capture
+# run was live was silently allowed even though README.md's "Concurrency:
+# one run per Docker daemon at a time" applies here too. Cheap,
+# side-effect-free, and runs before any state this script owns exists — a
+# die() here needs no cleanup. Matched by substring (docker's own --filter
+# name= semantics), not an exact name, so it also catches a crashed
+# capture run's leftover containers/networks, not just a live one. This
+# preflight never deletes another fixture's resources — it only inspects
+# and, on a hit, tells the operator what to remove by hand.
+phase3_preflight_no_wirecap_collision() {
+    local hits
+    hits="$(docker ps -a --filter 'name=ch-wirecap' --format '{{.Names}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: wire-capture fixture container(s) present on this Docker daemon ($hits) — the phase-3 and wire-capture fixtures must not run concurrently (README.md: 'Concurrency: one run per Docker daemon at a time'); tear down the wire-capture fixture first (docker rm -f the listed containers, then docker network rm ch-wirecap-auth-net ch-wirecap-cluster-net if they remain)"
+    fi
+    hits="$(docker network ls --filter 'name=ch-wirecap-auth-net' --format '{{.Name}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: leftover wire-capture network '$hits' exists — remove it (docker network rm ch-wirecap-auth-net) before running this fixture"
+    fi
+    hits="$(docker network ls --filter 'name=ch-wirecap-cluster-net' --format '{{.Name}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: leftover wire-capture network '$hits' exists — remove it (docker network rm ch-wirecap-cluster-net) before running this fixture"
+    fi
+    log "preflight: no wire-capture fixture collision detected — proceeding"
+}
+phase3_preflight_no_wirecap_collision
+
 # The cleanup trap is installed HERE — before RUN_TMP_DIR, ENV_FILE, or
 # anything else per-run exists — so that a SIGINT/SIGTERM delivered at ANY
 # point from here to the end of the script is guaranteed to run cleanup().

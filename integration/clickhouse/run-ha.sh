@@ -105,6 +105,39 @@ ha_preflight_no_phase3_collision() {
 }
 ha_preflight_no_phase3_collision
 
+# ── Preflight: refuse to run alongside the wire-capture fixture ──────────
+# The reciprocal of the capture fixture's own preflight against this one
+# (issue #33 phase 1, plan §16 "Three-fixture mutual exclusion" —
+# COMPOSE_PROJECT_NAME="ch-wirecap" with ch-wirecap-auth-net/
+# ch-wirecap-cluster-net networks): the capture harness refuses to start
+# while HA resources are present, but nothing previously enforced the same
+# rule in this direction, so starting the HA fixture while a capture run
+# was live was silently allowed even though README.md's "Concurrency: one
+# run per Docker daemon at a time" applies here too. Cheap, side-effect-
+# free, and runs before any state this script owns exists — a die() here
+# needs no cleanup. Matched by substring (docker's own --filter name=
+# semantics), not an exact name, so it also catches a crashed capture
+# run's leftover containers/networks, not just a live one. This preflight
+# never deletes another fixture's resources — it only inspects and, on a
+# hit, tells the operator what to remove by hand.
+ha_preflight_no_wirecap_collision() {
+    local hits
+    hits="$(docker ps -a --filter 'name=ch-wirecap' --format '{{.Names}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: wire-capture fixture container(s) present on this Docker daemon ($hits) — the phase-5-HA and wire-capture fixtures must not run concurrently (README.md: 'Concurrency: one run per Docker daemon at a time'); tear down the wire-capture fixture first (docker rm -f the listed containers, then docker network rm ch-wirecap-auth-net ch-wirecap-cluster-net if they remain)"
+    fi
+    hits="$(docker network ls --filter 'name=ch-wirecap-auth-net' --format '{{.Name}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: leftover wire-capture network '$hits' exists — remove it (docker network rm ch-wirecap-auth-net) before running the HA fixture"
+    fi
+    hits="$(docker network ls --filter 'name=ch-wirecap-cluster-net' --format '{{.Name}}' 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+        die "preflight: leftover wire-capture network '$hits' exists — remove it (docker network rm ch-wirecap-cluster-net) before running the HA fixture"
+    fi
+    log "preflight: no wire-capture fixture collision detected — proceeding"
+}
+ha_preflight_no_wirecap_collision
+
 # ── Cleanup trap installed BEFORE any per-run state exists ────────────────
 # Exactly the ordering discipline run.sh's own header explains at length
 # (T9/finding-8/finding-9): install the trap first, so a SIGINT/SIGTERM at
