@@ -699,15 +699,22 @@ than the documented ClickHouse traffic actually requires, or adds a bound
 current production does not have at all. Phase 3 must explicitly accept or
 reject each one before Phase 4 is authorized:
 
-1. Bind version `!= 3` changes from current incidental acceptance to result
-   2 `protocolError` (LDAPv3-only). This narrowing's own result-2 path is
-   reached only for a version value that decodes successfully (minimally
-   encoded, in range `1..MaxInt32`) and simply isn't 3: the version field is
-   decoded through the same shared minimal-positive-INTEGER rule
-   (`minimalPositiveInt32`) the LDAPMessage envelope's MessageID uses, so a
+1. Bind version `!= 3` on the recognizable **simple**-Bind path changes
+   from current incidental acceptance to result 2 `protocolError`
+   (LDAPv3-only). This narrowing's own result-2 path is reached only for a
+   version value that decodes successfully (minimally encoded, in range
+   `1..MaxInt32`), simply isn't 3, *and* the authentication CHOICE is
+   `simple` — the version field is decoded before the authentication
+   CHOICE is inspected, but the CHOICE switch itself checks SASL first and
+   returns result 7 `authMethodNotSupported` unconditionally, before the
+   version check further down the same function is ever reached. So a
    version of 0, a negative version, or a non-minimally-encoded value is
    malformed at decode time and closes the connection before the version
-   check ever runs — it never reaches result 2. **(new client-visible
+   check ever runs — it never reaches result 2 — and, independently, a
+   *decodable* SASL Bind at any version (including one that isn't 3) never
+   reaches result 2 either: it always returns result 7 first, regardless of
+   version. Only a decodable **simple** Bind at a non-3 version reaches
+   result 2. **(new client-visible
    behavior, not parity)** This does *not* match legacy: legacy goldap's own
    Bind version decoder (`BindRequestVersionMin`/`BindRequestVersionMax` in
    `third_party/goldap/message/struct.go`) only accepts `1..127` and returns

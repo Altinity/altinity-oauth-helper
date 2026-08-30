@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -918,6 +919,62 @@ func TestHandleSearch_TerminalResult3DeadlineIsFreshNotExpiredSearchDeadline(t *
 	}
 }
 
+// TestHandleSearch_SimultaneousLimitsExpiryPrecedesEmptyRoleSkipAndSizeCheck
+// is the deterministic N+1-boundary regression test the P2 review finding
+// requires: legacy (internal/ldap/search.go) checks its unconditional
+// expired() at the TOP of every loop iteration — including one that will
+// itself go on to be skipped as an empty role — before ever considering
+// sizeLimit. Reaching the exact sizeLimit budget (N eligible entries
+// emitted) followed by an empty role, with the Search deadline already
+// past by the moment that empty-role iteration is reached, must therefore
+// report timeLimitExceeded (3), never sizeLimitExceeded (4) — even though
+// the very next *eligible* role after the empty one would otherwise have
+// tripped the sizeLimit check first. A version of executeSearch that
+// checks sizeLimit (or skips the empty role) before checking expiry would
+// instead skip the empty role for free and report sizeLimitExceeded (4)
+// on the next eligible role, diverging from legacy at exactly this
+// boundary.
+func TestHandleSearch_SimultaneousLimitsExpiryPrecedesEmptyRoleSkipAndSizeCheck(t *testing.T) {
+	groupBase := "ou=groups,dc=profile,dc=test"
+	const sizeLimit = 3
+	const timeLimitSeconds = 2
+	// Three eligible roles fill the sizeLimit budget exactly, then an
+	// empty role, then one more eligible role that a sizeLimit-before-
+	// expiry ordering would instead reject with result 4.
+	roles := []string{"role0", "role1", "role2", "", "role3"}
+
+	now := time.Now()
+	// searchStart; then, per emitted entry: [expired()-check not-expired,
+	// write-deadline calc] for role0/role1/role2; then the empty role's
+	// own expired()-check — now unconditional and reached BEFORE the
+	// role=="" skip — reports expired; then the terminal Done's own
+	// deadline calc. All values are real time.Now()-based near-future
+	// instants so every genuine net.Conn deadline stays valid.
+	clk := &sequenceClock{times: []time.Time{
+		now,                                                 // searchStart (deadline = now+2s)
+		now.Add(200 * time.Millisecond), now.Add(200 * time.Millisecond), // role0
+		now.Add(400 * time.Millisecond), now.Add(400 * time.Millisecond), // role1
+		now.Add(600 * time.Millisecond), now.Add(600 * time.Millisecond), // role2
+		now.Add(5 * time.Second), // "" role's expired()-check: now+5s >= now+2s -> expired
+		now.Add(5 * time.Second), // terminal Done write-deadline calc
+	}}
+	c, clientConn, cleanup := newSearchTestConnectionWithClock(t, testBoundDN, roles, clk.Now)
+	defer cleanup()
+	op := searchOp(groupBase, 2, 0, sizeLimit, timeLimitSeconds, false, validMembershipFilter(testBoundDN), "cn")
+
+	err, envs, _, wrote := doSearch(t, c, clientConn, 1, op, false)
+	if err != nil || !wrote {
+		t.Fatalf("doSearch: err=%v wrote=%v", err, wrote)
+	}
+	if len(envs)-1 != sizeLimit {
+		t.Fatalf("emitted %d entries, want exactly %d (role0/role1/role2)", len(envs)-1, sizeLimit)
+	}
+	code, _, _ := readSearchResultDone(t, envs[len(envs)-1])
+	if code != int(resultTimeLimitExceeded) {
+		t.Fatalf("result = %d, want %d (timeLimitExceeded) — legacy's unconditional per-iteration expiry check fires on the empty-role iteration before sizeLimit is ever reconsidered on role3", code, resultTimeLimitExceeded)
+	}
+}
+
 // =========================================================================
 // Write-stall vs Search-deadline classification
 // =========================================================================
@@ -1232,5 +1289,75 @@ func TestHandleSearch_NoVerifyOrRolesCalls(t *testing.T) {
 	}
 	if got := c.roles.(*fakeResolver).callCount(); got != 0 {
 		t.Fatalf("Roles called %d times from Search, want 0", got)
+	}
+}
+
+// =========================================================================
+// AttributeSelection: streamed, not materialized (issue #33 §2.1)
+// =========================================================================
+
+// measureAttrSearchAllocBytes runs one Search with n one-byte attribute
+// descriptions (out of profile except at n==1 with "cn") and returns the
+// bytes allocated by that single doSearch call, isolated via a GC before
+// and after. The op is built before measurement starts, so the test's own
+// fixture construction is never counted.
+func measureAttrSearchAllocBytes(t *testing.T, n int) uint64 {
+	t.Helper()
+	groupBase := "ou=groups,dc=profile,dc=test"
+	attrs := make([]string, n)
+	for i := range attrs {
+		attrs[i] = "a"
+	}
+	op := searchOp(groupBase, 2, 0, 0, 0, false, validMembershipFilter(testBoundDN), attrs...)
+
+	c, clientConn, cleanup := newSearchTestConnection(t, testBoundDN, []string{markerLegitimateRole})
+	defer cleanup()
+
+	runtime.GC()
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+
+	err, envs, _, wrote := doSearch(t, c, clientConn, 1, op, false)
+	if err != nil || !wrote {
+		t.Fatalf("doSearch(n=%d): err=%v wrote=%v", n, err, wrote)
+	}
+	code, _, _ := readSearchResultDone(t, envs[0])
+	if code != int(resultInsufficientAccessRights) {
+		t.Fatalf("doSearch(n=%d): result = %d, want 50 (out of profile: more than one attribute)", n, code)
+	}
+
+	runtime.ReadMemStats(&m1)
+	return m1.TotalAlloc - m0.TotalAlloc
+}
+
+// TestHandleSearch_AttributeSelectionNearCapDoesNotMaterializeProportionalCopy
+// is the near-cap allocation regression test the P1 review finding
+// requires: a request built from one-byte attribute descriptions can carry
+// roughly maxBodyBytes/3 ≈ 21845 entries within the 64 KiB per-message cap
+// (protocol.go's maxBodyBytes). Before the fix, handleSearch appended every
+// one into a full []string before authentication and before the
+// exactly-one-cn check ever ran — retaining roughly n*16 bytes of string
+// headers alone (a Go string header is 16 bytes: pointer+length), which for
+// n≈21845 is on the order of 340 KB, strictly proportional to the
+// attacker-controlled attribute count. The fix streams the decode and
+// retains at most the first attribute, rejecting immediately once a second
+// is seen, so allocation must stay flat as n grows from a small baseline to
+// the near-cap count — not grow proportionally with it.
+func TestHandleSearch_AttributeSelectionNearCapDoesNotMaterializeProportionalCopy(t *testing.T) {
+	const nearCapCount = maxBodyBytes/3 + 100 // comfortably past the ~21845 estimate
+
+	small := measureAttrSearchAllocBytes(t, 8)
+	large := measureAttrSearchAllocBytes(t, nearCapCount)
+
+	// A proportional (pre-fix) materialization would grow allocation by
+	// roughly (nearCapCount-8)*16 bytes (~340 KB) for the retained string
+	// headers alone, on top of whatever the small case already allocated.
+	// A streaming decode retaining only the first attribute must stay
+	// far below that — bounded generously at 64 KiB to leave headroom for
+	// this call's own fixed (not attribute-count-proportional) work.
+	const allowedGrowth = 64 * 1024
+	if large > small+allowedGrowth {
+		t.Fatalf("handleSearch allocated %d bytes for n=%d attributes vs %d bytes for n=8 (delta %d > allowed %d) — looks like a proportional-materialization regression",
+			large, nearCapCount, small, large-small, allowedGrowth)
 	}
 }

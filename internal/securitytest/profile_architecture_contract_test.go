@@ -585,14 +585,76 @@ func makeMapType(call *ast.CallExpr) (*ast.MapType, bool) {
 	return mt, ok
 }
 
+// namedMapTypeInfo/namedChanTypeInfo record a package-level (or local)
+// `type X map[...]...` / `type X chan ...` declaration's underlying node
+// plus the file it was declared in, so a field or variable declared using
+// the named type X (an *ast.Ident, not the map/chan type spelled out
+// inline) can still be resolved to what it actually is.
+type namedMapTypeInfo struct {
+	pf   profileFile
+	node *ast.MapType
+}
+type namedChanTypeInfo struct {
+	pf   profileFile
+	node *ast.ChanType
+}
+
+// collectNamedMapAndChanTypes scans every TypeSpec across files (top-level
+// or local — ast.Inspect recurses into function bodies too) whose Type is
+// itself a bare *ast.MapType/*ast.ChanType (never one wrapped further,
+// e.g. a struct embedding a map — that struct is not itself a map type)
+// and indexes it by name. Per the review finding that closed this gap: a
+// struct field or var declared via such a named alias (`type requestMap
+// map[int32]*request; ... active requestMap`) has a Type that is a plain
+// *ast.Ident, which neither this file's original ValueSpec/struct-field
+// scan nor the make()-call scan below ever unwrapped to the map/chan type
+// it actually names.
+func collectNamedMapAndChanTypes(files []profileFile) (map[string]namedMapTypeInfo, map[string]namedChanTypeInfo) {
+	maps := map[string]namedMapTypeInfo{}
+	chans := map[string]namedChanTypeInfo{}
+	for _, pf := range files {
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+			switch tt := ts.Type.(type) {
+			case *ast.MapType:
+				maps[ts.Name.Name] = namedMapTypeInfo{pf: pf, node: tt}
+			case *ast.ChanType:
+				chans[ts.Name.Name] = namedChanTypeInfo{pf: pf, node: tt}
+			}
+			return true
+		})
+	}
+	return maps, chans
+}
+
 // findMapTypedSites collects every map-typed site in files: struct fields,
-// package/function-level vars with an explicit map type, AND — per the
-// review finding that closed this gap — any assignment (`:=` or `=`) whose
-// right-hand side is a make(map[...]...) call, however that call's map type
-// was inferred rather than spelled out in a ValueSpec. Exported for reuse by
-// both the real-package test and the synthetic regression test below that
-// proves this exact inferred form is now caught.
+// package/function-level vars with an explicit map type (spelled out
+// inline OR named via a type alias resolved through collectNamedMapAndChanTypes),
+// a `var` whose type is inferred entirely from a make(map[...]...)
+// initializer (no explicit ValueSpec.Type at all), a map composite literal
+// assignment (`pending := map[int32]*request{}`), AND — per the review
+// finding that closed the original gap — any assignment (`:=` or `=`)
+// whose right-hand side is a make(map[...]...) call, however that call's
+// map type was inferred rather than spelled out in a ValueSpec. Exported
+// for reuse by both the real-package test and the synthetic regression
+// tests below that prove each of these forms is now caught.
 func findMapTypedSites(files []profileFile) []mapSite {
+	namedMaps, _ := collectNamedMapAndChanTypes(files)
+	resolveMapType := func(expr ast.Expr) (*ast.MapType, bool) {
+		switch t := expr.(type) {
+		case *ast.MapType:
+			return t, true
+		case *ast.Ident:
+			if info, ok := namedMaps[t.Name]; ok {
+				return info.node, true
+			}
+		}
+		return nil, false
+	}
+
 	var sites []mapSite
 	for _, pf := range files {
 		ast.Inspect(pf.file, func(n ast.Node) bool {
@@ -603,7 +665,7 @@ func findMapTypedSites(files []profileFile) []mapSite {
 					return true
 				}
 				for _, field := range st.Fields.List {
-					if mt, ok := field.Type.(*ast.MapType); ok {
+					if mt, ok := resolveMapType(field.Type); ok {
 						sites = append(sites, mapSite{
 							loc:        pf.pos(field.Pos()),
 							fieldOrVar: fieldNames(field),
@@ -613,16 +675,22 @@ func findMapTypedSites(files []profileFile) []mapSite {
 					}
 				}
 			case *ast.ValueSpec:
-				if mt, ok := node.Type.(*ast.MapType); ok {
-					sites = append(sites, mapSite{
-						loc:        pf.pos(node.Pos()),
-						fieldOrVar: joinIdentNames(node.Names),
-						typeStr:    formatNode(pf, mt),
-					})
+				if node.Type != nil {
+					if mt, ok := resolveMapType(node.Type); ok {
+						sites = append(sites, mapSite{
+							loc:        pf.pos(node.Pos()),
+							fieldOrVar: joinIdentNames(node.Names),
+							typeStr:    formatNode(pf, mt),
+						})
+					}
+					return true
 				}
-			case *ast.AssignStmt:
-				for i, rhs := range node.Rhs {
-					call, ok := rhs.(*ast.CallExpr)
+				// No explicit type: the type is inferred entirely from
+				// Values (`var pending = make(map[int32]*request)`) — the
+				// same shape the AssignStmt case below already catches
+				// for `:=`, mirrored here for `var`.
+				for i, val := range node.Values {
+					call, ok := val.(*ast.CallExpr)
 					if !ok {
 						continue
 					}
@@ -630,17 +698,46 @@ func findMapTypedSites(files []profileFile) []mapSite {
 					if !ok {
 						continue
 					}
-					name := "<non-ident-lhs>"
-					if i < len(node.Lhs) {
-						if id, ok := node.Lhs[i].(*ast.Ident); ok {
-							name = id.Name
-						}
+					name := "<unnamed>"
+					if i < len(node.Names) {
+						name = node.Names[i].Name
 					}
 					sites = append(sites, mapSite{
 						loc:        pf.pos(node.Pos()),
 						fieldOrVar: name,
 						typeStr:    formatNode(pf, mt),
 					})
+				}
+			case *ast.AssignStmt:
+				for i, rhs := range node.Rhs {
+					name := "<non-ident-lhs>"
+					if i < len(node.Lhs) {
+						if id, ok := node.Lhs[i].(*ast.Ident); ok {
+							name = id.Name
+						}
+					}
+					if call, ok := rhs.(*ast.CallExpr); ok {
+						if mt, ok := makeMapType(call); ok {
+							sites = append(sites, mapSite{
+								loc:        pf.pos(node.Pos()),
+								fieldOrVar: name,
+								typeStr:    formatNode(pf, mt),
+							})
+						}
+						continue
+					}
+					// A map composite literal (`pending := map[int32]*request{}`)
+					// carries its type on the CompositeLit itself, not on a
+					// make() call — a distinct AST shape from both cases above.
+					if cl, ok := rhs.(*ast.CompositeLit); ok && cl.Type != nil {
+						if mt, ok := resolveMapType(cl.Type); ok {
+							sites = append(sites, mapSite{
+								loc:        pf.pos(node.Pos()),
+								fieldOrVar: name,
+								typeStr:    formatNode(pf, mt),
+							})
+						}
+					}
 				}
 			}
 			return true
@@ -708,6 +805,105 @@ func bad() {
 	}
 }
 
+// TestProfileArchitecture_DetectsInferredVarMakeMapAssignment is a
+// regression test for the review finding that findMapTypedSites still
+// missed the `var` form of an inferred map type — `var pending =
+// make(map[int32]*request)` — distinct from
+// TestProfileArchitecture_DetectsInferredMakeMapAssignment's `:=` form
+// (an *ast.AssignStmt): a `var` with an initializer and no explicit type
+// is an *ast.ValueSpec with Type == nil, which the predecessor's
+// ValueSpec case (checking only node.Type.(*ast.MapType)) skipped
+// entirely rather than falling back to inspecting Values.
+func TestProfileArchitecture_DetectsInferredVarMakeMapAssignment(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func bad() {
+	var pending = make(map[int32]*request)
+	_ = pending
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findMapTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findMapTypedSites to catch the inferred `var pending = make(map[int32]*request)` declaration, found %d site(s): %+v", len(sites), sites)
+	}
+	if sites[0].fieldOrVar != "pending" || !strings.Contains(sites[0].typeStr, "map[int32]") {
+		t.Fatalf("unexpected site detail for the inferred var map declaration: %+v", sites[0])
+	}
+}
+
+// TestProfileArchitecture_DetectsMapCompositeLiteralAssignment is a
+// regression test for the review finding's map-literal variant —
+// `pending := map[int32]*request{}` — whose type lives on the
+// *ast.CompositeLit itself, not inside a make() CallExpr, so the
+// AssignStmt case's make()-only check missed it entirely.
+func TestProfileArchitecture_DetectsMapCompositeLiteralAssignment(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func bad() {
+	pending := map[int32]*request{}
+	_ = pending
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findMapTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findMapTypedSites to catch the `pending := map[int32]*request{}` composite literal, found %d site(s): %+v", len(sites), sites)
+	}
+	if sites[0].fieldOrVar != "pending" || !strings.Contains(sites[0].typeStr, "map[int32]") {
+		t.Fatalf("unexpected site detail for the map composite literal: %+v", sites[0])
+	}
+}
+
+// TestProfileArchitecture_DetectsNamedMapTypeAliasField is a regression
+// test for the review finding's named-map-type variant: a struct field
+// declared via a type alias (`type requestMap map[int32]*request; ...
+// active requestMap`) has a field Type that is a plain *ast.Ident, which
+// neither the explicit-*ast.MapType check nor the make()-call scan ever
+// unwrapped to the map type it actually names.
+func TestProfileArchitecture_DetectsNamedMapTypeAliasField(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+type requestMap map[int32]*request
+
+type Server struct {
+	active requestMap
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findMapTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findMapTypedSites to catch the `active requestMap` named-alias field, found %d site(s): %+v", len(sites), sites)
+	}
+	if sites[0].fieldOrVar != "active" || sites[0].structName != "Server" || !strings.Contains(sites[0].typeStr, "map[int32]") {
+		t.Fatalf("unexpected site detail for the named-alias map field: %+v", sites[0])
+	}
+}
+
 // --- 5: no sync.Map ---
 
 func TestProfileArchitecture_NoSyncMap(t *testing.T) {
@@ -762,28 +958,69 @@ func makeChanType(call *ast.CallExpr) (*ast.ChanType, bool) {
 // closing the identical gap for invariant 6: an idiomatic
 // `work := make(chan request)` is an *ast.AssignStmt with no
 // ValueSpec/explicit-type node, which the struct-field/ValueSpec-only scan
-// below this function's predecessor used to miss entirely.
+// below this function's predecessor used to miss entirely — plus, per the
+// same later review finding findMapTypedSites closes above, a `var work =
+// make(chan request)` (inferred ValueSpec, no CompositeLit equivalent for
+// channels) and a struct field/var declared via a named channel-type alias
+// resolved through collectNamedMapAndChanTypes.
 func findChanTypedSites(files []profileFile) []chanSite {
+	_, namedChans := collectNamedMapAndChanTypes(files)
+	resolveChanType := func(expr ast.Expr) (*ast.ChanType, bool) {
+		switch t := expr.(type) {
+		case *ast.ChanType:
+			return t, true
+		case *ast.Ident:
+			if info, ok := namedChans[t.Name]; ok {
+				return info.node, true
+			}
+		}
+		return nil, false
+	}
+
 	var sites []chanSite
 	for _, pf := range files {
 		ast.Inspect(pf.file, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.StructType:
 				for _, field := range node.Fields.List {
-					if _, ok := field.Type.(*ast.ChanType); ok {
+					if ct, ok := resolveChanType(field.Type); ok {
 						sites = append(sites, chanSite{
 							loc:     pf.pos(field.Pos()),
 							name:    fieldNames(field),
-							typeStr: formatNode(pf, field.Type),
+							typeStr: formatNode(pf, ct),
 						})
 					}
 				}
 			case *ast.ValueSpec:
-				if _, ok := node.Type.(*ast.ChanType); ok {
+				if node.Type != nil {
+					if ct, ok := resolveChanType(node.Type); ok {
+						sites = append(sites, chanSite{
+							loc:     pf.pos(node.Pos()),
+							name:    joinIdentNames(node.Names),
+							typeStr: formatNode(pf, ct),
+						})
+					}
+					return true
+				}
+				// No explicit type: inferred entirely from Values
+				// (`var work = make(chan request)`).
+				for i, val := range node.Values {
+					call, ok := val.(*ast.CallExpr)
+					if !ok {
+						continue
+					}
+					ct, ok := makeChanType(call)
+					if !ok {
+						continue
+					}
+					name := "<unnamed>"
+					if i < len(node.Names) {
+						name = node.Names[i].Name
+					}
 					sites = append(sites, chanSite{
 						loc:     pf.pos(node.Pos()),
-						name:    joinIdentNames(node.Names),
-						typeStr: formatNode(pf, node.Type),
+						name:    name,
+						typeStr: formatNode(pf, ct),
 					})
 				}
 			case *ast.AssignStmt:
@@ -863,6 +1100,67 @@ func bad() {
 	}
 	if sites[0].name != "work" || !strings.Contains(sites[0].typeStr, "request") {
 		t.Fatalf("unexpected site detail for the inferred channel assignment: %+v", sites[0])
+	}
+}
+
+// TestProfileArchitecture_DetectsInferredVarMakeChanAssignment is
+// TestProfileArchitecture_DetectsInferredVarMakeMapAssignment's
+// channel-typed counterpart: `var work = make(chan request)` is an
+// *ast.ValueSpec with Type == nil, missed by a ValueSpec case that only
+// checked node.Type.(*ast.ChanType).
+func TestProfileArchitecture_DetectsInferredVarMakeChanAssignment(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func bad() {
+	var work = make(chan request)
+	_ = work
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findChanTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findChanTypedSites to catch the inferred `var work = make(chan request)` declaration, found %d site(s): %+v", len(sites), sites)
+	}
+	if sites[0].name != "work" || !strings.Contains(sites[0].typeStr, "request") {
+		t.Fatalf("unexpected site detail for the inferred var channel declaration: %+v", sites[0])
+	}
+}
+
+// TestProfileArchitecture_DetectsNamedChanTypeAliasField is
+// TestProfileArchitecture_DetectsNamedMapTypeAliasField's channel-typed
+// counterpart: a struct field declared via a named channel-type alias.
+func TestProfileArchitecture_DetectsNamedChanTypeAliasField(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+type requestChan chan request
+
+type Server struct {
+	work requestChan
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findChanTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findChanTypedSites to catch the `work requestChan` named-alias field, found %d site(s): %+v", len(sites), sites)
+	}
+	if sites[0].name != "work" || !strings.Contains(sites[0].typeStr, "request") {
+		t.Fatalf("unexpected site detail for the named-alias channel field: %+v", sites[0])
 	}
 }
 
@@ -1037,6 +1335,50 @@ func selectorHasFieldRoot(sel *ast.SelectorExpr, fieldName string) bool {
 	return ok && inner.Sel.Name == fieldName
 }
 
+// fieldAliasIdents finds every plain local identifier that was assigned
+// (via `:=`/`=` or a `var` ValueSpec) directly from a bare
+// `<something>.fieldName` selector — e.g. `v := c.verifier` — across
+// files. Per the review finding this closes: selectorHasFieldRoot alone
+// only recognizes the *immediate* `c.verifier.Verify` shape, so a receiver
+// alias (`v := c.verifier; v.Verify(...)`) bypasses it entirely — `v.Verify`
+// has sel.X as a plain *ast.Ident, never a SelectorExpr, no matter how
+// selectorHasFieldRoot is written. Recording which identifiers were
+// assigned from the field lets verifyOrRolesSelectorSites recognize a
+// selector on any of them as equivalent to the direct form. This is a
+// file-wide, not scope-precise, heuristic — consistent with this whole
+// file's documented go/ast-only, naming-convention approach (see
+// selectorHasFieldRoot's own comment).
+func fieldAliasIdents(files []profileFile, fieldName string) map[string]bool {
+	aliases := map[string]bool{}
+	recordFrom := func(rhs ast.Expr, name string) {
+		if sel, ok := rhs.(*ast.SelectorExpr); ok && sel.Sel.Name == fieldName {
+			aliases[name] = true
+		}
+	}
+	for _, pf := range files {
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				for i, rhs := range node.Rhs {
+					if i < len(node.Lhs) {
+						if id, ok := node.Lhs[i].(*ast.Ident); ok {
+							recordFrom(rhs, id.Name)
+						}
+					}
+				}
+			case *ast.ValueSpec:
+				for i, val := range node.Values {
+					if i < len(node.Names) {
+						recordFrom(val, node.Names[i].Name)
+					}
+				}
+			}
+			return true
+		})
+	}
+	return aliases
+}
+
 // verifyOrRolesSelectorSites finds every *ast.SelectorExpr anywhere in
 // files matching selName/fieldName (see selectorHasFieldRoot), regardless
 // of whether that selector is immediately called. This is deliberately
@@ -1051,7 +1393,15 @@ func selectorHasFieldRoot(sel *ast.SelectorExpr, fieldName string) bool {
 // (assigning `c.verifier.Verify` anywhere, called or not) is what gets
 // counted, so a second path is caught the moment it's written, independent
 // of how many times or where the extracted value is later invoked.
+//
+// A later review finding showed this was still bypassable by a receiver
+// alias (`v := c.verifier; v.Verify(...)`, sel.X a plain *ast.Ident rather
+// than the SelectorExpr selectorHasFieldRoot requires) — fieldAliasIdents
+// closes that gap by recognizing a selector rooted at any identifier known
+// to have been assigned directly from `<expr>.fieldName`, in addition to
+// the direct `c.verifier.Verify` shape.
 func verifyOrRolesSelectorSites(files []profileFile, selName, fieldName string) []string {
+	aliases := fieldAliasIdents(files, fieldName)
 	var sites []string
 	for _, pf := range files {
 		ast.Inspect(pf.file, func(n ast.Node) bool {
@@ -1059,10 +1409,13 @@ func verifyOrRolesSelectorSites(files []profileFile, selName, fieldName string) 
 			if !ok || sel.Sel.Name != selName {
 				return true
 			}
-			if !selectorHasFieldRoot(sel, fieldName) {
+			if selectorHasFieldRoot(sel, fieldName) {
+				sites = append(sites, pf.pos(sel.Pos()))
 				return true
 			}
-			sites = append(sites, pf.pos(sel.Pos()))
+			if id, ok := sel.X.(*ast.Ident); ok && aliases[id.Name] {
+				sites = append(sites, pf.pos(sel.Pos()))
+			}
 			return true
 		})
 	}
@@ -1142,6 +1495,62 @@ func (o *other) sneak() {
 	sites := verifyOrRolesSelectorSites(withSneak, "Verify", "verifier")
 	if len(sites) != 2 {
 		t.Fatalf("expected the method-value-extraction site in sneaky.go to be counted alongside the legitimate bind.go call (2 total), found %d: %v", len(sites), sites)
+	}
+}
+
+// TestProfileArchitecture_DetectsReceiverAliasVerifyCall is a regression
+// test for the review finding that a receiver alias
+// (`v := c.verifier; v.Verify(...)`) bypassed both selectorHasFieldRoot
+// (v.Verify's sel.X is a plain *ast.Ident, never itself a SelectorExpr)
+// and the method-value-extraction check above (the extraction here is
+// `v := c.verifier`, a bare SelectorExpr whose Sel.Name is "verifier", not
+// "Verify" — a different shape from `verify := c.verifier.Verify`). A
+// second, illegitimate Verify call site introduced this way must still be
+// counted alongside the legitimate one.
+func TestProfileArchitecture_DetectsReceiverAliasVerifyCall(t *testing.T) {
+	const legit = `package synthetic
+
+type connection struct {
+	verifier interface {
+		Verify(x string)
+	}
+}
+
+func (c *connection) handleBind() {
+	c.verifier.Verify("x")
+}
+`
+	const sneaky = `package synthetic
+
+type other struct {
+	verifier interface {
+		Verify(y string)
+	}
+}
+
+func (o *other) sneak() {
+	v := o.verifier
+	v.Verify("y")
+}
+`
+	parseOne := func(name, src string) profileFile {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatalf("parse synthetic source %s: %v", name, err)
+		}
+		return profileFile{name: name, fset: fset, file: f}
+	}
+
+	legitOnly := []profileFile{parseOne("bind.go", legit)}
+	if sites := verifyOrRolesSelectorSites(legitOnly, "Verify", "verifier"); len(sites) != 1 {
+		t.Fatalf("expected exactly one Verify site with only the legitimate call present, found %d: %v", len(sites), sites)
+	}
+
+	withSneak := []profileFile{parseOne("bind.go", legit), parseOne("sneaky.go", sneaky)}
+	sites := verifyOrRolesSelectorSites(withSneak, "Verify", "verifier")
+	if len(sites) != 2 {
+		t.Fatalf("expected the receiver-alias call site in sneaky.go (v := o.verifier; v.Verify(...)) to be counted alongside the legitimate bind.go call (2 total), found %d: %v", len(sites), sites)
 	}
 }
 

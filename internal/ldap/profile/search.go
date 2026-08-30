@@ -159,13 +159,27 @@ func (c *connection) handleSearch(msgID int32, op cryptobyte.String, hasCritical
 	if !op.ReadASN1(&attrsSeq, asn1.SEQUENCE) {
 		return errMalformed
 	}
-	var attributes []string
-	for !attrsSeq.Empty() {
+	// Streamed, not materialized: only the count (capped at 2 — "more
+	// than one" needs no exact tally) and the first entry's bytes are
+	// ever retained. A second well-formed attribute already settles the
+	// exactly-one-cn authorization outcome below, so decoding stops
+	// there rather than walking every remaining attacker-controlled
+	// entry — a near-cap 64 KiB request otherwise builds tens of
+	// thousands of single-byte string headers before authentication or
+	// the exactly-one-cn rule ever runs (issue #33 §2.1's "avoid
+	// proportional duplicate copies of attacker-controlled message
+	// bodies").
+	var attrCount int
+	var firstAttribute string
+	for attrCount < 2 && !attrsSeq.Empty() {
 		var a []byte
 		if !attrsSeq.ReadASN1Bytes(&a, asn1.OCTET_STRING) {
 			return errMalformed
 		}
-		attributes = append(attributes, string(a))
+		attrCount++
+		if attrCount == 1 {
+			firstAttribute = string(a)
+		}
 	}
 
 	if !op.Empty() {
@@ -202,7 +216,7 @@ func (c *connection) handleSearch(msgID int32, op cryptobyte.String, hasCritical
 		return c.writeSearchResultDone(msgID, resultInsufficientAccessRights, diagInsufficientAccess)
 	}
 
-	if len(attributes) != 1 || !asciiEqualFold(attributes[0], cnAttributeType) {
+	if attrCount != 1 || !asciiEqualFold(firstAttribute, cnAttributeType) {
 		// Covers empty selection, "*", sole "1.1", multiple
 		// attributes, and any single attribute other than "cn" —
 		// every out-of-profile shape lands on this one reason.
@@ -331,24 +345,23 @@ func (c *connection) executeSearch(msgID int32, searchStart time.Time, sizeLimit
 
 emitLoop:
 	for _, role := range roles {
+		// timeLimit check point: before considering the next entry,
+		// unconditionally — matching legacy (internal/ldap/search.go),
+		// including on an iteration that will itself be skipped below.
+		// Checking sizeLimit first would let an empty-role skip or a
+		// RenderGroupDN failure silently step past an already-expired
+		// deadline, reporting sizeLimitExceeded (4) where legacy
+		// reports timeLimitExceeded (3) for the identical input.
+		if expired() {
+			resultCode = resultTimeLimitExceeded
+			break emitLoop
+		}
+
 		if role == "" {
 			// Empty roles are skipped entirely: not an eligible
 			// entry, so they consume no sizeLimit budget and are
 			// never subject to the per-entry checks below.
 			continue
-		}
-
-		if sizeLimit > 0 && emitted >= int(sizeLimit) {
-			// This is the (N+1)th eligible entry: emit exactly N,
-			// then report sizeLimitExceeded, without attempting
-			// this entry's timeLimit/preflight/write steps.
-			resultCode = resultSizeLimitExceeded
-			break emitLoop
-		}
-
-		if expired() {
-			resultCode = resultTimeLimitExceeded
-			break emitLoop
 		}
 
 		objectName, ok := RenderGroupDN(c.cfg.groupBaseText, c.cfg.rolePrefix, role)
@@ -359,6 +372,15 @@ emitLoop:
 			// a role that cannot be safely rendered.
 			continue
 		}
+
+		if sizeLimit > 0 && emitted >= int(sizeLimit) {
+			// This is the (N+1)th eligible entry: emit exactly N,
+			// then report sizeLimitExceeded, without attempting
+			// this entry's preflight/write steps.
+			resultCode = resultSizeLimitExceeded
+			break emitLoop
+		}
+
 		cnValue := c.cfg.rolePrefix + role
 
 		if _, fits := entryPDUSize(objectName, cnValue); !fits {

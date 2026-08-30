@@ -301,6 +301,54 @@ func TestHandleBind_SASLReturnsAuthMethodNotSupported(t *testing.T) {
 	}
 }
 
+// TestHandleBind_SASLPrecedesVersionCheckForNonV3 is a regression test for
+// the accepted "minor" review finding: bind.go decodes version first but
+// only ever *acts* on it inside the authChoiceSimple case (the `if version
+// != 3` check sits after the auth-tag switch's SASL case, which
+// unconditionally returns before that check is ever reached — see
+// bind.go). So a decodable SASL Bind at a non-3 version must still return
+// authMethodNotSupported (7), never protocolError (2): this is the
+// disputed cross-product pass 1's SASL/version rebuttal left untested —
+// every existing SASL test used version 3
+// (TestHandleBind_SASLReturnsAuthMethodNotSupported and
+// TestHandleBind_ClearBeforeValidate_SASL) and every non-3-version test
+// used authTagSimple (TestHandleBind_VersionOtherThan3ReturnsProtocolError),
+// so the precedence between the two was never exercised together.
+func TestHandleBind_SASLPrecedesVersionCheckForNonV3(t *testing.T) {
+	verifier := newFakeVerifier().withSuccess("alice-pw", newVerificationResult("alice", "https://idp.example.com/", "subj-alice", 9999))
+	resolver := newFakeResolver().withRoles("subj-alice", []string{markerLegitimateRole})
+	for _, version := range []int64{1, 2, 4} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			c, clientConn, cleanup := newBindTestConnection(t, verifier, resolver)
+			defer cleanup()
+
+			bindErr, _, env, wrote := doBind(t, c, clientConn, 1, bindOp(version, testAliceDN, authTagSASL, []byte("sasl-credentials-ignored")), false)
+			if bindErr != nil {
+				t.Fatalf("handleBind error = %v, want nil (7, not close)", bindErr)
+			}
+			if !wrote {
+				t.Fatal("SASL Bind wrote no response")
+			}
+			code, matchedDN, diag := readBindResultCode(t, env)
+			if code != int(resultAuthMethodNotSupported) {
+				t.Fatalf("version=%d: result = %d, want %d (authMethodNotSupported, not protocolError) — the SASL auth-tag switch must preempt the version check", version, code, resultAuthMethodNotSupported)
+			}
+			if matchedDN != "" {
+				t.Fatalf("matchedDN = %q, want empty", matchedDN)
+			}
+			if diag != "only simple authentication is supported" {
+				t.Fatalf("diagnostic = %q, want %q", diag, "only simple authentication is supported")
+			}
+			if c.authenticated {
+				t.Fatal("authenticated == true after a non-v3 SASL Bind, want false")
+			}
+		})
+	}
+	if verifier.callCount() != 0 {
+		t.Fatal("Verify called for a non-v3 SASL Bind")
+	}
+}
+
 func TestHandleBind_VersionOtherThan3ReturnsProtocolError(t *testing.T) {
 	verifier := newFakeVerifier().withSuccess("alice-pw", newVerificationResult("alice", "https://idp.example.com/", "subj-alice", 9999))
 	resolver := newFakeResolver()
