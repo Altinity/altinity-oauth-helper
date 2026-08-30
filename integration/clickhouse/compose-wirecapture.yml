@@ -65,6 +65,18 @@ services:
       LISTEN: :80
     networks:
       - auth-net
+    # Published exactly like compose.yml's own synthetic-idp block: without
+    # this, capture-ldap-wire.sh (issue #33 phase 1) cannot mint a token by
+    # reusing lib/oauth.sh's oauth_mint/idp_sign unmodified — those call the
+    # synthetic IdP's /sign endpoint via a plain HOST curl against
+    # 127.0.0.1:${PHASE3_IDP_PORT}, exactly as every other Compose-based
+    # fixture in this suite already does. Added by the capture-ldap-wire.sh
+    # sub-task (out of its own declared file scope, but required for the
+    # capture driver's very design — see that commit's message) after a
+    # real smoke run reproduced "curl: (7) Failed to connect to 127.0.0.1
+    # port 18080" with this port unpublished.
+    ports:
+      - "127.0.0.1:${PHASE3_IDP_PORT:-18080}:80"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1/healthz"]
       interval: 2s
