@@ -29,7 +29,4 @@ deliberately separate, mutable file — see plan-33p1.md §5.
 | `count-production-ldap-loc.sh` | Deterministic script deriving the production-reachable package set from `go list -deps ./cmd/ch-oauth-ldap` and counting physical lines (including comments/blanks/a final unterminated line) of repository-owned, non-test `.go` files under `internal/ldap`, `third_party/goldap`, `third_party/ldapserver`. |
 | `production-ldap-loc.tsv` | Committed output of the script above: per-file rows, per-root `TOTAL` rows, and a grand `ALL GRAND_TOTAL` row. |
 | `security-inventory-baseline.txt` | Snapshot of the `redaction-sites.tsv` rows for scopes `cmd/ch-oauth-ldap`, `internal/ldap`, `third_party/ldapserver`; sha256 of the redaction inventory implementation + manifest; the current fixed six-entry `scopeDirs` list; an explicit record that `third_party/goldap` is not an AST-enumerated scope; an explicit record that `integration/clickhouse/ha/session-probe` is credential-bearing integration tooling outside `scopeDirs` (a pre-existing gap, not claimed covered); and the pass result of the existing redaction inventory tests on this tree. |
-
-`clickhouse-matrix.tsv` (the historical ClickHouse build-matrix baseline,
-plan §4.5) is deliberately **not** in this directory — it is recorded by a
-separate sub-task.
+| `clickhouse-matrix.tsv` | The historical ClickHouse build-matrix baseline (plan §4.5): compact per-image rows (exact image, result, Docker image ID, RepoDigest where present) from a `run-all-builds.sh` run predating any Issue #33 change. Committed verbatim, not regenerated, for the same immutability reason as every other file above; only the verbose transcript is deliberately not committed. |

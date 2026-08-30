@@ -21,7 +21,7 @@ const (
 // using their existing in-package helper, while ModuleRoot here exists
 // for the two consumers outside internal/securitytest that need a
 // module-root-relative fixture path — internal/ldap's cryptobyte decision
-// test (internal_ldap/clickhouse_wire_cryptobyte_test.go) and the
+// test (internal/ldap/clickhouse_wire_cryptobyte_test.go) and the
 // integration/clickhouse/wirecapture recorder tool. Neither of those
 // packages should reach into internal/securitytest for this.
 func ModuleRoot() (string, error) {

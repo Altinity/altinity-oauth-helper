@@ -29,19 +29,19 @@
 # non-recorder service blocks, identical ClickHouse mounts/env contract,
 # and the recorder's deliberate healthcheck/tmpfs deltas from the base
 # ch-oauth-ldap block) are mechanically enforced by
-# integration/clickhouse/tests/cases/wirecapture-compose-parity.sh (not yet
-# added as of this file landing — see the issue #33 phase-1 plan §18).
+# integration/clickhouse/tests/cases/wirecapture-compose-parity.sh — see the
+# issue #33 phase-1 plan §18.
 #
 # Do not run this file directly with a bare `docker compose up`. Like
-# compose.yml/compose-ha.yml, it is meant to be owned by a capture script
-# (integration/clickhouse/capture-ldap-wire.sh, not yet added as of this
-# file landing) that generates PHASE3_CLUSTER_SECRET, sets
-# COMPOSE_PROJECT_NAME=ch-wirecap, and drives the health gate/teardown the
-# same way run.sh does for compose.yml. This sub-task deliberately does not
-# `compose up` this file — see the issue #33 phase-1 plan §16: the
-# `ch-wirecap*` project/network names are reserved so a concurrently running
-# normal (`ch-phase3`) or HA (`ch-phase5-ha`) fixture, or a stale prior
-# capture run, cannot collide with it.
+# compose.yml/compose-ha.yml, it is owned by a capture script
+# (integration/clickhouse/capture-ldap-wire.sh) that generates
+# PHASE3_CLUSTER_SECRET, sets COMPOSE_PROJECT_NAME=ch-wirecap, and drives the
+# health gate/teardown the same way run.sh does for compose.yml —
+# capture-ldap-wire.sh is the only caller that `compose up`s this file. See
+# the issue #33 phase-1 plan §16: the `ch-wirecap*` project/network names are
+# reserved so a concurrently running normal (`ch-phase3`) or HA
+# (`ch-phase5-ha`) fixture, or a stale prior capture run, cannot collide with
+# it.
 #
 # WIRECAP_MODE selects the recorder's forwarding behavior
 # (integration/clickhouse/wirecapture/main.go's `serve --mode` flag):
@@ -49,8 +49,8 @@
 #   stall-after-bind  — record the Bind then withhold forwarding until the
 #                        recorder's own stall deadline, to observe libldap's
 #                        client-side TIMELIMIT/NETWORK_TIMEOUT behavior
-# The caller (the future capture-ldap-wire.sh) must always set it explicitly;
-# there is no default here, matching PHASE3_CLUSTER_SECRET below.
+# The caller (capture-ldap-wire.sh) must always set it explicitly; there is
+# no default here, matching PHASE3_CLUSTER_SECRET below.
 
 services:
   synthetic-idp:

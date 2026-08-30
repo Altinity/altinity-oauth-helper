@@ -15,12 +15,18 @@ decision.
 
 Every provenance claim below (commit hashes, blob SHAs, OpenLDAP pins, cited
 source lines) was re-verified against the live `Altinity/ClickHouse`,
-`ClickHouse/openldap`, and `openldap/openldap` repositories while writing
-this document, in addition to the plan's own pre-verified "Confirmation"
-record. No committed fixture, no source citation, and no cited line
-contradicted the architecture this phase assumes (plan §1's stop condition
-was checked and did not fire), so the evidence and the decision below are
-recorded as final for Phase 1.
+`ClickHouse/openldap`, and `openldap/openldap` repositories by fetching the
+exact blobs at the pinned commits and re-checking every cited line number
+and function name against them, in addition to the plan's own pre-verified
+"Confirmation" record. That pass found and corrected ten line-number/
+function-name citations this document had wrong — one in §4, the rest in
+§7 and §8.3 — including one bullet that named the wrong OpenLDAP function
+entirely (§7's Unbind citation); see those sections for the corrected
+values. Commit hashes, blob SHAs, and OpenLDAP pins were all already
+correct and needed no change. No committed fixture and no source citation,
+corrected or otherwise, contradicted the architecture this phase assumes
+(plan §1's stop condition was checked and did not fire), so the evidence
+and the decision below are recorded as final for Phase 1.
 
 ## 1. Tracked-line authority
 
@@ -148,8 +154,11 @@ becomes a socket write. Each hop below is cited as
      destructor runs or the connection is otherwise torn down.
 
 Role-search parameters themselves are parsed by
-`parseLDAPRoleSearchParams` (`ExternalAuthenticators.cpp:259` in both
-commits) and threaded through `LDAPAccessStorage`'s own
+`parseLDAPRoleSearchParams` (`ExternalAuthenticators.cpp:259` in the 24.8
+commit, `:269` in the 25.8 commit — the two commits' `checkLDAPCredentials`/
+`parseLDAPServer` bodies differ in length above this function, shifting its
+line number, even though the function itself is otherwise equivalent) and
+threaded through `LDAPAccessStorage`'s own
 `role_search_params` member (`LDAPAccessStorage.cpp`, constructed around
 line 71–84 in both commits), which is what turns the fixture's single
 `<role_mapping>` block into the one `LDAPClient::RoleSearchParams` instance
@@ -172,10 +181,10 @@ before the Bind is issued (`LDAPClient.cpp:246`–`340`):
 | `LDAP_OPT_PROTOCOL_VERSION`   | line 246                  | Protocol selection        | Server-visible semantic input; fixes the connection to LDAPv3 (both tracked lines run version 3).|
 | `LDAP_OPT_RESTART`            | line 249                  | Client/socket behavior    | Source fact (auto-retry interrupted syscalls); not a BER request field.                          |
 | `LDAP_OPT_KEEPCONN`           | line 252 (`#ifdef LDAP_OPT_KEEPCONN`) | Client/socket behavior | Source fact; not a BER request field. Guarded by an `#ifdef`, present on both tracked OpenLDAP pins. |
-| `LDAP_OPT_TIMEOUT`            | line 260                  | Operation/network timeout | The overall per-operation timeout (40 s default) — distinct from `SearchRequest.timeLimit`.       |
-| `LDAP_OPT_NETWORK_TIMEOUT`    | line 269                  | Operation/network timeout | Connect/network-level timeout (30 s default) — distinct from both the above and `timeLimit`.      |
-| `LDAP_OPT_TIMELIMIT`          | line 275                  | Search defaults           | Handle-wide default Search time limit (20 s); superseded per-call (§6).                          |
-| `LDAP_OPT_SIZELIMIT`          | line 280                  | Search defaults           | Handle-wide default Search size limit (256); superseded per-call (§6).                           |
+| `LDAP_OPT_TIMEOUT`            | line 260 (`#ifdef LDAP_OPT_TIMEOUT`) | Operation/network timeout | The overall per-operation timeout (40 s default) — distinct from `SearchRequest.timeLimit`. Guarded by its own `#ifdef`, exactly like `LDAP_OPT_KEEPCONN`; present on both tracked OpenLDAP pins. |
+| `LDAP_OPT_NETWORK_TIMEOUT`    | line 269 (`#ifdef LDAP_OPT_NETWORK_TIMEOUT`) | Operation/network timeout | Connect/network-level timeout (30 s default) — distinct from both the above and `timeLimit`. Likewise its own `#ifdef`-guarded block, present on both tracked OpenLDAP pins. |
+| `LDAP_OPT_TIMELIMIT`          | line 275                  | Search defaults           | Handle-wide default Search time limit (20 s); superseded per-call (§6). Not `#ifdef`-guarded — set unconditionally. |
+| `LDAP_OPT_SIZELIMIT`          | line 280                  | Search defaults           | Handle-wide default Search size limit (256); superseded per-call (§6). Not `#ifdef`-guarded — set unconditionally. |
 | `LDAP_OPT_X_TLS_PROTOCOL_MIN`, `LDAP_OPT_X_TLS_REQUIRE_CERT`, `LDAP_OPT_X_TLS_CERTFILE`, `LDAP_OPT_X_TLS_KEYFILE`, `LDAP_OPT_X_TLS_CACERTFILE`, `LDAP_OPT_X_TLS_CACERTDIR`, `LDAP_OPT_X_TLS_CIPHER_SUITE`, `LDAP_OPT_X_TLS_NEWCTX` | lines 294–340 (each guarded by its own `params.enable_tls`/field-present check) | TLS configuration | Recorded for completeness of the source read. The fixture's `<enable_tls>no</enable_tls>` means none of these branches execute for the captured sessions, so no `LDAP_OPT_X_TLS_*` value is a BER field on the wire this document characterizes. |
 
 The non-TLS options above — the seven this document treats as the complete
@@ -214,17 +223,20 @@ fallback/default, or (6) only observable on the wire itself.
 Both tracked OpenLDAP pins were fetched and read directly for this section
 (`ClickHouse/openldap@5671b80e369df2caf5f34e02924316205a43c895` for 2.5.16,
 `openldap/openldap@22fe35c6b4098e3ad166469f9574c79832c42952` for 2.6.10).
-Every citation below was confirmed present, at the stated line, in **both**
-pins unless a pin is called out individually — the two pins' `libldap`
-directories implement the same architecture across this version gap, and
-no divergence was found that would matter to this document's request
-shapes.
+Every citation below is, after the line-number and function-name
+corrections noted at the top of this document, the stated function present
+at the stated line in the 2.6.10 pin, and — where the bullet says so
+explicitly — the same construction present in the 2.5.16 pin as well (the
+two pins' `libldap` directories implement the same architecture across this
+version gap, and no divergence was found that would matter to this
+document's request shapes); no bullet below claims an unverified line
+number for the 2.5.16 pin specifically.
 
 * **`build/version.var`** — the pin's own version stamp; `ol_minor=5
   ol_patch=16` (2.5.16 pin) and `ol_minor=6 ol_patch=10` (2.6.10 pin),
   matching §2.1 exactly.
 * **`libraries/libldap/open.c::ldap_create`** (line 119 in both pins) —
-  allocates the `LDAP` handle with `LDAP_CALLOC` (line 138), which
+  allocates the `LDAP` handle with `LDAP_CALLOC` (line 139), which
   zero-initializes the whole struct, including `ld_msgid`; then sets
   `ld->ld_lberoptions = LBER_USE_DER` at **line 221 in both pins**. This is
   the single line that establishes DER (not just BER) encoding discipline
@@ -244,17 +256,20 @@ shapes.
   calls `LDAP_NEXT_MSGID` (line 80), then for `LDAP_SASL_SIMPLE`
   (ClickHouse's only configured mechanism) builds the PDU with
   `ber_printf(ber, "{it{istON}", *msgidp, LDAP_REQ_BIND, ld->ld_version,
-  dn, LDAP_AUTH_SIMPLE, cred)` (lines 83–89) — i.e. `LDAPMessage ::=
+  dn, LDAP_AUTH_SIMPLE, cred)` (lines 83–86) — i.e. `LDAPMessage ::=
   SEQUENCE { messageID, [APPLICATION 0] SEQUENCE { version INTEGER, name
   OCTET STRING, [0] simple OCTET STRING } }`, exactly RFC 4511's
   `BindRequest`/`AuthenticationChoice::simple` shape.
 * **Search-request construction** —
   `libraries/libldap/search.c::ldap_build_search_req` (line 249, 2.6.10
   pin; same construction present at 2.5.16): calls `LDAP_NEXT_MSGID`
-  (line 298), then builds the PDU with `ber_printf(ber, "{it{seeiib",
+  (line 305), then builds the PDU with `ber_printf(ber, "{it{seeiib",
   *idp, LDAP_REQ_SEARCH, base, scope, deref, sizelimit, timelimit,
-  attrsonly)` (lines 315–330) followed by the filter and attribute-list
-  encoding later in the same function — i.e. `SEQUENCE { messageID,
+  attrsonly)` (lines 324–329, the non-UDP branch — a separate
+  `LDAP_CONNECTIONLESS`-only branch immediately above it builds the same
+  fields with an extra `dn` argument and is inapplicable to this fixture's
+  plain-TCP LDAP) followed by the filter and attribute-list encoding later
+  in the same function — i.e. `SEQUENCE { messageID,
   [APPLICATION 3] SEQUENCE { baseObject OCTET STRING, scope ENUMERATED,
   derefAliases ENUMERATED, sizeLimit INTEGER, timeLimit INTEGER, typesOnly
   BOOLEAN, filter Filter, attributes SEQUENCE OF AttributeDescription } }`.
@@ -271,24 +286,32 @@ shapes.
   the connection outright.
 * **Abandon-request construction** —
   `libraries/libldap/abandon.c` (2.6.10 pin: `ldap_abandon` at line 99,
-  the internal `do_abandon` from line 123): calls `LDAP_NEXT_MSGID` (line
+  the internal `do_abandon` from line 121): calls `LDAP_NEXT_MSGID` (line
   207) to mint the AbandonRequest **its own new MessageID**, then builds
-  `ber_printf(ber, "{iti", id, LDAP_REQ_ABANDON, msgid)` (lines 221–231) —
+  `ber_printf(ber, "{iti", id, LDAP_REQ_ABANDON, msgid)` (lines 229–231,
+  the non-UDP branch — a separate `LDAP_CONNECTIONLESS`-only branch
+  immediately above it, format string `"{isti"`, is inapplicable here) —
   i.e. `SEQUENCE { messageID [own, freshly allocated], [APPLICATION 16]
   INTEGER [the target request's MessageID, implicit-tagged, not
   re-wrapped] }`. The AbandonRequest's own MessageID and the MessageID it
   targets are therefore always two different values by construction — this
   document's fixtures reflect this directly (see §9).
 * **Unbind construction** —
-  `libraries/libldap/unbind.c::ldap_unbind_ext` (2.6.10 pin, lines 290–294;
-  same shape at 2.5.16): calls `LDAP_NEXT_MSGID` (line 290), then
-  `ber_printf(ber, "{itn", id, LDAP_REQ_UNBIND)` — i.e. `SEQUENCE {
+  `libraries/libldap/unbind.c::ldap_send_unbind` (2.6.10 pin, declared at
+  line 270; same shape at 2.5.16) is where the UnbindRequest PDU is
+  actually built — not `ldap_unbind_ext` (line 38 in both pins), which only
+  runs client-control checks and calls `ldap_ld_free` (line 74), which in
+  turn calls `ldap_free_connection` (`libraries/libldap/request.c:733`,
+  2.6.10 pin) with its `unbind` argument set, and that is what actually
+  invokes `ldap_send_unbind` (`request.c:792`). `ldap_send_unbind` calls
+  `LDAP_NEXT_MSGID` (line 290), then `ber_printf(ber, "{itn", id,
+  LDAP_REQ_UNBIND)` (lines 293–294) — i.e. `SEQUENCE {
   messageID, [APPLICATION 2] NULL }`, RFC 4511's empty `UnbindRequest`.
   Like Abandon, Unbind gets its own freshly allocated MessageID; it is not
   sent with a reused or zero MessageID.
 * **DER INTEGER encoding** —
   `libraries/liblber/encode.c::ber_put_int_or_enum` (2.6.10 pin, line
-  169): encodes the two's-complement content bytes one at a time from the
+  170): encodes the two's-complement content bytes one at a time from the
   low end, stopping as soon as the accumulated value's top bit is clear
   (`unum < 0x80`) — i.e. the shortest content-byte sequence that keeps the
   value's sign correct, which is exactly DER's minimal-length INTEGER
@@ -334,7 +357,7 @@ filter-safe one specifically to filter placeholders:
   once, on the raw HTTP username, to produce `final_user_name`
   (`LDAPClient.cpp:347`), which then feeds the Bind DN template's
   `{user_name}` placeholder (`LDAPClient.cpp:348`) via a plain
-  string-replace helper (`replacePlaceholders`, `LDAPClient.cpp:146`).
+  string-replace helper (`replacePlaceholders`, `LDAPClient.cpp:149`).
 * **`escapeForFilter`** (`LDAPClient.cpp:116`): RFC 4515 filter-escapes
   `*`, `(`, `)`, `\`, and NUL as `\2A`, `\28`, `\29`, `\5C`, `\00`
   respectively. Used when building the Search filter's own placeholders
@@ -462,13 +485,25 @@ between the real ClickHouse node and the real `ch-oauth-ldap` helper,
 framing and recording every LDAP PDU it forwards to a container-private
 tmpfs. The one real credential involved — a JWT minted by the synthetic
 IdP for a fixed, non-secret test user — is transferred into the sanitizer
-by stdin only (no flag, no environment variable; `readCredentialFromStdin`
-enforces this is the only path), and the sanitizer finds that exact byte
-string within the raw Bind PDU and replaces it in place with same-length
-ASCII `x` filler before anything leaves the container. `placeholder_length`
-in each committed `session.json` records that filler's length so a fresh
-capture can be checked for length-parity with the committed one without
-either capture ever containing a live credential. Every export path
+by stdin only (no flag, no environment variable); `readCredentialFromStdin`
+implements that single path, and a dedicated test
+(`TestSanitize_CredentialTransferIsStdinOnly`, a source-level string grep,
+not an AST-level check) is what actually enforces no other path exists.
+The sanitizer finds that exact byte string within the raw Bind PDU and
+replaces it in place with same-length ASCII `x` filler before anything
+leaves the container. `placeholder_length` in each committed `session.json`
+records that filler's length so a fresh capture can be checked for
+length-parity with the committed one without either capture ever
+containing a live credential. Alongside the sanitized PDUs, every committed
+`session.json` also carries `token_claim_recipe` — the fixed, non-secret
+description of how that credential was minted
+(`internal/wirefixture.FixedTokenClaimRecipe`, passed to `sanitize
+--token-claim-recipe` since it is a description, never the credential
+itself) — and each PDU's
+`expected_semantics`, populated from one fixed per-operation table
+(`internal/wirefixture.ExpectedSemanticsForOperation`) rather than left
+blank; both are part of the same stable-comparison projection as the raw
+PDU bytes (plan §28's stable session/PDU metadata). Every export path
 (generate-mode promotion and verify-mode comparison alike) additionally
 runs this repository's existing exact-token leak scanner
 (`integration/clickhouse/lib/leakscan.sh`) over the run's transcript,
@@ -494,11 +529,15 @@ Search filter's supported context tags parse recursively; and Abandon's
 `[APPLICATION 16]`-implicit-tagged target integer — which cryptobyte's own
 tag-fixed high-level readers cannot address directly — is validated by a
 small hand-written first-party helper rather than by inventing a second
-general parser. The same test then runs twelve bounded, fixture-derived
-negative mutations (indefinite length, non-minimal long-form length,
-truncation, negative/non-minimal INTEGER, malformed ENUMERATED/BOOLEAN,
-wrong tags, trailing data) and confirms every one is rejected rather than
-silently misparsed.
+general parser. The same test then runs twelve bounded negative mutations
+(indefinite length, non-minimal long-form length, truncation,
+negative/non-minimal INTEGER, malformed ENUMERATED/BOOLEAN, wrong tags,
+trailing data) and confirms every one is rejected rather than silently
+misparsed. Eleven of the twelve mutate a single byte within a real,
+committed fixture used as a template; the twelfth
+("redundant-integer-padding") is a fully hand-built byte sequence, not
+derived from any committed fixture, because no committed template happens
+to exercise that exact non-minimal-INTEGER encoding shape.
 
 Per the plan's decision rule: the choice is `cryptobyte` if and only if
 every valid, supported fixture is safely consumable this way, and rejected

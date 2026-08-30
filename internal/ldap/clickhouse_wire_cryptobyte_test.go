@@ -481,9 +481,10 @@ func TestClickHouseWireCryptobyteDecision(t *testing.T) {
 		verdict = "local-ber-cursor"
 	}
 
-	// This step is expected to fail until a later sub-task authors
-	// docs/clickhouse-ldap-wire-profile.md with the matching marker (plan
-	// §33/§34) — see checkDecisionMarkerAgreement's diagnostic.
+	// docs/clickhouse-ldap-wire-profile.md (plan §33/§34) carries the
+	// matching marker; checkDecisionMarkerAgreement's diagnostic explains
+	// what to do if a future fixture change ever flips this test's
+	// computed verdict out of agreement with it.
 	t.Run("decision-marker-agreement", func(t *testing.T) {
 		checkDecisionMarkerAgreement(t, moduleRoot, verdict)
 	})
@@ -532,7 +533,13 @@ func checkDecisionMarkerAgreement(t *testing.T, moduleRoot, verdict string) {
 }
 
 // testNegativeMutations runs the plan §32 bounded invalid-form mutation set
-// against real fixture-derived templates and asserts every one is rejected.
+// and asserts every one is rejected. Most mutations are built by mutating a
+// byte within a real fixture-derived template (bindTemplate/searchTemplate/
+// unbindTemplate, taken verbatim from the committed corpus); the
+// "redundant-integer-padding" case is the one exception — it is a fully
+// hand-built byte sequence (a minimal SEQUENCE{INTEGER,UnbindRequest} with a
+// padded MessageID), not derived from any committed fixture, because no
+// committed template happens to exercise that exact encoding shape.
 // Malformed-input rejection here never affects the cryptobyte/
 // local-ber-cursor verdict computed in the caller (plan §32's "Decision") —
 // only a *valid* fixture's characterization failure does.
