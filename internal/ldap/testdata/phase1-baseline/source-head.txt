@@ -1,0 +1,17 @@
+Phase-1 baseline source-tree identity
+======================================
+
+This snapshot was recorded on the unmodified pre-Phase-1 tree, before any
+Phase-1 work (this directory's own files included) was committed.
+
+HEAD sha (baseline commit):
+  e9c7c3c22f9f50c2a285f523e50ca69f68519230
+
+origin/main sha at time of recording:
+  e9c7c3c22f9f50c2a285f523e50ca69f68519230
+
+Confirmation: HEAD == origin/main == merge-base(HEAD, origin/main).
+`git log origin/main..HEAD` was empty and the working tree was clean
+(except an untracked .DS_Store) immediately before this baseline was
+recorded, i.e. this is the byte-identical origin/main tree for Issue #33
+Phase 1, commit e9c7c3c ("Merge pull request #34 from Altinity/ci/pr-gate").
