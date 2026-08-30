@@ -1,0 +1,210 @@
+# integration/clickhouse/compose-wirecapture.yml
+#
+# Issue #33 phase-1 capture fixture. Five services, two Docker networks,
+# no published host ports. This topology mirrors compose.yml's phase-3
+# fixture but interposes a passive recording MITM (`ldap-wire-recorder`,
+# running under the CANONICAL `ch-oauth-ldap` service name/hostname so
+# ClickHouse's LDAP config is byte-identical to the real fixture) between
+# ClickHouse and the real `ch-oauth-ldap` helper binary, which this file
+# runs as a separate service named `ldap-helper-upstream`:
+#
+#   auth-net:    synthetic-idp, ch-oauth-ldap (recorder), ldap-helper-upstream,
+#                clickhouse-origin
+#   cluster-net: clickhouse-origin, clickhouse-remote
+#
+#       clickhouse-origin --[LDAP simple-bind, JWT-as-password]--> ch-oauth-ldap (recorder)
+#                                                                        |
+#                                                                        | forwards every PDU verbatim
+#                                                                        v
+#                                                                 ldap-helper-upstream (real helper)
+#                                                                        |
+#                                                                        v
+#                                                                 synthetic-idp (JWKS)
+#
+# The recorder never terminates or originates LDAP itself; it is a
+# transparent proxy that also writes sanitized copies of the wire bytes it
+# observes to a private, non-host-mounted tmpfs (plan §14) — see
+# integration/clickhouse/wirecapture/recorder.go. Comparisons between this
+# file and the base integration/clickhouse/compose.yml (identical
+# non-recorder service blocks, identical ClickHouse mounts/env contract,
+# and the recorder's deliberate healthcheck/tmpfs deltas from the base
+# ch-oauth-ldap block) are mechanically enforced by
+# integration/clickhouse/tests/cases/wirecapture-compose-parity.sh (not yet
+# added as of this file landing — see the issue #33 phase-1 plan §18).
+#
+# Do not run this file directly with a bare `docker compose up`. Like
+# compose.yml/compose-ha.yml, it is meant to be owned by a capture script
+# (integration/clickhouse/capture-ldap-wire.sh, not yet added as of this
+# file landing) that generates PHASE3_CLUSTER_SECRET, sets
+# COMPOSE_PROJECT_NAME=ch-wirecap, and drives the health gate/teardown the
+# same way run.sh does for compose.yml. This sub-task deliberately does not
+# `compose up` this file — see the issue #33 phase-1 plan §16: the
+# `ch-wirecap*` project/network names are reserved so a concurrently running
+# normal (`ch-phase3`) or HA (`ch-phase5-ha`) fixture, or a stale prior
+# capture run, cannot collide with it.
+#
+# WIRECAP_MODE selects the recorder's forwarding behavior
+# (integration/clickhouse/wirecapture/main.go's `serve --mode` flag):
+#   pass              — forward every PDU immediately, record, exit 0 on N==1
+#   stall-after-bind  — record the Bind then withhold forwarding until the
+#                        recorder's own stall deadline, to observe libldap's
+#                        client-side TIMELIMIT/NETWORK_TIMEOUT behavior
+# The caller (the future capture-ldap-wire.sh) must always set it explicitly;
+# there is no default here, matching PHASE3_CLUSTER_SECRET below.
+
+services:
+  synthetic-idp:
+    build:
+      context: ../..
+      dockerfile: integration/clickhouse/Dockerfile
+    image: altinity-oauth-helper-phase3-helper:local
+    command: ["/bin/synthetic-idp"]
+    environment:
+      ISSUER: http://synthetic-idp/
+      AUDIENCE: clickhouse
+      LISTEN: :80
+    networks:
+      - auth-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  # The passive recording MITM. Deliberately keeps the CANONICAL
+  # `ch-oauth-ldap` service name/hostname so the ClickHouse LDAP config
+  # mounted below (identical to compose.yml's) resolves `ch-oauth-ldap`
+  # without any edit — the real helper moves to ldap-helper-upstream
+  # instead (see below).
+  ch-oauth-ldap:
+    build:
+      context: ../..
+      dockerfile: integration/clickhouse/Dockerfile
+    image: altinity-oauth-helper-phase3-helper:local
+    command:
+      [
+        "/bin/ldap-wire-recorder",
+        "serve",
+        "--mode",
+        "${WIRECAP_MODE:?WIRECAP_MODE must be set to pass or stall-after-bind by the capture script (never invoke this compose file directly)}",
+        "--upstream",
+        "ldap-helper-upstream:389",
+      ]
+    networks:
+      - auth-net
+    depends_on:
+      synthetic-idp:
+        condition: service_healthy
+      ldap-helper-upstream:
+        condition: service_healthy
+    # Recorder-private raw evidence tmpfs (plan §14, Amendment 2). Long
+    # `volumes:` form is required, not the short `tmpfs:` list form — only
+    # the long form carries a `mode` option, and this exact syntax is what
+    # wirecapture-compose-parity.sh (plan §18) mechanically checks against
+    # this file and against run.sh's generated sandbox-fallback template.
+    # No host bind mount for raw data anywhere in this file, and nothing in
+    # this fixture ever `docker cp`s out of it — only the sanitized staging
+    # tree under the same tmpfs is read by capture-ldap-wire.sh, over
+    # `docker compose exec`/`cp` from that sanitized subtree, never the
+    # `raw/` subtree.
+    volumes:
+      - type: tmpfs
+        target: /run/ldap-wirecapture
+        tmpfs:
+          mode: 0700
+    # Amendment 1: the recorder cannot reuse the base ch-oauth-ldap
+    # healthcheck (`nc -z 127.0.0.1 389`, compose.yml:72) — that probe is a
+    # real accepted TCP connection, and the recorder's own N==1 captured-
+    # session invariant (plan §8.4/§21) would then count the healthcheck's
+    # own repeated connections as captured sessions and corrupt the
+    # fixture. Instead the recorder writes a readiness FILE under its
+    # private tmpfs only after its LDAP listener is already accepting
+    # (integration/clickhouse/wirecapture/recorder.go's ReadyFilePath,
+    # defaulted to exactly this path by `serve`'s --ready-file flag), and
+    # this healthcheck tests only for that file's existence — zero LDAP
+    # PDUs, zero accepted connections, so it can never itself become a
+    # spurious captured session.
+    healthcheck:
+      test: ["CMD", "test", "-f", "/run/ldap-wirecapture/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  # The real ch-oauth-ldap helper binary, unchanged from compose.yml's
+  # `ch-oauth-ldap` block apart from its service name — the recorder above
+  # forwards every PDU to it verbatim at ldap-helper-upstream:389.
+  ldap-helper-upstream:
+    build:
+      context: ../..
+      dockerfile: integration/clickhouse/Dockerfile
+    image: altinity-oauth-helper-phase3-helper:local
+    command: ["/bin/ch-oauth-ldap", "--config", "/etc/ch-oauth-ldap/config.yaml"]
+    volumes:
+      - ./helper/config.yaml:/etc/ch-oauth-ldap/config.yaml:ro
+    networks:
+      - auth-net
+    depends_on:
+      synthetic-idp:
+        condition: service_healthy
+    healthcheck:
+      # Identical to compose.yml's `ch-oauth-ldap` healthcheck (same real
+      # binary, same "TCP accepts, not full auth" scope note applies) —
+      # this is the fixture's only LDAP-accepting TCP probe, and it never
+      # reaches the recorder, so it cannot perturb the recorder's N==1
+      # invariant.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "389"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  clickhouse-origin:
+    image: ${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}
+    volumes:
+      - ./clickhouse/common/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/common/users.d:/etc/clickhouse-server/users.d:ro
+    environment:
+      PHASE3_CLUSTER_SECRET: ${PHASE3_CLUSTER_SECRET:?PHASE3_CLUSTER_SECRET must be set by capture-ldap-wire.sh (never invoke this compose file directly)}
+    networks:
+      - auth-net
+      - cluster-net
+    ports:
+      - "127.0.0.1:${PHASE3_CH_HTTP_PORT:-18123}:8123"
+    depends_on:
+      ch-oauth-ldap:
+        condition: service_healthy
+      synthetic-idp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  clickhouse-remote:
+    image: ${PHASE3_CH_IMAGE:-altinity/clickhouse-server:24.8.11.51285.altinitystable}
+    volumes:
+      - ./clickhouse/common/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/common/users.d:/etc/clickhouse-server/users.d:ro
+    environment:
+      PHASE3_CLUSTER_SECRET: ${PHASE3_CLUSTER_SECRET:?PHASE3_CLUSTER_SECRET must be set by capture-ldap-wire.sh (never invoke this compose file directly)}
+    # Deliberately no ports:, and deliberately not on auth-net — same
+    # rationale as compose.yml's clickhouse-remote (it must have no route
+    # to the IdP or LDAP recorder/helper).
+    networks:
+      - cluster-net
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+networks:
+  # Literal, run-scoped names distinct from both compose.yml's ch-phase3-*
+  # and compose-ha.yml's ch-phase5-ha-* networks (plan §16's three-fixture
+  # mutual-exclusion table), so a capture run can never collide with, and
+  # never gets torn down by, either of those other fixtures' preflights —
+  # and vice versa.
+  auth-net:
+    name: ch-wirecap-auth-net
+  cluster-net:
+    name: ch-wirecap-cluster-net
