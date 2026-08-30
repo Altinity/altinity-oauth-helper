@@ -147,11 +147,11 @@ func TestCompare_TokenClaimRecipeAndExpectedSemanticsAreStable(t *testing.T) {
 		freshDir := filepath.Join(dir, "fresh")
 
 		cSession, cPDUs := baseSession(20, 0)
-		cSession.TokenClaimRecipe = "sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
+		cSession.TokenClaimRecipe = "sub=alice@example.com; roles=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
 		writeFixtureDir(t, committedDir, cSession, cPDUs)
 
 		fSession, fPDUs := baseSession(20, 0)
-		fSession.TokenClaimRecipe = "sub=someone-else@example.com; groups=idp-readers; fixed-digit iat/exp; no jti"
+		fSession.TokenClaimRecipe = "sub=someone-else@example.com; roles=idp-readers; fixed-digit iat/exp; no jti"
 		writeFixtureDir(t, freshDir, fSession, fPDUs)
 
 		result, err := Compare(CompareInput{CommittedDir: committedDir, FreshDir: freshDir})

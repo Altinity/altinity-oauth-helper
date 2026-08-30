@@ -135,18 +135,21 @@ const (
 // FixedTokenClaimRecipe is the committed, human-readable description of the
 // token claims used to mint every phase-1 captured-redacted fixture's
 // credential (plan section 19/26): a fixed HTTP principal
-// (alice@example.com), a fixed role list (idp-readers, idp-unprovisioned),
-// and the synthetic IdP's fixed claim shape (fixed-digit iat/exp, no random
-// jti — cmd/synthetic-idp/main.go's /sign endpoint). It is never the
-// credential itself, only a description of how it was minted, so it is
-// safe to pass as a plain CLI flag value rather than over stdin.
+// (alice@example.com), a fixed role list (idp-readers, idp-unprovisioned)
+// carried under the JWT's "roles" claim (cmd/synthetic-idp/main.go:176,
+// `claims["roles"] = roles`, populated from repeated `role=` query
+// parameters — never a claim named "groups"), and the synthetic IdP's fixed
+// claim shape (fixed-digit iat/exp, no random jti — cmd/synthetic-idp/main.go's
+// /sign endpoint). It is never the credential itself, only a description of
+// how it was minted, so it is safe to pass as a plain CLI flag value rather
+// than over stdin.
 //
 // integration/clickhouse/capture-ldap-wire.sh passes this exact string to
 // `ldap-wire-recorder sanitize --token-claim-recipe` (matching this
 // constant's value verbatim, since the two cannot share a literal across
 // the Go/shell boundary), and every committed captured-redacted session's
 // token_claim_recipe field equals it.
-const FixedTokenClaimRecipe = "sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
+const FixedTokenClaimRecipe = "sub=alice@example.com; roles=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
 
 // expectedSemanticsByOperation is the single fixed table mapping a PDU's
 // Operation to its committed, short human-readable expected_semantics text

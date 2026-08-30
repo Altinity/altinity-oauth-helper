@@ -44,7 +44,7 @@ func sampleSession() Session {
 		Mode:              "success",
 		ConnectionCount:   1,
 		SQL:               "SELECT currentUser()",
-		TokenClaimRecipe:  "sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti",
+		TokenClaimRecipe:  "sub=alice@example.com; roles=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti",
 		PlaceholderLength: 512,
 		PDUs: []PDU{
 			{

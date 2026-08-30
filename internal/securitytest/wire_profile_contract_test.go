@@ -952,6 +952,63 @@ func TestWireProfileContract_FixtureInventory(t *testing.T) {
 	}
 }
 
+// wireProfileRoleClaimVarRE finds the synthetic IdP's local variable that
+// holds the repeated-`role=`-query-parameter role list (cmd/synthetic-idp
+// main.go's `roles := q["role"]`) — whatever that variable is actually
+// named, so a rename doesn't silently defeat the claim-key check below.
+var wireProfileRoleClaimVarRE = regexp.MustCompile(`(\w+)\s*:=\s*q\["role"\]`)
+
+// wireProfileClaimAssignRE, built per-role-variable-name below, finds the
+// map-index assignment that stamps that role list into the minted JWT's
+// claim set (`claims["roles"] = roles`) and captures the literal claim key
+// used — whatever it actually is.
+func wireProfileClaimAssignRE(roleVar string) *regexp.Regexp {
+	return regexp.MustCompile(`claims\["(\w+)"\]\s*=\s*` + regexp.QuoteMeta(roleVar) + `\b`)
+}
+
+// TestWireProfileContract_TokenClaimRecipeMatchesSyntheticIdP independently
+// verifies wirefixture.FixedTokenClaimRecipe names the actual JWT claim key
+// the synthetic IdP mints its role list under, by reading and pattern-
+// matching cmd/synthetic-idp/main.go's own source — not by comparing the
+// constant against itself. TestWireProfileContract_FixtureInventory above
+// only checks that every committed session.json equals
+// wirefixture.FixedTokenClaimRecipe verbatim; that alone can never catch
+// the constant itself naming the wrong claim (e.g. "groups" when the IdP
+// actually emits "roles"), because both sides of that comparison trace
+// back to the same Go literal. This test instead derives the expected
+// claim key from the synthetic IdP's implementation directly, so a future
+// rename of that claim key (without updating FixedTokenClaimRecipe to
+// match) fails here even though FixtureInventory's self-comparison would
+// stay green.
+func TestWireProfileContract_TokenClaimRecipeMatchesSyntheticIdP(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: moduleRoot: %v", err)
+	}
+	path := filepath.Join(root, "cmd", "synthetic-idp", "main.go")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("wire_profile_contract: reading %s: %v", path, err)
+	}
+
+	roleVarMatch := wireProfileRoleClaimVarRE.FindSubmatch(src)
+	if roleVarMatch == nil {
+		t.Fatalf("wire_profile_contract: %s: could not find `<var> := q[\"role\"]` — the synthetic IdP's role-claim wiring changed shape; update this test's pattern alongside it", path)
+	}
+	roleVar := string(roleVarMatch[1])
+
+	claimMatch := wireProfileClaimAssignRE(roleVar).FindSubmatch(src)
+	if claimMatch == nil {
+		t.Fatalf(`wire_profile_contract: %s: could not find claims["..."] = %s — the synthetic IdP's role-claim key assignment changed shape; update this test's pattern alongside it`, path, roleVar)
+	}
+	actualClaimKey := string(claimMatch[1])
+
+	wantSubstr := actualClaimKey + "="
+	if !strings.Contains(wirefixture.FixedTokenClaimRecipe, wantSubstr) {
+		t.Errorf("wire_profile_contract: synthetic IdP (%s) mints its role list under JWT claim %q, but wirefixture.FixedTokenClaimRecipe = %q does not contain %q — fixture provenance names the wrong claim", path, actualClaimKey, wirefixture.FixedTokenClaimRecipe, wantSubstr)
+	}
+}
+
 // ---------------------------------------------------------------------
 // 30.5 / §11 — .gitattributes binary rule
 // ---------------------------------------------------------------------

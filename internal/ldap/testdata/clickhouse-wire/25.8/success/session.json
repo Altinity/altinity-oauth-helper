@@ -8,7 +8,7 @@
   "mode": "success",
   "connection_count": 1,
   "sql": "SELECT currentUser()",
-  "token_claim_recipe": "sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti",
+  "token_claim_recipe": "sub=alice@example.com; roles=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti",
   "placeholder_length": 690,
   "pdus": [
     {

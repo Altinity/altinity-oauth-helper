@@ -185,7 +185,20 @@ before the Bind is issued (`LDAPClient.cpp:246`–`340`):
 | `LDAP_OPT_NETWORK_TIMEOUT`    | line 269 (`#ifdef LDAP_OPT_NETWORK_TIMEOUT`) | Operation/network timeout | Connect/network-level timeout (30 s default) — distinct from both the above and `timeLimit`. Likewise its own `#ifdef`-guarded block, present on both tracked OpenLDAP pins. |
 | `LDAP_OPT_TIMELIMIT`          | line 275                  | Search defaults           | Handle-wide default Search time limit (20 s); superseded per-call (§6). Not `#ifdef`-guarded — set unconditionally. |
 | `LDAP_OPT_SIZELIMIT`          | line 280                  | Search defaults           | Handle-wide default Search size limit (256); superseded per-call (§6). Not `#ifdef`-guarded — set unconditionally. |
-| `LDAP_OPT_X_TLS_PROTOCOL_MIN`, `LDAP_OPT_X_TLS_REQUIRE_CERT`, `LDAP_OPT_X_TLS_CERTFILE`, `LDAP_OPT_X_TLS_KEYFILE`, `LDAP_OPT_X_TLS_CACERTFILE`, `LDAP_OPT_X_TLS_CACERTDIR`, `LDAP_OPT_X_TLS_CIPHER_SUITE`, `LDAP_OPT_X_TLS_NEWCTX` | lines 294–340 (each guarded by its own `params.enable_tls`/field-present check) | TLS configuration | Recorded for completeness of the source read. The fixture's `<enable_tls>no</enable_tls>` means none of these branches execute for the captured sessions, so no `LDAP_OPT_X_TLS_*` value is a BER field on the wire this document characterizes. |
+| `LDAP_OPT_X_TLS_PROTOCOL_MIN` (line 294), `LDAP_OPT_X_TLS_REQUIRE_CERT` (line 308), `LDAP_OPT_X_TLS_NEWCTX` (line 340) | lines 283–296, 298–309, 337–341 | TLS configuration | Each guarded **only** by its own compile-time `#ifdef` (does the macro exist on this OpenLDAP build) — there is no `params.enable_tls` check and no field-present check on any of these three. They run unconditionally whenever compiled with TLS support, `<enable_tls>no</enable_tls>` notwithstanding. |
+| `LDAP_OPT_X_TLS_CERTFILE`, `LDAP_OPT_X_TLS_KEYFILE`, `LDAP_OPT_X_TLS_CACERTFILE`, `LDAP_OPT_X_TLS_CACERTDIR`, `LDAP_OPT_X_TLS_CIPHER_SUITE` | lines 312–335 | TLS configuration | Each guarded by its own `#ifdef` **and** a field-emptiness check (`if (!params.tls_*.empty())`) — not by `params.enable_tls`. In this fixture's config all five fields are empty, so these five specifically do not fire; the three above still do. |
+
+Recorded for completeness of the source read. **None of these eight options
+gate on `params.enable_tls`** — the fixture's `<enable_tls>no</enable_tls>`
+only controls the later, separately guarded `ldap_start_tls_s` call (line
+344: `if (params.enable_tls == ...::YES_STARTTLS) ldap_start_tls_s(...)`),
+which is what actually starts TLS on the wire. So while three of these
+eight `ldap_set_option` calls (`PROTOCOL_MIN`, `REQUIRE_CERT`, `NEWCTX`) do
+execute for the captured sessions, none of them causes any TLS wire traffic
+by itself — they only configure OpenLDAP's TLS context object for a
+`ldap_start_tls_s`/`ldaps://` call that this fixture's `enable_tls=no`
+config never makes, so still no `LDAP_OPT_X_TLS_*` value or TLS byte
+reaches the wire this document characterizes.
 
 The non-TLS options above — the seven this document treats as the complete
 non-TLS inventory — are exactly:
@@ -214,6 +227,7 @@ fallback/default, or (6) only observable on the wire itself.
 | Search size limit ("Search limit")| 256                    | (1) repository XML (`ldap.xml`'s `<search_limit>`, which overwrites (2) ClickHouse's own compiled-in default of 256 — `LDAPClient.h:123` — with the same numeric value, making this line behavior-neutral versus leaving it unset), applied **both** via (3) `LDAP_OPT_SIZELIMIT` and (4) the explicit `params.search_limit` argument to `ldap_search_ext_s` (`LDAPClient.cpp:445`), for the same belt-and-suspenders reason as the Search time limit. |
 | Search base DN                  | `ou=groups,dc=altinity,dc=internal` | (1) repository XML (`ldap.xml`'s `role_mapping/base_dn`)                                    |
 | Search scope                    | subtree                | (1) repository XML (`ldap.xml`'s `role_mapping/scope`), mapped to `LDAP_SCOPE_SUBTREE` (`LDAPClient.cpp:405`ff.) |
+| `derefAliases`                   | `neverDerefAliases` (0) | (5) libldap fallback/default — `LDAPClient::search` calls `ldap_search_ext_s` (`LDAPClient.cpp:445`), whose signature has no `deref` parameter at all; `ldap_search_ext_s` hardcodes `deref = -1` internally when it delegates to `ldap_pvt_search_s` (`search.c:151`, both pins), and `ldap_build_search_req`'s non-UDP branch resolves any negative `deref` to the handle's own `ld_deref` (`search.c:326`, both pins: `(deref < 0) ? ld->ld_deref : deref`). `ld_deref` is a per-handle copy of the process-wide global default options made at handle-creation time (`open.c:150`, inside the `ldap_create` already cited in §7), and that global default is set once by `ldap_int_initialize_global_options` (`init.c:563`, both pins: `gopts->ldo_deref = LDAP_DEREF_NEVER;`, i.e. `0x00` — `ldap.h:795`). ClickHouse never calls `ldap_set_option(..., LDAP_OPT_DEREF, ...)` anywhere in `LDAPClient.cpp`, so nothing overrides this chain. Confirmed on the wire: byte `00` in the `derefAliases` ENUMERATED immediately following the `scope` ENUMERATED in every committed `002-search-request.ber` fixture (24.8 and 25.8, `success` and `timeout-abandon`). |
 | Search filter                   | `(&(objectClass=groupOfNames)(member={bind_dn}))` | (1) repository XML (`ldap.xml`'s `role_mapping/search_filter`), placeholders substituted per §6.3 below |
 | Requested attribute             | `cn`                   | (1) repository XML (`ldap.xml`'s `role_mapping/attribute`)                                                  |
 | MessageID sequence              | 1, 2, 3, …             | (6) observed wire / (5) libldap fallback — see §6.4; no ClickHouse or repository input chooses these values at all. |
@@ -340,10 +354,22 @@ caller-side JWT — with no client-side transformation.
 Exactly one `SearchRequest` per role-mapping entry follows a successful
 Bind (this fixture's config has exactly one `<role_mapping>`, so exactly
 one Search per session). Its fields, resolved per §6 above: base DN
-`ou=groups,dc=altinity,dc=internal`, scope `wholeSubtree`, filter
+`ou=groups,dc=altinity,dc=internal`, scope `wholeSubtree`, `derefAliases`
+`neverDerefAliases` (0 — ClickHouse passes no explicit deref value at all,
+so this is libldap's own handle default, never a ClickHouse or repository
+choice; see §6), filter
 `(&(objectClass=groupOfNames)(member={bind_dn}))` with `{bind_dn}`
 substituted, `sizeLimit` 256, `timeLimit` 20, `typesOnly` false (ClickHouse
-never sets it), and the single requested attribute `cn`.
+never sets it), and the single requested attribute `cn`. Every request PDU this fixture captures — Bind, Search, Abandon, Unbind
+alike — carries no LDAP Controls: `ldap_sasl_bind_s` and `ldap_search_ext_s`
+are both called from `LDAPClient.cpp` with `nullptr` for both the server-
+and client-controls arguments (`LDAPClient.cpp:360`,`445`); `Unbind` goes
+through `ldap_unbind_ext_s(handle, nullptr, nullptr)` (`LDAPClient.cpp:398`);
+and the client-side-timeout `Abandon` (§8.6) is libldap's own internal
+`ldap_abandon(ld, msgid)` call inside `ldap_result` (§7), which itself
+always passes `NULL, NULL` for controls (`abandon.c:102`, both pins). So
+`controls` is absent (not merely empty) on the wire throughout — no
+`Controls` sequence follows any `LDAPMessage`'s protocolOp.
 
 ### 8.3 Placeholder substitution and escaping pipeline
 

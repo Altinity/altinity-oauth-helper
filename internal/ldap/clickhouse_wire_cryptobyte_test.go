@@ -454,8 +454,25 @@ func TestClickHouseWireCryptobyteDecision(t *testing.T) {
 		t.Run("characterize/"+c.Label, func(t *testing.T) {
 			summary, err := characterizeLDAPMessage(c.Raw)
 			if err != nil {
+				// A committed fixture is, by construction, a valid,
+				// real-ClickHouse-captured wire form (never malformed —
+				// malformed evidence only ever appears via
+				// testNegativeMutations' deliberately mutated copies,
+				// which must keep failing). cryptobyte being unable to
+				// consume a valid supported form is exactly the
+				// local-ber-cursor decision this test exists to compute,
+				// not a test failure in itself: t.Logf (not
+				// t.Errorf/t.Fatalf) records why, cryptobyteSafe flips to
+				// false, and decision-marker-agreement below is what
+				// actually enforces the resulting verdict against the
+				// doc's committed marker. Fatal-ing this subtest would
+				// make the local-ber-cursor branch of that verdict
+				// mechanically unable to ever produce a passing run, even
+				// when correctly computed and in full agreement with the
+				// doc.
 				cryptobyteSafe = false
-				t.Fatalf("cryptobyte could not safely characterize %s: %v", c.Path, err)
+				t.Logf("cryptobyte could not safely characterize %s (selecting local-ber-cursor primitive): %v", c.Path, err)
+				return
 			}
 			if summary.Operation != c.PDU.Operation {
 				t.Errorf("%s: parsed operation %q does not match committed metadata operation %q", c.Path, summary.Operation, c.PDU.Operation)

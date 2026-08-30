@@ -376,7 +376,7 @@ WIRECAP_SQL="SELECT currentUser()"
 # TestWireProfileContract_FixtureInventory is what actually enforces they
 # stay in sync (by checking every committed session against the Go
 # constant), not this comment.
-WIRECAP_TOKEN_CLAIM_RECIPE="sub=alice@example.com; groups=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
+WIRECAP_TOKEN_CLAIM_RECIPE="sub=alice@example.com; roles=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti"
 [ -f "$WIRECAP_CONFIG_HOST_FILE" ] || die "canonical LDAP config not found at $WIRECAP_CONFIG_HOST_FILE"
 
 # ── Fresh per-run interserver secret (plan §15.7) ─────────────────────────
