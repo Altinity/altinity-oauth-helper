@@ -335,6 +335,18 @@ func isChanType(t types.Type) bool { _, ok := t.(*types.Chan); return ok }
 // the other package's state, not this package's — while a named type whose
 // underlying IS a map/channel (an http.Header-alike, wherever it is
 // declared) still matches here. seen guards against reference cycles.
+//
+// Constrained type parameters are covered without a dedicated case: for a
+// *types.TypeParam, Underlying() returns the interface derived from its
+// Constraint() (the go/types contract — see (*TypeParam).Underlying's own
+// doc), so the switch below reaches it through the existing *types.Interface
+// case. That case additionally walks NumEmbeddeds/EmbeddedType (not just
+// NumMethods) so an embedded type-set term is visited, and a *types.Union
+// embed recurses into each term's Type() — otherwise a constraint like
+// `~map[int]int` or `~chan int` never surfaces its map/chan-ness, and
+// `func f[T ~map[int]int]() any { return make(T) }` escapes detection
+// entirely (make(T) types as the bare TypeParam, and the `any` result hides
+// the concrete instantiation at call sites).
 func typeCarries(t types.Type, want func(types.Type) bool, seen map[types.Type]bool) bool {
 	if t == nil {
 		return false
@@ -374,6 +386,17 @@ func typeCarries(t types.Type, want func(types.Type) bool, seen map[types.Type]b
 	case *types.Interface:
 		for i := 0; i < u.NumMethods(); i++ {
 			if typeCarries(u.Method(i).Type(), want, seen) {
+				return true
+			}
+		}
+		for i := 0; i < u.NumEmbeddeds(); i++ {
+			if typeCarries(u.EmbeddedType(i), want, seen) {
+				return true
+			}
+		}
+	case *types.Union:
+		for i := 0; i < u.Len(); i++ {
+			if typeCarries(u.Term(i).Type(), want, seen) {
 				return true
 			}
 		}
@@ -933,6 +956,27 @@ func (s *Server) leak() {
 	requireSiteMentioning(t, sites, "map[net.Conn]struct{}", "the generic `clone := id(s.active)` identity instantiation at the map type")
 }
 
+// TestProfileArchitecture_DetectsConstrainedGenericMapMake: the pass-1
+// review's constrained-type-parameter counterexample — `func
+// hiddenMap[T ~map[int]int]() any { return make(T) }` hides a map behind an
+// `any` return type, and make(T) types as the bare *types.TypeParam T, not
+// as any concrete map type. Before typeCarries walked
+// *types.Interface.NumEmbeddeds/EmbeddedType and *types.Union terms, T's
+// `~map[int]int` constraint was invisible to the checker (Underlying()
+// returns T's constraint interface, and the union term carrying the actual
+// map type lives only among that interface's embeddeds, never its
+// methods) — ChatGPT independently reproduced this exact 0-site bypass.
+func TestProfileArchitecture_DetectsConstrainedGenericMapMake(t *testing.T) {
+	tp := typecheckSynthetic(t, map[string]string{"synthetic.go": `package synthetic
+
+func hiddenMap[T ~map[int]int]() any { return make(T) }
+
+func Use() any { return hiddenMap[map[int]int]() }
+`})
+	sites := collectTypedSites(tp, isMapType, nil)
+	requireSiteMentioning(t, sites, "T", "the constrained generic `make(T)` with `T ~map[int]int`")
+}
+
 // TestProfileArchitecture_DetectsInferredMakeChanAssignment /
 // ...VarMakeChanAssignment / ...NamedChanTypeAliasField /
 // ...FuncResultChanType: the channel-typed counterparts of the historical
@@ -1008,6 +1052,22 @@ func bad() {
 `})
 	sites := collectTypedSites(tp, isChanType, nil)
 	requireSiteMentioning(t, sites, "chan time.Time", "the `stop := time.After(...)` channel-producing call")
+}
+
+// TestProfileArchitecture_DetectsConstrainedGenericChanMake: the
+// channel-typed counterpart of
+// TestProfileArchitecture_DetectsConstrainedGenericMapMake — `func
+// hiddenChan[T ~chan int]() any { return make(T) }` hides a channel behind
+// an `any` return type via a `~chan int` type-parameter constraint.
+func TestProfileArchitecture_DetectsConstrainedGenericChanMake(t *testing.T) {
+	tp := typecheckSynthetic(t, map[string]string{"synthetic.go": `package synthetic
+
+func hiddenChan[T ~chan int]() any { return make(T) }
+
+func Use() any { return hiddenChan[chan int]() }
+`})
+	sites := collectTypedSites(tp, isChanType, nil)
+	requireSiteMentioning(t, sites, "T", "the constrained generic `make(T)` with `T ~chan int`")
 }
 
 // TestProfileArchitecture_TypeCheckerAllowsAllowlistedMapChanUsage is the
