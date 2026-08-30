@@ -3,11 +3,18 @@ package securitytest
 import (
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 )
+
+// nestedLDAPModuleRoot is internal/ldap/**'s owning module import path —
+// the same value profile_dependency_contract_test.go's profileImportPath
+// constant is built from, spelled out here so this file's general nested-
+// package guard (below) does not depend on that file's own constant.
+const nestedLDAPModuleImportPath = "github.com/altinity/altinity-oauth-helper"
 
 // This file implements plan-19p5.md §5.1/§5.2's AST redaction inventory: it
 // AST-enumerates every log/error/response-construction sink in doc.go's
@@ -29,6 +36,10 @@ import (
 // audited root would be silently invisible to every other test in this
 // file. That test exists to catch exactly that before it happens, for the
 // two directories issue #33 phase 1 added.
+// TestRedactionInventory_NestedLDAPPackagesAreRegistered generalizes that
+// same non-recursive-discovery limitation to every directory under
+// internal/ldap/** — the root issue #33 phase 2's internal/ldap/profile
+// itself lives under — rather than only the two issue #33 phase 1 scopes.
 
 func loadRealManifest(t *testing.T) []ManifestRow {
 	t.Helper()
@@ -324,5 +335,177 @@ func TestRedactionInventory_Phase1AuditedScopesRemainFlat(t *testing.T) {
 				"package silently unaudited.",
 				scope, len(nested), scope, strings.Join(nested, "\n"), scope)
 		}
+	}
+}
+
+// nestedLDAPTestOnlyAllowlist is the general nested-LDAP-package guard's
+// (below) explicit, documented exception list: a scope path here is exempt
+// from the "must be a scopeDirs entry" requirement ONLY because it is
+// mechanically proven (via nestedLDAPScopeIsTestOnly, using the same
+// deterministic `go list -deps` mechanism dependency_contract_test.go/
+// profile_dependency_contract_test.go already use) to be imported by no
+// production (non-test) package anywhere in this module — i.e. it is test-
+// only tooling, never a production sink this inventory could miss.
+//
+// Empty today: internal/ldap/profile — the one nested directory under
+// internal/ldap that carries non-test .go files as of issue #33 phase 2 —
+// is registered outright as its own doc.go scopeDirs entry instead of
+// exempted here, so every one of its production log/error/diagnostic sinks
+// gets a real redaction-sites.tsv row. A future nested internal/ldap/**
+// directory that is genuinely test-only tooling (never imported by
+// production code) may be added here instead of scopeDirs, but adding an
+// entry that IS imported by production code fails
+// TestRedactionInventory_NestedLDAPPackagesAreRegistered immediately.
+var nestedLDAPTestOnlyAllowlist = []string{}
+
+// nestedLDAPScopeIsTestOnly mechanically verifies one
+// nestedLDAPTestOnlyAllowlist entry's claim: it checks every OTHER non-test
+// Go package directory in the module (found by walking the module tree for
+// directories containing a non-test .go file, skipping .git and
+// third_party — a separate module the root go.mod only replace's in — and
+// scope itself) and fails if any of them imports scope's package in its
+// live production closure (via liveDeps, the same deterministic
+// `go list -deps` helper profile_dependency_contract_test.go defines). A
+// package genuinely reachable only from *_test.go files never shows up in
+// any of these production closures, since `go list -deps` (without -test)
+// never traverses a target's own test-file imports either.
+func nestedLDAPScopeIsTestOnly(t *testing.T, root, scope string) bool {
+	t.Helper()
+	scopeImportPath := nestedLDAPModuleImportPath + "/" + scope
+
+	var otherProductionScopes []string
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		base := d.Name()
+		if base == ".git" || base == "third_party" {
+			return filepath.SkipDir
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." || rel == scope {
+			return nil
+		}
+		entries, readErr := os.ReadDir(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+				otherProductionScopes = append(otherProductionScopes, rel)
+				break
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("securitytest: walk module tree checking %q's test-only claim: %v", scope, walkErr)
+	}
+
+	for _, other := range otherProductionScopes {
+		deps := liveDeps(t, root, "./"+other)
+		for _, dep := range deps {
+			if dep == scopeImportPath {
+				t.Logf("securitytest: %q is imported by %q's production closure — not test-only", scope, other)
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// TestRedactionInventory_NestedLDAPPackagesAreRegistered generalizes
+// TestRedactionInventory_Phase1AuditedScopesRemainFlat's specific two-scope
+// flatness guard to every directory under internal/ldap/** (which is where
+// internal/ldap/profile itself lives, issue #33 phase 2): every nested
+// directory containing a non-test .go file must be either its own doc.go
+// scopeDirs entry (so redaction_inventory_test.go actually enumerates its
+// sinks) or an explicitly documented, mechanically verified test-only-
+// tooling exception in nestedLDAPTestOnlyAllowlist above. Sabotage: adding
+// a temporary non-test .go file under an unregistered internal/ldap/**
+// subdirectory (e.g. internal/ldap/tmpx/x.go) must fail this test.
+func TestRedactionInventory_NestedLDAPPackagesAreRegistered(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("securitytest: locate module root: %v", err)
+	}
+
+	ldapRoot := filepath.Join(root, "internal", "ldap")
+	registered := make(map[string]bool, len(scopeDirs))
+	for _, s := range scopeDirs {
+		registered[s] = true
+	}
+	allowed := make(map[string]bool, len(nestedLDAPTestOnlyAllowlist))
+	for _, s := range nestedLDAPTestOnlyAllowlist {
+		allowed[s] = true
+	}
+
+	var unregistered []string
+	walkErr := filepath.WalkDir(ldapRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "internal/ldap" {
+			// The already-registered root scope itself, not a nested
+			// package.
+			return nil
+		}
+
+		entries, readErr := os.ReadDir(path)
+		if readErr != nil {
+			return readErr
+		}
+		hasNonTestGo := false
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+				hasNonTestGo = true
+				break
+			}
+		}
+		if !hasNonTestGo {
+			return nil
+		}
+
+		if registered[rel] {
+			return nil
+		}
+		if allowed[rel] {
+			if !nestedLDAPScopeIsTestOnly(t, root, rel) {
+				unregistered = append(unregistered, rel+" (allow-listed as test-only, but a production package imports it — remove it from the allow-list and register it in doc.go's scopeDirs instead)")
+			}
+			return nil
+		}
+		unregistered = append(unregistered, rel)
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("securitytest: walk internal/ldap: %v", walkErr)
+	}
+
+	if len(unregistered) > 0 {
+		sort.Strings(unregistered)
+		t.Fatalf("found %d nested internal/ldap/** director(y/ies) with non-test .go file(s) that are "+
+			"neither a doc.go scopeDirs entry nor a mechanically-verified test-only entry in "+
+			"nestedLDAPTestOnlyAllowlist — discoverSites never sees these, so their sinks are silently "+
+			"unaudited:\n%s\n\n"+
+			"fix: register the directory in doc.go's scopeDirs (adding a redaction-sites.tsv row for "+
+			"every sink it discovers), or, only if it is genuinely test-only tooling never imported by "+
+			"production code, add it to nestedLDAPTestOnlyAllowlist here.",
+			len(unregistered), strings.Join(unregistered, "\n"))
 	}
 }

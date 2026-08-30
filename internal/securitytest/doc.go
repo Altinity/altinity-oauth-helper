@@ -7,16 +7,21 @@
 //
 //  1. redaction_inventory_test.go AST-enumerates every zerolog terminal call
 //     (.Msg/.Msgf/.Send), stdlib log.Print*, fmt.Errorf, errors.New/Join,
-//     LDAP diagnostic construction (SetDiagnosticMessage) and HTTP/LDAP
+//     LDAP diagnostic construction (SetDiagnosticMessage, or — for
+//     internal/ldap/profile only — a direct addLDAPResultFields(...) call,
+//     sink kind ldap-profile-diagnostic, see inspectCall) and HTTP/LDAP
 //     response-error construction (http.Error, fmt.Fprint*) across the
 //     explicit audited scope list named by scopeDirs below —
 //     cmd/ch-oauth-ldap, cmd/ch-jwt-verify, internal/ldap,
 //     internal/verification, internal/identity, internal/roles,
-//     internal/wirefixture and integration/clickhouse/wirecapture (the
-//     latter two added by issue #33 phase 1, plan §10/§35, once the
-//     ClickHouse-wire-capture tooling gave them non-test sinks of their
-//     own) — plus every vendored Logger.Print*/Printf/Println call in the
-//     local third_party/ldapserver fork, and cross-checks the result
+//     internal/wirefixture, integration/clickhouse/wirecapture, and
+//     internal/ldap/profile (issue #33 phase 1 added the wirefixture/
+//     wirecapture pair, plan §10/§35, once the ClickHouse-wire-capture
+//     tooling gave them non-test sinks of their own; issue #33 phase 2
+//     added internal/ldap/profile once its Bind/Search/dispatch handlers
+//     gave the replacement wire package non-test log/diagnostic sinks of
+//     its own) — plus every vendored Logger.Print*/Printf/Println call in
+//     the local third_party/ldapserver fork, and cross-checks the result
 //     against the checked-in manifest at testdata/redaction-sites.tsv. It
 //     fails on an unmapped (newly discovered, unregistered) sink, a stale
 //     manifest row no longer backed by real source, a duplicate
@@ -26,14 +31,22 @@
 //     "everything under this path": discoverSites (below) reads only the
 //     direct, non-test .go files of each named directory and does not
 //     recurse into subdirectories — so a nested package added later under
-//     an audited root (e.g. a future integration/clickhouse/wirecapture/foo)
-//     is invisible to this inventory until its own path is added to
-//     scopeDirs explicitly. TestRedactionInventory_Phase1AuditedScopesRemainFlat
-//     is the mechanical guard against that gap going unnoticed: it walks
-//     internal/wirefixture and integration/clickhouse/wirecapture
-//     recursively and fails, with instructions to register the new
-//     subdirectory in scopeDirs (or restructure the inventory), the moment
-//     either one stops being flat. This audited-scope list is also not a
+//     an audited root (e.g. a future integration/clickhouse/wirecapture/foo,
+//     or a future internal/ldap/profile/foo) is invisible to this inventory
+//     until its own path is added to scopeDirs explicitly. Two mechanical
+//     guards catch that gap going unnoticed, at two different
+//     granularities: TestRedactionInventory_Phase1AuditedScopesRemainFlat
+//     walks specifically internal/wirefixture and
+//     integration/clickhouse/wirecapture recursively and fails the moment
+//     either one stops being flat; TestRedactionInventory_NestedLDAPPackagesAreRegistered
+//     generalizes that same check to every directory under internal/ldap/**
+//     (which is where internal/ldap/profile itself lives) — it requires
+//     every nested directory containing a non-test .go file to be either
+//     its own scopeDirs entry or an explicitly documented, mechanically
+//     verified test-only-tooling exception (nestedLDAPTestOnlyAllowlist in
+//     redaction_inventory_test.go; empty today, since internal/ldap/profile
+//     is registered outright rather than exempted). This audited-scope
+//     list is also not a
 //     claim that every credential-bearing tool in the repository is
 //     covered: integration/clickhouse/ha/session-probe is a pre-existing
 //     integration credential tool that remains outside scopeDirs (plan
@@ -263,6 +276,7 @@ var scopeDirs = []string{
 	"internal/roles",
 	"internal/wirefixture",
 	"integration/clickhouse/wirecapture",
+	"internal/ldap/profile",
 }
 
 // vendoredScope is the separate third_party/ldapserver enumeration (plan
@@ -277,18 +291,27 @@ const externalScope = "external-pinned"
 // sinkKind constants. Keep these exactly in sync with the values written to
 // testdata/redaction-sites.tsv.
 const (
-	sinkZerologTerminal     = "zerolog-terminal"      // .Msg / .Msgf / .Send
-	sinkStdlibLogPrint      = "stdlib-log-print"      // log.Print*
-	sinkFmtErrorf           = "fmt-errorf"            // fmt.Errorf
-	sinkFmtFprint           = "fmt-fprint-response"   // fmt.Fprint*
-	sinkErrorsNew           = "errors-new"            // errors.New
-	sinkErrorsJoin          = "errors-join"           // errors.Join
-	sinkLDAPDiagnostic      = "ldap-diagnostic"       // SetDiagnosticMessage
-	sinkHTTPError           = "http-error"            // http.Error
-	sinkVendoredLoggerPrint = "vendored-logger-print" // third_party/ldapserver Logger.Print*
-	sinkJSONEncodeResponse  = "json-encode-response"  // json.NewEncoder(w).Encode
-	sinkHTTPResponseWrite   = "http-response-write"   // http.ResponseWriter.Write (cmd/ch-jwt-verify only — see inspectCall)
+	sinkZerologTerminal       = "zerolog-terminal"        // .Msg / .Msgf / .Send
+	sinkStdlibLogPrint        = "stdlib-log-print"        // log.Print*
+	sinkFmtErrorf             = "fmt-errorf"              // fmt.Errorf
+	sinkFmtFprint             = "fmt-fprint-response"     // fmt.Fprint*
+	sinkErrorsNew             = "errors-new"              // errors.New
+	sinkErrorsJoin            = "errors-join"             // errors.Join
+	sinkLDAPDiagnostic        = "ldap-diagnostic"         // SetDiagnosticMessage
+	sinkHTTPError             = "http-error"              // http.Error
+	sinkVendoredLoggerPrint   = "vendored-logger-print"   // third_party/ldapserver Logger.Print*
+	sinkJSONEncodeResponse    = "json-encode-response"    // json.NewEncoder(w).Encode
+	sinkHTTPResponseWrite     = "http-response-write"     // http.ResponseWriter.Write (cmd/ch-jwt-verify only — see inspectCall)
+	sinkLDAPProfileDiagnostic = "ldap-profile-diagnostic" // internal/ldap/profile's addLDAPResultFields(...) — see inspectCall
 )
+
+// profileScope is internal/ldap/profile's scopeDirs entry — the one scope
+// inspectCall recognizes a direct addLDAPResultFields(...) call in (issue
+// #33 phase 2's replacement package writes its diagnostic field through a
+// plain package-level function, not a SetDiagnosticMessage method call, so
+// it needs its own narrow, scope-guarded match distinct from
+// sinkLDAPDiagnostic above).
+const profileScope = "internal/ldap/profile"
 
 // packageInitFunction is the synthesized `function` value for a call
 // discovered inside a package-level var/const initializer, outside any
@@ -456,6 +479,23 @@ func (c *siteCollector) inspectCall(call *ast.CallExpr, funcName string) {
 	if c.vendoredLogger {
 		c.inspectVendoredLoggerCall(call, funcName)
 		return
+	}
+
+	// internal/ldap/profile writes its diagnosticMessage field through a
+	// direct package-level function call, addLDAPResultFields(builder,
+	// resultCode, diagConstant) — not a method/selector call, so it can
+	// never be matched by the SelectorExpr-based switch below. Narrowly
+	// scoped to profileScope so an unrelated identically-named function
+	// elsewhere can never collide with this sink kind.
+	if c.scope == profileScope {
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "addLDAPResultFields" {
+			var detail string
+			if len(call.Args) == 3 {
+				detail = normalizeExpr(call.Args[2])
+			}
+			c.record(funcName, sinkLDAPProfileDiagnostic, detail, detail)
+			return
+		}
 	}
 
 	sel, ok := call.Fun.(*ast.SelectorExpr)
