@@ -1117,7 +1117,8 @@ func TestWireProfileContract_NoJWTShapedTokensInCorpusOrDoc(t *testing.T) {
 		}
 		if candidates := wireProfileFindJWTShapedCandidates(data); len(candidates) > 0 {
 			rel, _ := filepath.Rel(root, path)
-			t.Errorf("wire_profile_contract: %s contains %d JWT-shaped candidate substring(s), first: %.40q... (no committed evidence file may carry a real or JWT-shaped credential)", rel, len(candidates), candidates[0])
+			offset := bytes.Index(data, []byte(candidates[0]))
+			t.Errorf("wire_profile_contract: %s contains %d JWT-shaped candidate substring(s), first at byte offset %d (length %d bytes) (no committed evidence file may carry a real or JWT-shaped credential; candidate bytes withheld from this public log — inspect the file at that offset to act)", rel, len(candidates), offset, len(candidates[0]))
 		}
 	}
 }
@@ -1135,16 +1136,16 @@ func TestWireProfileContract_JWTScannerDetectsBoundaryBearerToken(t *testing.T) 
 
 	const bearerPrefix = "Bearer "
 	if !strings.HasPrefix(value, bearerPrefix) {
-		t.Fatalf("wire_profile_contract: %s's ldapBoundaryBearer %q no longer starts with %q — update this test's expectations alongside that fixture", redactionBoundaryTestRelPath, value, bearerPrefix)
+		t.Fatalf("wire_profile_contract: %s's ldapBoundaryBearer (%d bytes) no longer starts with %q — update this test's expectations alongside that fixture", redactionBoundaryTestRelPath, len(value), bearerPrefix)
 	}
 	wantToken := strings.TrimPrefix(value, bearerPrefix)
 
 	candidates := wireProfileFindJWTShapedCandidates([]byte(value))
 	if len(candidates) != 1 {
-		t.Fatalf("wire_profile_contract: scanning ldapBoundaryBearer %q found %d JWT-shaped candidate(s), want exactly 1: %v", value, len(candidates), candidates)
+		t.Fatalf("wire_profile_contract: scanning ldapBoundaryBearer (%d bytes) found %d JWT-shaped candidate(s), want exactly 1 (candidate bytes withheld from this public log)", len(value), len(candidates))
 	}
 	if candidates[0] != wantToken {
-		t.Fatalf("wire_profile_contract: scanner detected %q, want it to detect exactly the token portion %q", candidates[0], wantToken)
+		t.Fatalf("wire_profile_contract: scanner detected a candidate of length %d, want it to detect exactly the token portion (length %d) (candidate bytes withheld from this public log)", len(candidates[0]), len(wantToken))
 	}
 }
 
