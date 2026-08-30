@@ -14,6 +14,25 @@ harness's own shell libraries under `lib/`: that script **is** run by
 `.github/workflows/pr-gate.yml` as part of the required `Required PR gate`
 check, so a change under `lib/` that breaks it fails CI.
 
+## Issue #33 phase 2 note: this suite still exercises the legacy runtime
+
+Issue #33 phase 2 built a first-party LDAP compatibility profile at
+`internal/ldap/profile/` alongside the production server this suite drives.
+**`run.sh`, `run-all-builds.sh`, and `run-ha.sh` still exercise only the
+legacy `internal/ldap` production server** — `cmd/ch-oauth-ldap` does not
+import `internal/ldap/profile` yet (that cutover is Phase 4), so a Docker run
+proves nothing about the replacement. The replacement's own proof is, instead:
+real-TCP black-box tests driving the profile server directly, and real-TCP
+replay of every committed session under
+`internal/ldap/testdata/clickhouse-wire/**` through the profile server
+(`internal/ldap/profile/replay_test.go`) — see `CLAUDE.md`'s
+`internal/ldap/profile/` repo-map row and
+`docs/clickhouse-ldap-wire-profile.md` §11. Keep running the Docker gates here
+as before for any change to `cmd/ch-oauth-ldap`, `internal/ldap`, or
+ClickHouse-facing config; a change confined to `internal/ldap/profile/**`
+instead needs `go test -race ./internal/ldap/profile` (and, for parser/security
+boundary changes, its five native fuzz targets — see the wire-profile doc).
+
 ## Prerequisites
 
 - Docker with Compose v2 (`docker compose`) or the standalone `docker-compose`

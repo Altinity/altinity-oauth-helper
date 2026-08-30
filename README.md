@@ -224,6 +224,61 @@ What the fixture proves, and what you should expect in production:
     lands, keep `ch-oauth-ldap` on a trusted internal network and never
     expose it publicly.
 
+### Compatibility profile (issue #33 phase 2 — implementation only, not yet in production)
+
+Issue #33 is replacing the vendored `third_party/goldap`/`third_party/ldapserver`
+LDAP stack above with a first-party, bounded ClickHouse compatibility profile at
+`internal/ldap/profile/`. **This is a development-status note, not a cutover
+announcement**: `cmd/ch-oauth-ldap` still runs the legacy server described above
+in production; the profile package exists with its own real-TCP tests, native
+fuzzing, real-TCP replay of every committed wire fixture, and
+dependency/architecture/redaction contracts (see `CLAUDE.md`'s
+`internal/ldap/profile/` repo-map row), but nothing production-reachable imports
+it yet — that cutover is Phase 4.
+
+Two ClickHouse-configured values stay genuinely variable, not hard-coded, in the
+replacement:
+
+- **`search_limit`** stays a client/operator-controlled `N` (the fixture default
+  above is `256`);
+- **client `timeLimit`** is honored as sent (the currently tracked ClickHouse
+  value is `20` seconds).
+
+Cutover also brings several **deliberate narrowings** — behavior this legacy
+server tolerates today that the replacement will not, each one requiring
+explicit Phase 3 acceptance before Phase 4:
+
+- **Search-shape narrowing.** Only subtree scope, `derefAliases=0`,
+  `typesOnly=false`, and exactly one requested attribute (case-insensitive
+  `cn`) are accepted; an empty attribute list, `*`, `1.1`, or any other/
+  multiple attribute selection is rejected (result 50) instead of today's
+  generic projection.
+- **LDAPv3-only narrowing.** Only LDAPv3 simple Bind is accepted; the current
+  server's incidental Bind-version-2 acceptance is not retained (result 2
+  instead).
+- **DN-grammar narrowing.** Multi-valued RDNs, `;` RDN separators, `#`
+  BER-hexstring values, dotted-decimal/OID attribute types, and arbitrary
+  escaped attribute-type names are rejected; supported whitespace handling
+  and `\XX` value escapes remain.
+- **Control-plane narrowing.** Ordinary Abandon remains a no-response
+  compatibility no-op but no longer cancels an in-flight operation; ordinary
+  RFC 3909 Cancel becomes an unsupported Extended request (result 53) instead
+  of today's vendored Cancel scheduler; a peer disconnect no longer
+  asynchronously cancels an already-running verification call.
+- **New response-PDU cap.** Every outbound LDAPMessage is capped at 64 KiB;
+  an oversized `SearchResultEntry` is dropped in favor of `SearchResultDone`
+  result 11 (`adminLimitExceeded`), with the already-emitted entry count
+  preserved. This is a genuinely new client-visible behavior, not parity —
+  today's write path has no outbound size bound at all.
+- **New `UserRDNAttribute` startup validation.** The replacement requires the
+  configured attribute descriptor to match `[A-Za-z][A-Za-z0-9-]*`; current
+  production only rejects an empty/whitespace value.
+
+See [`docs/clickhouse-ldap-wire-profile.md`](docs/clickhouse-ldap-wire-profile.md)
+§11 for the full engineering-evidence writeup of all ten narrowings and
+[`docs/ch-oauth-ldap-operator-guide.md`](docs/ch-oauth-ldap-operator-guide.md#10-compatibility-profile-issue-33-phase-2--in-development)
+§10 for the equivalent operator-facing note.
+
 [ch-ldap]: https://clickhouse.com/docs/operations/external-authenticators/ldap
 [ch-79099]: https://github.com/ClickHouse/ClickHouse/pull/79099
 [ch-78791]: https://github.com/ClickHouse/ClickHouse/issues/78791
