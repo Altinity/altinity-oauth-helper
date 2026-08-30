@@ -52,6 +52,8 @@ import (
 	"strings"
 	"testing"
 
+	goldapmessage "github.com/vjeantet/goldap/message"
+
 	"github.com/altinity/altinity-oauth-helper/internal/wirefixture"
 )
 
@@ -1256,6 +1258,175 @@ func TestWireProfileContract_LDAPOptionSentinelMatchesAuditedSet(t *testing.T) {
 
 	if !stringSlicesEqual(got, want) {
 		t.Fatalf("wire_profile_contract: %s: sentinel section names options %v, want exactly the audited set %v", wireProfileDocRelPath, got, want)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Search-profile fixed-field sentinel (derefAliases / Controls)
+// ---------------------------------------------------------------------
+//
+// TestWireProfileContract_LDAPOptionSentinelMatchesAuditedSet's pattern —
+// scan a doc section against an independently-authored Go set — only ever
+// mechanically compares two things a human wrote; it cannot notice the
+// doc's prose drifting away from what the committed wire bytes actually
+// contain. That gap is exactly what a review found for two Search-profile
+// facts §6/§8.2 assert but nothing here previously checked against a raw
+// fixture byte: derefAliases==neverDerefAliases(0), and that no Controls
+// sequence follows any LDAPMessage's protocolOp. Deleting those doc
+// statements alone previously left this whole package's suite green.
+//
+// This sentinel closes that gap with two independent legs, both required:
+//
+//  1. Doc side: the specific claims must still be present, in the same
+//     table/prose locations §6/§8.2 use today.
+//  2. Fixture side: every committed searchRequest PDU (and every PDU's
+//     LDAPMessage generally, for Controls) is independently decoded with
+//     the vendored goldap BER decoder — a second, structurally distinct
+//     implementation from internal/ldap's cryptobyte characterizer, which
+//     stays the SOLE owner of the primitive-layer cryptobyte-vs-
+//     local-ber-cursor decision (plan §33) — and the actual decoded field
+//     values are asserted directly, not merely compared to the doc's own
+//     text.
+//
+// Removing either leg's claim (the doc prose, or the byte-level truth it
+// describes) now fails this test, instead of both drifting together
+// silently.
+
+// searchProfileDocDerefAliasesLabel is the §6 source-of-value table's row
+// label for derefAliases, stripped of surrounding backticks the same way
+// wireProfileStripCell strips table cells.
+const searchProfileDocDerefAliasesLabel = "derefAliases"
+
+// searchProfileControlsAbsentNeedle is §8.2's prose claim that Controls is
+// absent (not merely empty) from every captured PDU.
+const searchProfileControlsAbsentNeedle = "`controls` is absent (not merely empty)"
+
+func TestWireProfileContract_SearchProfileFixedFieldsSentinel(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+
+	// --- doc side: leg 1 ---
+
+	_, rows, err := wireProfileExtractTable(doc, "Value in this fixture")
+	if err != nil {
+		t.Fatalf("wire_profile_contract: %s: %v", wireProfileDocRelPath, err)
+	}
+	var derefAliasesRow []string
+	for _, row := range rows {
+		if len(row) > 0 && wireProfileStripCell(row[0]) == searchProfileDocDerefAliasesLabel {
+			derefAliasesRow = row
+			break
+		}
+	}
+	if derefAliasesRow == nil {
+		t.Errorf("wire_profile_contract: %s: source-of-value table has no %q row", wireProfileDocRelPath, searchProfileDocDerefAliasesLabel)
+	} else {
+		value := derefAliasesRow[1]
+		if !strings.Contains(value, "neverDerefAliases") || !strings.Contains(value, "(0)") {
+			t.Errorf("wire_profile_contract: %s: %q row's value column is %q, want it to state neverDerefAliases and (0)", wireProfileDocRelPath, searchProfileDocDerefAliasesLabel, value)
+		}
+	}
+
+	if !strings.Contains(doc, searchProfileControlsAbsentNeedle) {
+		t.Errorf("wire_profile_contract: %s: missing required Controls-absent claim (expected substring %q)", wireProfileDocRelPath, searchProfileControlsAbsentNeedle)
+	}
+
+	// --- fixture side: leg 2 ---
+
+	fixtureRoot := wireProfileFixtureRoot(root)
+	lines, err := wirefixture.ValidateFixtureRoot(fixtureRoot)
+	if err != nil {
+		t.Fatalf("wire_profile_contract: validate fixture root %s: %v", fixtureRoot, err)
+	}
+	if len(lines) == 0 {
+		t.Fatalf("wire_profile_contract: fixture root %s: no tracked-line directories found", fixtureRoot)
+	}
+
+	sawSearchRequest := false
+	checkSession := func(label, sessDir string) {
+		sess, err := wirefixture.ReadSession(wirefixture.SessionMetadataPath(sessDir))
+		if err != nil {
+			t.Fatalf("wire_profile_contract: read session.json for %s: %v", label, err)
+		}
+		for _, pdu := range sess.PDUs {
+			path := filepath.Join(sessDir, pdu.Filename)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("wire_profile_contract: read %s: %v", path, err)
+			}
+			assertSearchProfileFixedFields(t, path, pdu.Operation, raw, &sawSearchRequest)
+		}
+	}
+
+	for _, line := range lines {
+		lineDir := wirefixture.LineDir(fixtureRoot, line)
+		profile, err := wirefixture.ReadProfile(wirefixture.ProfilePath(lineDir))
+		if err != nil {
+			t.Fatalf("wire_profile_contract: read profile.json for line %s: %v", line, err)
+		}
+		for _, sp := range profile.SessionPaths {
+			checkSession(fmt.Sprintf("%s/%s", line, sp), wirefixture.SessionDir(lineDir, sp))
+		}
+	}
+	constructedDir := wirefixture.ConstructedDir(fixtureRoot)
+	entries, err := os.ReadDir(constructedDir)
+	if err != nil {
+		t.Fatalf("wire_profile_contract: read constructed fixture dir %s: %v", constructedDir, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		checkSession("constructed/"+e.Name(), filepath.Join(constructedDir, e.Name()))
+	}
+
+	if !sawSearchRequest {
+		t.Fatalf("wire_profile_contract: no committed searchRequest fixture found under %s — this sentinel's derefAliases leg has nothing to check", fixtureRoot)
+	}
+}
+
+// assertSearchProfileFixedFields independently decodes raw as a complete
+// LDAPMessage using the vendored goldap BER decoder (third_party/goldap,
+// already this repo's production LDAP decoder, consumed by internal/ldap's
+// non-test files — not a decoder invented for this test) and asserts:
+//
+//   - every PDU's LDAPMessage carries no Controls sequence (plan §8.2:
+//     absent, not merely empty), regardless of operation type;
+//   - a searchRequest's derefAliases field is exactly neverDerefAliases(0)
+//     (plan §6/§8.2), and *sawSearchRequest is set so the caller can
+//     require at least one such PDU was actually checked.
+//
+// This never recomputes internal/ldap's cryptobyte-vs-local-ber-cursor
+// verdict (plan §33 reserves that to TestClickHouseWireCryptobyteDecision
+// alone) — goldap is used here purely to read two specific decoded field
+// values, an orthogonal concern from which BER primitive parser ClickHouse
+// wire traffic should use.
+func assertSearchProfileFixedFields(t *testing.T, path, operation string, raw []byte, sawSearchRequest *bool) {
+	t.Helper()
+
+	msg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, raw))
+	if err != nil {
+		t.Errorf("wire_profile_contract: %s: independent goldap BER decode failed: %v", path, err)
+		return
+	}
+	if msg.Controls() != nil {
+		t.Errorf("wire_profile_contract: %s: decoded LDAPMessage carries a Controls sequence, want absent (plan §8.2)", path)
+	}
+
+	if operation != wirefixture.OperationSearchRequest {
+		return
+	}
+	search, ok := msg.ProtocolOp().(goldapmessage.SearchRequest)
+	if !ok {
+		t.Errorf("wire_profile_contract: %s: committed metadata says operation %q but decoded protocolOp is %T", path, operation, msg.ProtocolOp())
+		return
+	}
+	*sawSearchRequest = true
+	if got := int(search.DerefAliases()); got != 0 {
+		t.Errorf("wire_profile_contract: %s: decoded derefAliases=%d, want neverDerefAliases(0)", path, got)
 	}
 }
 

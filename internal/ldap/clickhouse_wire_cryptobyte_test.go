@@ -17,7 +17,17 @@ package ldap
 //
 // Malformed-input rejection (the negative-mutation half of this file) never
 // justifies "local-ber-cursor" — only a genuine valid-fixture parse failure
-// does (plan §32 "Decision").
+// does (plan §32 "Decision"). "Genuine" is not taken on cryptobyte's own
+// say-so: a cryptobyte characterization failure is corroborated by
+// independentlyWellFormedBER, a second, structurally distinct BER decoder
+// (the vendored, patched github.com/vjeantet/goldap message package — the
+// same decoder internal/ldap's production Bind/Search/Unbind/Abandon
+// handlers already run) before it may flip the verdict. A fixture that
+// BOTH decoders reject is fixture corruption, not evidence for
+// local-ber-cursor, and fails the test outright (see the per-case loop in
+// TestClickHouseWireCryptobyteDecision) — this closes the sabotage path
+// where corrupting a single non-template fixture and updating only its own
+// session.json hash would otherwise flip the computed verdict unnoticed.
 //
 // This test is the SOLE owner of the cryptobyte verdict (plan §33):
 // internal/securitytest's wire-profile contract (a separate sub-task) only
@@ -65,6 +75,8 @@ import (
 
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/cryptobyte/asn1"
+
+	goldapmessage "github.com/vjeantet/goldap/message"
 
 	"github.com/altinity/altinity-oauth-helper/internal/wirefixture"
 )
@@ -166,6 +178,43 @@ func characterizeLDAPMessage(raw []byte) (ldapMessageSummary, error) {
 		return summary, fmt.Errorf("trailing bytes after protocolOp (e.g. an unsupported control — this profile's fixtures never carry one)")
 	}
 	return summary, nil
+}
+
+// independentlyWellFormedBER reports whether raw is a complete, well-formed
+// BER LDAPMessage according to a *second, structurally independent* decoder
+// — the vendored, patched github.com/vjeantet/goldap message package
+// (third_party/goldap/message), which internal/ldap's production
+// Bind/Search/Unbind/Abandon handlers already consume via
+// third_party/ldapserver — rather than trusting characterizeLDAPMessage's
+// own verdict about validity. It is the independent-validity gate plan §32
+// requires before a cryptobyte characterization failure may be treated as
+// "a valid form cryptobyte cannot safely consume" (the local-ber-cursor
+// justification) instead of "this fixture is malformed" (which must stay
+// fatal regardless of what cryptobyte made of it).
+//
+// goldap/message's reader is derived from Go's stdlib encoding/asn1 tag/
+// length parser (see third_party/goldap/message/asn1.go's "BEGIN
+// encoding/asn1/asn1.go" block), so it independently enforces DER-style
+// minimal-length and definite-length encoding the same way cryptobyte does,
+// via a completely separate implementation with its own bug surface —
+// exactly the second-implementation property an anti-drift check on a
+// single self-referential hash (internal/securitytest's fixture-corpus
+// check) cannot provide on its own.
+//
+// message.ReadLDAPMessage only checks that its own SEQUENCE content is
+// fully consumed, not that nothing follows that SEQUENCE in raw, so this
+// helper additionally requires the outer *Bytes cursor to have no
+// remaining data afterward — mirroring characterizeLDAPMessage's own
+// "trailing bytes after the outer LDAPMessage" check.
+func independentlyWellFormedBER(raw []byte) error {
+	cursor := goldapmessage.NewBytes(0, raw)
+	if _, err := goldapmessage.ReadLDAPMessage(cursor); err != nil {
+		return fmt.Errorf("goldap BER decoder: %w", err)
+	}
+	if cursor.HasMoreData() {
+		return fmt.Errorf("goldap BER decoder: trailing bytes after the outer LDAPMessage")
+	}
+	return nil
 }
 
 // characterizeBindRequest checks the "Bind version/simple-auth context"
@@ -454,24 +503,46 @@ func TestClickHouseWireCryptobyteDecision(t *testing.T) {
 		t.Run("characterize/"+c.Label, func(t *testing.T) {
 			summary, err := characterizeLDAPMessage(c.Raw)
 			if err != nil {
-				// A committed fixture is, by construction, a valid,
-				// real-ClickHouse-captured wire form (never malformed —
-				// malformed evidence only ever appears via
-				// testNegativeMutations' deliberately mutated copies,
-				// which must keep failing). cryptobyte being unable to
-				// consume a valid supported form is exactly the
-				// local-ber-cursor decision this test exists to compute,
-				// not a test failure in itself: t.Logf (not
-				// t.Errorf/t.Fatalf) records why, cryptobyteSafe flips to
-				// false, and decision-marker-agreement below is what
-				// actually enforces the resulting verdict against the
-				// doc's committed marker. Fatal-ing this subtest would
-				// make the local-ber-cursor branch of that verdict
-				// mechanically unable to ever produce a passing run, even
-				// when correctly computed and in full agreement with the
-				// doc.
+				// A committed fixture is *supposed* to be, by
+				// construction, a valid, real-ClickHouse-captured wire
+				// form — but that assumption is exactly what a
+				// corrupted-fixture sabotage would violate, and nothing
+				// upstream (the fixture-corpus anti-drift check compares
+				// bytes only to a hash stored in the same session.json)
+				// enforces it independently. So a cryptobyte failure is
+				// never, on its own, treated as "cryptobyte cannot
+				// consume this valid form": independentlyWellFormedBER
+				// must first corroborate, with a second, structurally
+				// independent BER decoder, that these bytes really are a
+				// complete, well-formed LDAPMessage before that failure
+				// counts as local-ber-cursor evidence. If the independent
+				// decoder rejects it too, this is fixture corruption (or
+				// a genuinely malformed committed fixture), not a
+				// primitive-layer decision, and must fail loudly rather
+				// than silently flip the verdict.
+				if wfErr := independentlyWellFormedBER(c.Raw); wfErr != nil {
+					t.Fatalf(
+						"%s: cryptobyte characterization failed (%v), AND the independent goldap BER decoder also rejected it (%v) — "+
+							"this fixture is not valid, well-formed BER, so its cryptobyte failure cannot be used as local-ber-cursor "+
+							"evidence; treat this as fixture corruption (or a genuinely malformed committed fixture), not a primitive-layer decision",
+						c.Path, err, wfErr,
+					)
+					return
+				}
+				// The independent decoder confirms this is genuinely
+				// valid, well-formed BER that cryptobyte nonetheless
+				// cannot safely consume — exactly the local-ber-cursor
+				// decision this test exists to compute, not a test
+				// failure in itself: t.Logf (not t.Errorf/t.Fatalf)
+				// records why, cryptobyteSafe flips to false, and
+				// decision-marker-agreement below is what actually
+				// enforces the resulting verdict against the doc's
+				// committed marker. Fatal-ing this subtest would make the
+				// local-ber-cursor branch of that verdict mechanically
+				// unable to ever produce a passing run, even when
+				// correctly computed and in full agreement with the doc.
 				cryptobyteSafe = false
-				t.Logf("cryptobyte could not safely characterize %s (selecting local-ber-cursor primitive): %v", c.Path, err)
+				t.Logf("cryptobyte could not safely characterize %s (independently confirmed valid BER; selecting local-ber-cursor primitive): %v", c.Path, err)
 				return
 			}
 			if summary.Operation != c.PDU.Operation {
@@ -492,6 +563,21 @@ func TestClickHouseWireCryptobyteDecision(t *testing.T) {
 	t.Run("negative-mutations", func(t *testing.T) {
 		testNegativeMutations(t, cases)
 	})
+
+	// Every currently-committed fixture must independently confirm as
+	// well-formed BER on its own, regardless of what cryptobyte made of
+	// it — this is the direction of the independent-validity check that
+	// runs unconditionally (not gated behind a cryptobyte failure), so a
+	// fixture that is malformed in a way cryptobyte's narrower profile
+	// characterizers happen not to notice still gets caught here.
+	for _, c := range cases {
+		c := c
+		t.Run("independently-well-formed/"+c.Label, func(t *testing.T) {
+			if err := independentlyWellFormedBER(c.Raw); err != nil {
+				t.Errorf("%s: independent goldap BER decoder rejects this committed fixture as malformed: %v", c.Path, err)
+			}
+		})
+	}
 
 	verdict := "cryptobyte"
 	if !cryptobyteSafe {
@@ -724,4 +810,95 @@ func assertRejected(t *testing.T, raw []byte, why string) {
 	if _, err := characterizeLDAPMessage(raw); err == nil {
 		t.Fatalf("expected rejection (%s), but cryptobyte characterization accepted the mutated message", why)
 	}
+}
+
+// TestIndependentBERDecoderIsDiscriminating is the sabotage check for
+// independentlyWellFormedBER itself: it proves the independent-validity
+// gate added to TestClickHouseWireCryptobyteDecision's per-fixture loop is
+// a real, discriminating second opinion — not a rubber stamp that always
+// returns nil regardless of input, which would silently reopen exactly the
+// sabotage path this gate exists to close (corrupting a committed fixture
+// and updating only its own session.json hash must not be able to pass
+// through this check unnoticed).
+//
+// The malformed cases below are deliberately restricted to violations of
+// definite-length BER itself — the encoding rule every LDAPMessage on the
+// wire is required to use (RFC 4511 §5.1) — rather than this file's own
+// narrow-profile choices (e.g. "only 'and'/'equalityMatch' filter tags"):
+// third_party/goldap/message is a general LDAP BER decoder, not a
+// characterizer of this narrow ClickHouse/libldap profile, so it is only
+// guaranteed to reject encodings that are malformed BER outright, not every
+// mutation characterizeLDAPMessage's narrower profile checks reject (e.g.
+// a syntactically-valid-but-differently-tagged Filter alternative is not
+// something a general LDAP decoder has any reason to refuse).
+func TestIndependentBERDecoderIsDiscriminating(t *testing.T) {
+	moduleRoot, err := wirefixture.ModuleRoot()
+	if err != nil {
+		t.Fatalf("locate module root: %v", err)
+	}
+	fixtureRoot := wirefixture.ClickHouseWireFixtureRoot(moduleRoot)
+	lines, err := wirefixture.ValidateFixtureRoot(fixtureRoot)
+	if err != nil {
+		t.Fatalf("validate fixture root %s: %v", fixtureRoot, err)
+	}
+	cases := loadFixtureCases(t, fixtureRoot, lines)
+
+	var bindTemplate, unbindTemplate []byte
+	for _, c := range cases {
+		switch c.PDU.Operation {
+		case wirefixture.OperationBindRequest:
+			if bindTemplate == nil {
+				bindTemplate = append([]byte(nil), c.Raw...)
+			}
+		case wirefixture.OperationUnbindRequest:
+			if unbindTemplate == nil {
+				unbindTemplate = append([]byte(nil), c.Raw...)
+			}
+		}
+	}
+	if bindTemplate == nil || unbindTemplate == nil {
+		t.Fatalf("need at least one bindRequest and one unbindRequest fixture as templates")
+	}
+	if len(bindTemplate) < 12 || len(unbindTemplate) < 2 {
+		t.Fatalf("template too short to safely mutate byte offset 1")
+	}
+
+	// Sanity check: the independent decoder must accept the real,
+	// un-mutated templates before we trust its verdict on mutated copies.
+	if err := independentlyWellFormedBER(bindTemplate); err != nil {
+		t.Fatalf("bind template sanity check: expected the independent decoder to accept the un-mutated template, got: %v", err)
+	}
+	if err := independentlyWellFormedBER(unbindTemplate); err != nil {
+		t.Fatalf("unbind template sanity check: expected the independent decoder to accept the un-mutated template, got: %v", err)
+	}
+
+	t.Run("indefinite-length", func(t *testing.T) {
+		// RFC 4511 requires definite-length BER; indefinite length (the
+		// 0x80 length-octet marker) is a malformation independent of any
+		// narrow profile.
+		mutated := append([]byte(nil), bindTemplate...)
+		mutated[1] = 0x80
+		if err := independentlyWellFormedBER(mutated); err == nil {
+			t.Fatalf("independent decoder accepted an indefinite-length outer SEQUENCE as well-formed")
+		}
+	})
+
+	t.Run("truncation", func(t *testing.T) {
+		mutated := bindTemplate[:len(bindTemplate)-10]
+		if err := independentlyWellFormedBER(mutated); err == nil {
+			t.Fatalf("independent decoder accepted a truncated BindRequest as well-formed")
+		}
+	})
+
+	t.Run("trailing-data-after-message", func(t *testing.T) {
+		// This fixture-corpus convention is "one complete PDU per file,
+		// nothing more" — the same convention characterizeLDAPMessage
+		// enforces via its own outer-SEQUENCE "trailing bytes" check,
+		// which independentlyWellFormedBER mirrors via cursor.HasMoreData
+		// (message.ReadLDAPMessage alone does not check this on its own).
+		mutated := append(append([]byte(nil), unbindTemplate...), 0xde, 0xad, 0xbe, 0xef)
+		if err := independentlyWellFormedBER(mutated); err == nil {
+			t.Fatalf("independent decoder accepted trailing bytes after a complete LDAPMessage as well-formed")
+		}
+	})
 }
