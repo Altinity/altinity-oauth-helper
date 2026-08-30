@@ -11,6 +11,7 @@ require (
 	github.com/urfave/cli/v3 v3.10.1
 	github.com/vjeantet/goldap v0.0.0-20260720153039-a51461838017
 	github.com/vjeantet/ldapserver v1.0.2-0.20260725103726-663e6b9910fb
+	golang.org/x/crypto v0.54.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -21,7 +22,6 @@ require (
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 )
 
