@@ -132,8 +132,9 @@ func (c *connection) handleBind(msgID int32, op cryptobyte.String, hasCritical b
 	}
 
 	// The one call site for Verifier.Verify in this package (mechanically
-	// enforced elsewhere by an AST-based architecture contract): its
-	// error already covers every cryptographic/identity-policy failure
+	// enforced elsewhere by the go/types-based type-aware architecture
+	// contract in internal/securitytest/profile_types_contract_test.go):
+	// its error already covers every cryptographic/identity-policy failure
 	// reason, none of which crosses the invalidCredentials boundary
 	// below.
 	result, err := c.verifier.Verify(c.ctx, username, password)

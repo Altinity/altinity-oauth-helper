@@ -329,12 +329,25 @@ func isChanType(t types.Type) bool { _, ok := t.(*types.Chan); return ok }
 
 // typeCarries reports whether t is, or structurally carries, a type matched
 // by want. A named type (after alias resolution) is matched when its own
-// underlying type matches, and is otherwise opaque: an in-package named
-// composite's components are flagged at their own declaration idents by
-// collectTypedSites' Defs walk, and an external named type's internals are
-// the other package's state, not this package's — while a named type whose
-// underlying IS a map/channel (an http.Header-alike, wherever it is
-// declared) still matches here. seen guards against reference cycles.
+// underlying type matches, or when it is a generic instantiation whose
+// TypeArgs() themselves carry a matched type (see below); it is otherwise
+// opaque: an in-package named composite's components are flagged at their
+// own declaration idents by collectTypedSites' Defs walk, and an external
+// named type's internals are the other package's state, not this package's
+// — while a named type whose underlying IS a map/channel (an http.Header-
+// alike, wherever it is declared) still matches here. seen guards against
+// reference cycles.
+//
+// Generic instantiations are not opaque the way an ordinary named
+// composite is: collectTypedSites' Defs walk records a generic type's
+// field types as DECLARED (e.g. `v T` on `type Box[T any] struct{ v T }`),
+// never per-instantiation substituted — so `Box[map[int]int]` used as a
+// struct field carries a map that no Defs-walk site would otherwise ever
+// see, since go/types substitutes type arguments into the underlying type
+// at instantiation but does not re-declare the field. Recursing into
+// TypeArgs() closes that gap for both a direct map/channel argument
+// (Box[map[int]int]) and a transitively-generic one (Box[Wrapper[chan
+// int]]), since typeCarries on each type argument is itself recursive.
 //
 // Constrained type parameters are covered without a dedicated case: for a
 // *types.TypeParam, Underlying() returns the interface derived from its
@@ -359,7 +372,14 @@ func typeCarries(t types.Type, want func(types.Type) bool, seen map[types.Type]b
 	if want(t.Underlying()) {
 		return true
 	}
-	if _, isNamed := t.(*types.Named); isNamed {
+	if named, isNamed := t.(*types.Named); isNamed {
+		if targs := named.TypeArgs(); targs != nil {
+			for i := 0; i < targs.Len(); i++ {
+				if typeCarries(targs.At(i), want, seen) {
+					return true
+				}
+			}
+		}
 		return false
 	}
 	switch u := t.Underlying().(type) {
@@ -977,6 +997,32 @@ func Use() any { return hiddenMap[map[int]int]() }
 	requireSiteMentioning(t, sites, "T", "the constrained generic `make(T)` with `T ~map[int]int`")
 }
 
+// TestProfileArchitecture_DetectsGenericInstantiationMapTypeArg: the review
+// pass-2 counterexample — a generic named type (`Box[T any]`) instantiated
+// at a map type (`Box[map[int32]int]`) used as an ordinary struct field.
+// Box's OWN underlying type is a struct, not a map, so before typeCarries
+// recursed into *types.Named.TypeArgs(), the opaque-Named short-circuit
+// returned false immediately and never looked at what T was substituted
+// with — even though go/types has already substituted the field's type to
+// map[int32]int on this instantiation. collectTypedSites' Defs walk cannot
+// catch this the way it catches an ordinary named composite's components:
+// it records Box's DECLARED field type (`v T`), never the per-instantiation
+// substituted type, so no other mechanism in the file saw this either.
+func TestProfileArchitecture_DetectsGenericInstantiationMapTypeArg(t *testing.T) {
+	tp := typecheckSynthetic(t, map[string]string{"synthetic.go": `package synthetic
+
+type Box[T any] struct {
+	v T
+}
+
+type Server struct {
+	active Box[map[int32]int]
+}
+`})
+	sites := collectTypedSites(tp, isMapType, nil)
+	requireSiteMentioning(t, sites, "map[int32]int", "the `active Box[map[int32]int]` field whose map only appears via a type argument")
+}
+
 // TestProfileArchitecture_DetectsInferredMakeChanAssignment /
 // ...VarMakeChanAssignment / ...NamedChanTypeAliasField /
 // ...FuncResultChanType: the channel-typed counterparts of the historical
@@ -1068,6 +1114,26 @@ func Use() any { return hiddenChan[chan int]() }
 `})
 	sites := collectTypedSites(tp, isChanType, nil)
 	requireSiteMentioning(t, sites, "T", "the constrained generic `make(T)` with `T ~chan int`")
+}
+
+// TestProfileArchitecture_DetectsGenericInstantiationChanTypeArg: the
+// channel-typed counterpart of
+// TestProfileArchitecture_DetectsGenericInstantiationMapTypeArg — `Box[chan
+// int]` used as a struct field, where the channel only appears via Box's
+// type argument, never at Box's own declaration.
+func TestProfileArchitecture_DetectsGenericInstantiationChanTypeArg(t *testing.T) {
+	tp := typecheckSynthetic(t, map[string]string{"synthetic.go": `package synthetic
+
+type Box[T any] struct {
+	v T
+}
+
+type Server struct {
+	work Box[chan int]
+}
+`})
+	sites := collectTypedSites(tp, isChanType, nil)
+	requireSiteMentioning(t, sites, "chan int", "the `work Box[chan int]` field whose channel only appears via a type argument")
 }
 
 // TestProfileArchitecture_TypeCheckerAllowsAllowlistedMapChanUsage is the
