@@ -277,6 +277,18 @@ push to `ghcr.io`, are multi-arch (amd64+arm64), and only ever push
 immutable, SHA-suffixed tags — neither pipeline is a PR-time gate; both
 trigger only on push to `main` (plus manual `workflow_dispatch`).
 
+PR-time verification is a separate, third workflow:
+[`.github/workflows/pr-gate.yml`](.github/workflows/pr-gate.yml) (workflow
+`PR gate`, single job `Required PR gate`). It runs on every pull request and
+every push to `main`, with no path filters, and executes `go build ./...`,
+`go vet ./...`, `go test -race ./...`, `go test -tags phase5release
+./internal/securitytest -count=1`, and `bash
+integration/clickhouse/tests/lib-tests.sh`. It publishes nothing, consumes no
+secrets, and holds only `contents: read`; the two image pipelines below
+publish but verify nothing. The real Docker ClickHouse compatibility matrix
+(`integration/clickhouse/run-all-builds.sh`) stays outside that gate and
+remains a manual, local suite.
+
 ### `ch-jwt-verify`
 
 **CI (default):** [`.github/workflows/build-ch-jwt-verify.yml`](.github/workflows/build-ch-jwt-verify.yml)

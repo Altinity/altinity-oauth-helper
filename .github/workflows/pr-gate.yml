@@ -1,0 +1,98 @@
+name: PR gate
+
+on:
+  # If a merge queue is ever enabled on `main`, a `merge_group:` trigger must be
+  # added here as well: without it the required `Required PR gate` context is
+  # never reported for a queue entry, so entries stall forever. That fails
+  # closed, but it presents as an outage rather than as a misconfiguration.
+  # Do not add the trigger before a queue actually exists.
+  #
+  # `types` must include `edited`, not just the opened/synchronize/reopened
+  # default: a base-branch retarget is delivered as an `edited` activity, not
+  # a new `synchronize`, and keeps the same head SHA. Without `edited` here, a
+  # PR proven green against base A can be retargeted onto protected `main` and
+  # keep that same green required check without the new merge result ever
+  # being tested — GitHub's required-check rule falls back to the head SHA's
+  # existing check when the test-merge commit has none of its own. Do not
+  # special-case skip title/body-only edits to "optimize" this back down —
+  # that reopens the exact gap this closes.
+  #
+  # Known limit of that protection, stated precisely because the general
+  # version of it is wrong: a `pull_request.edited` event produced with the
+  # repository's own `GITHUB_TOKEN` does NOT create a workflow run. The
+  # recursion guard has documented exceptions — `workflow_dispatch` and
+  # `repository_dispatch` always create runs, and `pull_request` with
+  # `opened`/`synchronize`/`reopened` does create runs but in an
+  # APPROVAL-REQUIRED state (someone with write access must approve them).
+  # `edited` is not among those exceptions.
+  #
+  # So `edited` closes the retarget gap only for base changes whose events
+  # actually reach Actions — a human, or an actor other than `GITHUB_TOKEN`.
+  # The two `GITHUB_TOKEN` cases are NOT equivalent, and the dangerous one is
+  # the retarget:
+  #
+  #   * `GITHUB_TOKEN` + base retarget (`edited`) CAN FAIL OPEN. No run is
+  #     created and the head SHA does not change, so a previous successful
+  #     `Required PR gate` on that same head remains the status satisfying
+  #     branch protection — the exact stale-green path this `types` list was
+  #     added to close. `strict: true` does not save it either: it requires
+  #     the head to be up to date with its base, and an unchanged head can
+  #     already contain the newly selected base's tip, so the requirement is
+  #     already satisfied without any fresh verification. Repository
+  #     automation therefore MUST NOT retarget a pull request's base with
+  #     `GITHUB_TOKEN`. This is a real prohibition, not a preference.
+  #
+  #   * `GITHUB_TOKEN` + `synchronize` fails closed. It creates a run in an
+  #     approval-required state, so the required check does not go green until
+  #     someone with write access approves it and it succeeds. Safe, but it is
+  #     not silent revalidation — do not expect it to behave like a
+  #     human-generated `synchronize`.
+  #
+  # `strict: true` branch protection narrows the reachable cases without being
+  # a complete substitute: an unchanged head can already be up to date with
+  # the newly selected base. This constraint is external to this file and
+  # deliberately has NO contract test — a structural YAML check cannot observe
+  # an event-delivery property, and asserting it would be exactly the kind of
+  # false assurance this file's other comments were corrected for. If
+  # automated retargeting ever becomes a real requirement, revisit the
+  # enforcement mechanism rather than assuming this trigger covers it.
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  required-pr-gate:
+    name: Required PR gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Race tests
+        run: go test -race ./...
+
+      - name: Phase 5 security tests
+        run: go test -tags phase5release ./internal/securitytest -count=1
+
+      - name: ClickHouse shell library tests
+        run: bash integration/clickhouse/tests/lib-tests.sh

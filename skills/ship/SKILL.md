@@ -478,17 +478,25 @@ review agents on this repo have edited files despite an explicit report-only bou
 
 ### 2.5 Reconcile and open this unit's PR
 
-1. Confirm required CI checks are green at this unit's current head. As of this
-   writing `altinity-oauth-helper`'s only workflow
-   (`.github/workflows/build-ch-jwt-verify.yml`) triggers on push to `main`, path-
-   filtered to `cmd/ch-jwt-verify/**`/`go.mod`/`go.sum`/`Dockerfile` — it publishes an
-   image, it is not a PR-time test/lint gate, so it will not run against this unit's PR
-   at all. The local gate (`go build ./... && go vet ./... && go test ./...`) is the
-   real pre-merge signal; if the change is consumer-visible (wire contract, Helm chart,
-   an `examples/` recipe), also sanity-check it against the relevant example (e.g.
+1. Confirm required CI checks are green at this unit's current head. This repo's PR
+   verification status is **`Required PR gate`** (workflow `PR gate`,
+   `.github/workflows/pr-gate.yml`): it triggers unfiltered on every pull request and
+   every push to `main`, and runs `go build ./...`, `go vet ./...`,
+   `go test -race ./...`, `go test -tags phase5release ./internal/securitytest
+   -count=1`, and `bash integration/clickhouse/tests/lib-tests.sh` in one job. Wait for
+   it, and **match the run/check to the exact current head SHA** of this unit's branch,
+   never `gh run list --limit 1` order (footguns). Missing, pending, cancelled, or
+   failed gate state is *not ready* — do not proceed. The two image-publication
+   workflows (`build-ch-jwt-verify.yml`, `build-ch-oauth-ldap.yml`) are separate
+   post-merge publication concerns, path-filtered to push-to-`main`; they verify
+   nothing and never substitute for `Required PR gate`. Local verification is still
+   required, not optional: run the local gate (`go build ./... && go vet ./... &&
+   go test ./...`) plus the `-race`, `phase5release` and shell-library commands CI
+   adds — i.e. all five listed above — yourself, and if the change is
+   consumer-visible (wire contract, Helm chart, an `examples/` recipe), also
+   sanity-check it against the relevant example (e.g.
    `examples/curl/verify.sh`, or the `examples/_platform` docker-compose stack) — there
-   is no automated e2e suite to catch it otherwise. If a PR-time CI gate is added later,
-   key every wait on the head SHA, not `gh run list --limit 1` order (footguns).
+   is no automated e2e suite to catch it otherwise.
 2. **Reconcile per cycle step 4 — this unit's own entry only.** One unit per PR means
    there is no other unit's CHANGELOG entry sharing this diff to dedupe against: update
    `CHANGELOG.md` under `[Unreleased]` for this unit alone (this repo does not currently

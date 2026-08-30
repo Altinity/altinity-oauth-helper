@@ -230,12 +230,18 @@ does cover, and which resolves this package through the root module's
   could — and asserts the attributable goroutine count stays bounded near
   the cap rather than growing with the number of pipelined requests.
 - `TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShutdown`
-  drives a real non-reading client over TCP (a shrunk receive buffer plus a
-  volume of ordinary, fast-completing Binds whose responses are never read)
-  and asserts both that the server actively closes the connection once
-  `WriteTimeout` elapses and that `Server.Stop()` still completes promptly
-  despite it — proving the shutdown-hang scenario above is fixed, not
-  merely that the connection eventually errors out.
+  drives a non-reading client over an unbuffered `net.Pipe` (handed to
+  `Serve` by a one-connection test listener) and asserts both that the
+  server actively closes the connection once `WriteTimeout` elapses and
+  that `Server.Stop()` still completes promptly despite it — proving the
+  shutdown-hang scenario above is fixed, not merely that the connection
+  eventually errors out. It deliberately does **not** use a real socket:
+  whether a real write blocks at all depends on the host's TCP buffer
+  sizing, and a 20 MiB response that stalls immediately on macOS
+  (`net.inet.tcp.sendspace` 128 KiB) was delivered in full, without ever
+  engaging `WriteTimeout`, on a hosted Linux CI runner. `net.Pipe` is
+  unbuffered by construction, so the stall this patch is about is
+  deterministic on every platform.
 
 ## Aggregate pre-auth memory across connections was unbounded
 

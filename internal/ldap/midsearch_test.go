@@ -29,21 +29,30 @@ import (
 // to the real socket returns. This package's own handleSearch
 // (internal/ldap/search.go) holds the connection's session lock for its
 // entire entry-emission loop and never re-checks context cancellation
-// inside that loop, so — exactly like the existing
+// inside that loop, so a test client that stops reading immediately after
+// issuing Search drives the server into a blocked write once accumulated
+// unread response bytes exceed the OS socket buffers, at which point the
+// server's own WriteTimeout (or, in the abrupt-close variant below, an
+// immediate write error from the closed peer) is what actually unblocks it.
+// Many small pipelined responses do not reliably reach that point — a
+// default socket buffer can absorb tens of thousands of them without ever
+// stalling — so, while this sub-task's description asks for "many roles",
+// manyLargeRoles below uses a handful of large role values rather than a
+// large count of small ones.
+//
+// Note precisely what that does and does not underwrite. These two tests
+// deliberately stay on real TCP, because a real socket being Unbound or
+// severed mid-emission is the subject; the stall is only their setup. But
+// payload-size-versus-socket-buffer is a host-dependent way to reach a
+// stall: see
 // TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShutdown
-// (adversarial_test.go) already established — a test client that stops
-// reading immediately after issuing Search reliably drives the server into
-// a genuinely blocked write once accumulated unread response bytes exceed
-// the OS socket buffers, at which point the server's own WriteTimeout (or,
-// in the abrupt-close variant below, an immediate write error from the
-// closed peer) is what actually unblocks it. That same comment explicitly
-// found many small pipelined responses UNRELIABLE at forcing this ("this
-// environment's default buffer comfortably absorbed tens of thousands of
-// small pipelined responses without ever stalling"), so — while this
-// sub-task's description asks for "many roles" — manyLargeRoles below uses
-// a handful of large role values (matching that proven-reliable order of
-// magnitude) rather than a large count of small ones, to get a
-// deterministic mid-emission stall instead of a flaky one.
+// (adversarial_test.go), whose write-deadline proof moved to an unbuffered
+// net.Pipe precisely because a hosted Linux runner absorbed an entire
+// ~40 MiB response without the server's write ever blocking. These tests
+// tolerate that outcome, which is why they may keep the real socket: if the
+// stall fails to materialize on some host, the mid-emission window merely
+// narrows, and their goroutine-unwind, no-leak and bounded-shutdown
+// assertions all still hold. They are not the write-deadline proof.
 
 // manyLargeRoles returns n distinct role names, each individually large
 // (sizeEach extra bytes of padding), so a real Search response emitting
@@ -93,13 +102,11 @@ func waitForGoroutineCountNear(t *testing.T, baseline, slack int, timeout time.D
 // WriteTimeout (so the pacing mechanism above resolves quickly and
 // deterministically) and returns everything the two tests below need to
 // both drive it and assert bounded shutdown explicitly.
-func startMidSearchServer(t *testing.T, v verifier, r roleResolver) (addr string, srv *Server, ln net.Listener, serveErr chan error) {
+func startMidSearchServer(t *testing.T, v verifier, r roleResolver) (addr string, ln net.Listener, serveErr chan error, stop func()) {
 	t.Helper()
 	rootCtx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 
-	var err error
-	srv, err = New(rootCtx, protoConfig(), v, r)
+	srv, err := New(rootCtx, protoConfig(), v, r)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -110,15 +117,22 @@ func startMidSearchServer(t *testing.T, v verifier, r roleResolver) (addr string
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
-	serveErr = make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
-	return ln.Addr().String(), srv, ln, serveErr
+	// startServing (protocol_test.go) registers the fail-safe teardown
+	// before this function returns, so an assertion that aborts one of the
+	// tests below — before it ever reaches requireBoundedShutdown — cannot
+	// leak a live server into the next test. See that function's doc for
+	// why a leaked server is a data race and not merely untidy.
+	serveErr, stop = startServing(t, srv, ln, cancel)
+	return ln.Addr().String(), ln, serveErr, stop
 }
 
 // requireBoundedShutdown closes ln, requires Serve to return, then requires
 // srv.Stop() to return — both within generous bounds — proving the
 // mid-Search termination did not leave anything pinning graceful shutdown.
-func requireBoundedShutdown(t *testing.T, srv *Server, ln net.Listener, serveErr chan error) {
+// It drives the final step through startServing's idempotent stop closure
+// so the fail-safe cleanup registered at start becomes a no-op rather than
+// a second, panicking Stop().
+func requireBoundedShutdown(t *testing.T, ln net.Listener, serveErr chan error, stop func()) {
 	t.Helper()
 	if err := ln.Close(); err != nil {
 		t.Fatalf("ln.Close: %v", err)
@@ -129,7 +143,7 @@ func requireBoundedShutdown(t *testing.T, srv *Server, ln net.Listener, serveErr
 		t.Fatalf("Serve never returned")
 	}
 	stopDone := make(chan struct{})
-	go func() { srv.Stop(); close(stopDone) }()
+	go func() { stop(); close(stopDone) }()
 	select {
 	case <-stopDone:
 	case <-time.After(5 * time.Second):
@@ -166,7 +180,7 @@ func TestMidSearch_UnbindDuringResultEmissionUnwindsCleanly(t *testing.T) {
 	big := account("alice", "https://idp.test/", "sub-alice", sentinelToken, bigRoles)
 	small := account("bob", "https://idp.test/", "sub-bob", "jwt-bob", []string{"ch_bob_role"})
 
-	addr, srv, ln, serveErr := startMidSearchServer(t, newFakeVerifier(big, small), newFakeRoles(big, small))
+	addr, ln, serveErr, stop := startMidSearchServer(t, newFakeVerifier(big, small), newFakeRoles(big, small))
 	appLog := swapAppLog(t)
 
 	runtime.GC()
@@ -220,7 +234,7 @@ func TestMidSearch_UnbindDuringResultEmissionUnwindsCleanly(t *testing.T) {
 	}
 
 	requireFreshConnectionUnaffected(t, addr)
-	requireBoundedShutdown(t, srv, ln, serveErr)
+	requireBoundedShutdown(t, ln, serveErr, stop)
 }
 
 // ---- abrupt TCP close during Search result emission ------------------------
@@ -231,7 +245,7 @@ func TestMidSearch_AbruptCloseDuringResultEmissionUnwindsCleanly(t *testing.T) {
 	big := account("alice", "https://idp.test/", "sub-alice", sentinelToken, bigRoles)
 	small := account("bob", "https://idp.test/", "sub-bob", "jwt-bob", []string{"ch_bob_role"})
 
-	addr, srv, ln, serveErr := startMidSearchServer(t, newFakeVerifier(big, small), newFakeRoles(big, small))
+	addr, ln, serveErr, stop := startMidSearchServer(t, newFakeVerifier(big, small), newFakeRoles(big, small))
 	appLog := swapAppLog(t)
 
 	runtime.GC()
@@ -271,5 +285,5 @@ func TestMidSearch_AbruptCloseDuringResultEmissionUnwindsCleanly(t *testing.T) {
 	}
 
 	requireFreshConnectionUnaffected(t, addr)
-	requireBoundedShutdown(t, srv, ln, serveErr)
+	requireBoundedShutdown(t, ln, serveErr, stop)
 }

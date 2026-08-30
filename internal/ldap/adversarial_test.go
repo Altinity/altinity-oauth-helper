@@ -110,8 +110,7 @@ func TestAdversarial_StalledPartialBodyReadTimesOutWithoutBlockingShutdown(t *te
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
+	serveErr, stop := startServing(t, srv, ln, cancel)
 	addr := ln.Addr().String()
 
 	// A valid 2-byte header declaring a 64-byte body (0x30 = SEQUENCE,
@@ -166,7 +165,12 @@ func TestAdversarial_StalledPartialBodyReadTimesOutWithoutBlockingShutdown(t *te
 
 	stopDone := make(chan struct{})
 	go func() {
-		srv.Stop()
+		// stop() (see startServing) performs exactly this test's own
+		// shutdown sequence and also cancels the root context; going
+		// through it rather than calling srv.Stop() directly keeps the
+		// registered fail-safe cleanup's later invocation a no-op instead
+		// of a second, panicking Stop().
+		stop()
 		close(stopDone)
 	}()
 	select {
@@ -174,7 +178,6 @@ func TestAdversarial_StalledPartialBodyReadTimesOutWithoutBlockingShutdown(t *te
 	case <-time.After(3 * time.Second):
 		t.Fatalf("Stop() never returned — the stalled partial-body connection blocked graceful shutdown")
 	}
-	cancel()
 }
 
 // ---- 0b. bounded per-client in-flight requests / write-deadline shutdown --
@@ -350,95 +353,212 @@ func rawSearchMessage(messageID int, base, memberDN string) []byte {
 	return env.Bytes()
 }
 
+// singleConnListener is a minimal net.Listener that hands out exactly ONE
+// pre-made net.Conn — in practice the server half of a net.Pipe — from its
+// first Accept, then blocks in Accept until Close and returns an error from
+// every Accept afterwards. That is the same lifecycle contract a real
+// listener gives the vendored serve loop
+// (third_party/ldapserver/server.go's serve(): a non-timeout Accept error
+// is returned from Serve unless Stop has already closed chDone), so a test
+// using it keeps the ordinary "close the listener => Serve returns"
+// shutdown path intact. Close must be idempotent because Server.Stop()
+// closes s.Listener itself, after the test has already closed its own
+// reference.
+type singleConnListener struct {
+	handout   chan net.Conn // capacity 1, pre-loaded with the one connection
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newSingleConnListener(c net.Conn) *singleConnListener {
+	l := &singleConnListener{
+		handout: make(chan net.Conn, 1),
+		closed:  make(chan struct{}),
+	}
+	l.handout <- c
+	return l
+}
+
+// errSingleConnListenerClosed is deliberately NOT a net.Error whose
+// Timeout() reports true: the vendored serve loop treats a timeout Accept
+// error as "keep accepting", and this listener means the opposite.
+var errSingleConnListenerClosed = errors.New("singleConnListener: closed")
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	// Check closure FIRST, in its own non-blocking select. A single select
+	// over both channels would let a closed listener still hand out the
+	// queued connection: when several cases are ready, Go picks one
+	// uniformly at random, so Close() followed by Accept() would return the
+	// connection roughly half the time and violate net.Listener's contract
+	// that Accept must fail once Close has been called. Nothing in this
+	// package reaches that ordering today (Serve accepts once, at startup,
+	// long before any Close), but a listener whose contract holds only
+	// because of how its one caller happens to be sequenced is a trap for
+	// the next one.
+	select {
+	case <-l.closed:
+		return nil, errSingleConnListenerClosed
+	default:
+	}
+	select {
+	case c := <-l.handout:
+		return c, nil
+	case <-l.closed:
+		return nil, errSingleConnListenerClosed
+	}
+}
+
+func (l *singleConnListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr { return pipeListenerAddr{} }
+
+// pipeListenerAddr is the net.Addr singleConnListener reports. Nothing on
+// the server path depends on its value, but net.Listener requires the
+// method and the vendored serve loop stringifies the accepted connection's
+// address, so it must be non-nil and safe to stringify.
+type pipeListenerAddr struct{}
+
+func (pipeListenerAddr) Network() string { return "pipe" }
+func (pipeListenerAddr) String() string  { return "pipe" }
+
 // TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShutdown
 // proves the other half of third_party/ldapserver/PATCHES.md's third item:
-// a real non-reading client must have its connection actively closed once
-// the server's WriteTimeout elapses, and must not be able to block
-// Server.Stop() from completing.
+// a client that stops reading its own responses must have its connection
+// actively closed once the server's WriteTimeout elapses, and must not be
+// able to block Server.Stop() from completing.
 //
-// This drives the real production server over TCP with a single very large
-// response (one role whose mapped value is 20 MiB, producing one Search
-// entry response that large) rather than many small ones, and rather than
-// trying to shrink the connection's OS receive buffer: both alternatives
-// were tried and found unreliable in practice — shrinking the receive
-// buffer via SetReadBuffer does not reliably take effect on every platform,
-// and this environment's default buffer comfortably absorbed tens of
-// thousands of small pipelined responses without ever stalling. A single
-// write far larger than any realistic default buffer size is what reliably
-// forces the server's bw.Write/Flush call to genuinely block against an
-// unread connection, regardless of the platform's exact buffer sizing.
+// The mechanism under test is a genuinely blocked write, so the test needs
+// a connection on which "the peer stopped reading" reliably means "the
+// server's next bw.Write/Flush blocks". A real socket does not provide
+// that. How much a non-reading peer absorbs before the server blocks is
+// decided by the host's TCP send/receive buffer sizing, and that varies by
+// orders of magnitude across the platforms this suite runs on: darwin
+// defaults net.inet.tcp.sendspace/recvspace to 128 KiB, while a hosted
+// Linux runner absorbed an entire ~40 MiB Search response without the
+// server's write ever blocking once. No payload size is therefore a
+// portable proof — any constant large enough for one host is a magic
+// number racing the next host's tuning, and an expensive one to allocate
+// and copy under -race.
+//
+// net.Pipe eliminates that variable rather than guessing at it: it is a
+// synchronous, completely unbuffered in-memory net.Conn pair, so a Write
+// blocks until the peer actually reads those bytes. The instant the client
+// half stops reading, the server's flush is blocked by construction rather
+// than by arithmetic, which makes both a short WriteTimeout and a tight
+// assertion sound. net.Pipe also implements SetReadDeadline/
+// SetWriteDeadline, which is precisely what the vendored write path needs
+// (client.go's writeMessage arms c.srv.WriteTimeout immediately before
+// every bw.Write/Flush). Nothing else about the server changes: Server.Serve
+// takes a net.Listener and the vendored serve loop applies deadlines
+// through net.Conn, never against concrete TCP types, so this still drives
+// the real production accept loop, route, connectionHandler, session and
+// response encoding.
+//
+// What the design trades away is end-to-end real-TCP backpressure: this
+// test no longer says anything about kernel socket buffers. That is the
+// right trade, because proving those was never this test's distinctive
+// job — protocol_test.go drives this same server over real TCP extensively
+// (as do conncap_test.go, hostile_dn_test.go and midsearch_test.go) —
+// whereas the write-deadline-plus-graceful-shutdown mechanism only this
+// test covers lives entirely above the transport: writeMessage's
+// SetWriteDeadline, the single writer goroutine's close-on-first-write-
+// error path, and Stop()'s wg.Wait() draining the client that those two
+// release.
+//
+// The short WriteTimeout below overrides the production 30s value purely so
+// the test completes quickly; it is the identical field New wires up in
+// production.
 func TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShutdown(t *testing.T) {
-	hugeRole := strings.Repeat("x", 20<<20) // 20 MiB — see doc comment above.
-	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{hugeRole})
+	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	srv, err := New(rootCtx, protoConfig(), newFakeVerifier(acct), newFakeRoles(acct))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	// A short write deadline, overriding the production 30s value purely so
-	// this test completes quickly and deterministically — it still
-	// exercises the identical mechanism New wires up in production
-	// (third_party/ldapserver/client.go's writeMessage), just with a
-	// smaller bound.
-	srv.ldapSrv.WriteTimeout = 300 * time.Millisecond
-	srv.ldapSrv.ReadTimeout = 10 * time.Second
+	const writeTimeout = 500 * time.Millisecond
+	srv.ldapSrv.WriteTimeout = writeTimeout
+	srv.ldapSrv.ReadTimeout = 30 * time.Second
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
-	addr := ln.Addr().String()
+	clientConn, serverConn := net.Pipe()
+	ln := newSingleConnListener(serverConn)
+	serveErr, stop := startServing(t, srv, ln, cancel)
+	// Registered AFTER startServing so this runs BEFORE its teardown
+	// (t.Cleanup is LIFO): closing the client half fails any still-pending
+	// server write immediately, so cleanup after an aborted assertion
+	// never has to wait out a deadline to drain the server.
+	t.Cleanup(func() { _ = clientConn.Close() })
 
-	rawConn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("raw dial: %v", err)
-	}
-	defer rawConn.Close()
-
-	// Bind first, over the same raw connection, and read its (small)
-	// response normally — the huge role only appears in the Search
-	// response below, so this does not affect the scenario this test is
-	// about.
-	if _, err := rawConn.Write(rawSimpleBindMessage(1, protoBindDN("alice"), "jwt-alice")); err != nil {
+	// Bind first, over the same connection, and read its (small) response
+	// normally — so the stall below is unambiguously a Search-response
+	// stall on an authenticated connection, not anything about the Bind
+	// path.
+	if _, err := clientConn.Write(rawSimpleBindMessage(1, protoBindDN("alice"), "jwt-alice")); err != nil {
 		t.Fatalf("write bind: %v", err)
 	}
-	rawConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	bindBuf := make([]byte, 4096)
-	if _, err := rawConn.Read(bindBuf); err != nil {
+	if err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline (bind): %v", err)
+	}
+	bindPkt, err := ber.ReadPacket(clientConn)
+	if err != nil {
 		t.Fatalf("read bind response: %v", err)
 	}
+	if code, matchedDN, diagnostic := bindResponseFields(t, bindPkt, 1); code != int64(ldapserver.LDAPResultSuccess) {
+		t.Fatalf("bind resultCode=%d matchedDN=%q diagnostic=%q, want success", code, matchedDN, diagnostic)
+	}
 
-	// Issue the Search that will produce the one huge entry response, then
-	// deliberately read nothing at all for well past WriteTimeout: any read
-	// here, even a small one, could drain enough of the response to mask a
-	// genuine stall.
-	if _, err := rawConn.Write(rawSearchMessage(2, protoGroupBaseDN, protoBindDN("alice"))); err != nil {
+	// Arm the read deadline for the whole stall phase NOW, while both ends
+	// of the pipe are still open: net.Pipe's SetDeadline returns
+	// io.ErrClosedPipe once EITHER end is closed, and the server closing
+	// its end is exactly the outcome under test below, so this cannot be
+	// deferred until just before the read. It exists only so a regression
+	// fails the test instead of hanging it.
+	if err := clientConn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline (stall phase): %v", err)
+	}
+
+	// Issue the Search that produces the entry response, then read NOTHING
+	// at all. On this unbuffered pipe the server's very first flush of that
+	// response blocks the moment it is attempted and stays blocked, so
+	// writeMessage's write deadline is the only thing that can ever free
+	// it.
+	if _, err := clientConn.Write(rawSearchMessage(2, protoGroupBaseDN, protoBindDN("alice"))); err != nil {
 		t.Fatalf("write search: %v", err)
 	}
-	time.Sleep(1500 * time.Millisecond)
+	// Wait well past that deadline without reading. Any read here, however
+	// small, would consume the pending write and let the server carry on,
+	// masking the exact stall this test exists to observe.
+	time.Sleep(5 * writeTimeout)
 
-	// Only now drain whatever is available. A server that is still healthy
-	// (bug present) either blocks until our own read deadline below, or
-	// eventually delivers the entire ~20 MiB+ response; a server that
-	// correctly enforced WriteTimeout instead closes the connection after
-	// writing only a small fraction of it, which io.Copy surfaces as a
-	// clean EOF (nil error) well before the full size.
-	rawConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	total, copyErr := io.Copy(io.Discard, rawConn)
-	if copyErr != nil {
-		t.Fatalf("expected the server to have closed the connection cleanly (EOF) after its write deadline elapsed, got error instead: %v (bytes drained: %d)", copyErr, total)
-	}
-	const fullResponseFloor = 20 << 20 // the huge role value alone, ignoring envelope/DN overhead
-	const truncatedCeiling = 15 << 20  // generous margin above the buffer this environment was observed to actually admit (~1-2 MiB) and well below fullResponseFloor
-	if total >= truncatedCeiling {
-		t.Fatalf("drained %d bytes (>= %d) before the connection closed — expected the response to be truncated well short of the full ~%d+ byte entry, proving the server never actually stalled on the write",
-			total, truncatedCeiling, fullResponseFloor)
+	// Only now read. A server that enforced WriteTimeout has already had
+	// its write fail and closed the connection (client.go's writer
+	// goroutine calls c.rwc.Close() on the first write error), which on a
+	// pipe surfaces here as a clean io.EOF carrying zero bytes: the
+	// response was never delivered at all. A server that did NOT enforce
+	// it is still parked in that same flush with the bytes still pending,
+	// so this read is handed them instead — which is what makes the
+	// assertion below an observation of the deadline mechanism rather than
+	// of an incidental disconnect.
+	buf := make([]byte, 4096)
+	n, readErr := clientConn.Read(buf)
+	switch {
+	case errors.Is(readErr, io.EOF):
+		if n != 0 {
+			t.Fatalf("read %d bytes alongside EOF — a write the server abandoned on its deadline must never deliver any of the stalled response", n)
+		}
+	case readErr == nil:
+		t.Fatalf("server delivered %d bytes of the stalled response after %v of the client reading nothing — its write was never bounded by WriteTimeout (%v), so the connection was never closed",
+			n, 5*writeTimeout, writeTimeout)
+	default:
+		t.Fatalf("expected the server to have closed the connection cleanly (EOF) once its write deadline elapsed, got %d bytes and error instead: %v", n, readErr)
 	}
 
-	// The stalled connection must not prevent graceful shutdown.
+	// The stalled connection must not prevent graceful shutdown either.
+	// Closing our own listener reference makes Accept return
+	// errSingleConnListenerClosed, which Serve must surface by returning.
 	if err := ln.Close(); err != nil {
 		t.Fatalf("ln.Close: %v", err)
 	}
@@ -450,7 +570,12 @@ func TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShut
 
 	stopDone := make(chan struct{})
 	go func() {
-		srv.Stop()
+		// stop() (see startServing) is exactly this sequence's remaining
+		// step plus root-context cancellation, and is idempotent — going
+		// through it rather than calling srv.Stop() directly keeps the
+		// registered fail-safe cleanup's later invocation a no-op instead
+		// of a second, panicking Stop().
+		stop()
 		close(stopDone)
 	}()
 	select {
@@ -458,12 +583,11 @@ func TestAdversarial_WriteDeadlineClosesStalledConnectionAndUnblocksGracefulShut
 	case <-time.After(5 * time.Second):
 		t.Fatalf("Stop() never returned — the stalled non-reading client blocked graceful shutdown (the exact defect PATCHES.md's third item fixes)")
 	}
-	cancel()
 
 	// A completely independent, fresh connection against the still-running
 	// server would be the usual final proof, but the server is already
 	// stopped above (proving graceful shutdown is exactly this test's
-	// point) — there is deliberately no listener left to dial here.
+	// point) — and this listener only ever had the one connection to give.
 }
 
 // ---- 1. blocking-verifier cancellation: root cancellation + Stop ----------
@@ -492,8 +616,7 @@ func TestAdversarial_ShutdownCancelsBlockedVerifierAndServerTerminates(t *testin
 		t.Fatalf("net.Listen: %v", err)
 	}
 
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
+	serveErr, stop := startServing(t, srv, ln, rootCancel)
 
 	bindDone := make(chan struct{})
 	go func() {
@@ -557,7 +680,11 @@ func TestAdversarial_ShutdownCancelsBlockedVerifierAndServerTerminates(t *testin
 		t.Fatalf("Serve never returned after closing the listener: server did not terminate")
 	}
 
-	srv.Stop()
+	// stop() (see startServing) is srv.Stop() plus the already-performed
+	// listener close and serveErr synchronization, and is idempotent — so
+	// the registered fail-safe cleanup's later invocation is a no-op rather
+	// than a second, panicking Stop().
+	stop()
 
 	select {
 	case <-bindDone:
