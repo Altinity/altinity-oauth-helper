@@ -65,7 +65,8 @@ import (
 //     Read the scope limit in that check's own doc comment before relying on
 //     it: it verifies the COMMENT, because a commit SHA cannot be resolved to
 //     a version or a declared runtime offline.
-//     GitHub Actions runners stopped shipping Node 20 on 2026-09-23;
+//     GitHub Actions runners stop shipping Node 20 on 2026-09-23 (still
+//     ahead as of this writing, 2026-08-30);
 //     a `node20`-declared action only keeps working because the runner
 //     silently re-executes it on Node 24 in the meantime — a compatibility
 //     shim, not a contract. Pinning below the node24 line means the gate
