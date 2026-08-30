@@ -28,12 +28,25 @@ on:
   #
   # So `edited` closes the retarget gap only for base changes whose events
   # actually reach Actions — a human, or an actor other than `GITHUB_TOKEN`.
-  # Repository automation must not retarget a pull request's base with
-  # `GITHUB_TOKEN`: it produces no gate run at all, and note that "just make
-  # it emit a synchronize instead" is not an automatic fix either, since a
-  # `GITHUB_TOKEN`-generated `synchronize` yields an approval-gated run rather
-  # than silent revalidation. Both cases fail closed, but an operator should
-  # not expect automatic revalidation from either.
+  # The two `GITHUB_TOKEN` cases are NOT equivalent, and the dangerous one is
+  # the retarget:
+  #
+  #   * `GITHUB_TOKEN` + base retarget (`edited`) CAN FAIL OPEN. No run is
+  #     created and the head SHA does not change, so a previous successful
+  #     `Required PR gate` on that same head remains the status satisfying
+  #     branch protection — the exact stale-green path this `types` list was
+  #     added to close. `strict: true` does not save it either: it requires
+  #     the head to be up to date with its base, and an unchanged head can
+  #     already contain the newly selected base's tip, so the requirement is
+  #     already satisfied without any fresh verification. Repository
+  #     automation therefore MUST NOT retarget a pull request's base with
+  #     `GITHUB_TOKEN`. This is a real prohibition, not a preference.
+  #
+  #   * `GITHUB_TOKEN` + `synchronize` fails closed. It creates a run in an
+  #     approval-required state, so the required check does not go green until
+  #     someone with write access approves it and it succeeds. Safe, but it is
+  #     not silent revalidation — do not expect it to behave like a
+  #     human-generated `synchronize`.
   #
   # `strict: true` branch protection narrows the reachable cases without being
   # a complete substitute: an unchanged head can already be up to date with
