@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "applicability": [
+    "24.8",
+    "25.8"
+  ],
+  "provenance_class": "constructed",
+  "mode": "construct-message-id-boundary",
+  "connection_count": 0,
+  "placeholder_length": 0,
+  "pdus": [
+    {
+      "sequence": 1,
+      "filename": "001-bind-messageid-127.ber",
+      "direction": "client-to-server",
+      "operation": "bindRequest",
+      "message_id": 127,
+      "sanitized_sha256": "d57ecffef12227db585e1b2fb88e887e6d48c8227eba38c900f43e03f267c455",
+      "redaction_status": "not-applicable-constructed",
+      "expected_semantics": "simple Bind, version 3, MessageID boundary 127 (single positive INTEGER content byte 0x7f)"
+    },
+    {
+      "sequence": 2,
+      "filename": "002-bind-messageid-128.ber",
+      "direction": "client-to-server",
+      "operation": "bindRequest",
+      "message_id": 128,
+      "sanitized_sha256": "368dbe53d3d373176c12a349ff6b2708f7fa18f25fb3e29f6c8519e5e185ebad",
+      "redaction_status": "not-applicable-constructed",
+      "expected_semantics": "simple Bind, version 3, MessageID boundary 128 (leading-zero positive INTEGER content 0x00 0x80)"
+    }
+  ]
+}
