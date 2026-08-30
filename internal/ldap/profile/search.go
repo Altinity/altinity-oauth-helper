@@ -33,7 +33,6 @@ package profile
 import (
 	"errors"
 	"net"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/cryptobyte"
@@ -203,7 +202,7 @@ func (c *connection) handleSearch(msgID int32, op cryptobyte.String, hasCritical
 		return c.writeSearchResultDone(msgID, resultInsufficientAccessRights, diagInsufficientAccess)
 	}
 
-	if len(attributes) != 1 || !strings.EqualFold(attributes[0], cnAttributeType) {
+	if len(attributes) != 1 || !asciiEqualFold(attributes[0], cnAttributeType) {
 		// Covers empty selection, "*", sole "1.1", multiple
 		// attributes, and any single attribute other than "cn" —
 		// every out-of-profile shape lands on this one reason.
@@ -284,8 +283,8 @@ func decodeMembershipFilter(filterTag asn1.Tag, filterContent cryptobyte.String,
 		return filterShapeInvalid
 	}
 
-	isObjClass1, isMember1 := strings.EqualFold(desc1, "objectClass"), strings.EqualFold(desc1, "member")
-	isObjClass2, isMember2 := strings.EqualFold(desc2, "objectClass"), strings.EqualFold(desc2, "member")
+	isObjClass1, isMember1 := asciiEqualFold(desc1, "objectClass"), asciiEqualFold(desc1, "member")
+	isObjClass2, isMember2 := asciiEqualFold(desc2, "objectClass"), asciiEqualFold(desc2, "member")
 
 	var objectClassVal, memberVal []byte
 	switch {
@@ -377,8 +376,10 @@ emitLoop:
 		}
 
 		deadline := c.clock().Add(c.writeTimeout)
+		searchDeadlineBinding := false
 		if !searchDeadline.IsZero() && searchDeadline.Before(deadline) {
 			deadline = searchDeadline
+			searchDeadlineBinding = true
 		}
 		if err := c.nc.SetWriteDeadline(deadline); err != nil {
 			return err
@@ -386,19 +387,29 @@ emitLoop:
 
 		n, werr := c.nc.Write(entryBytes)
 		if werr != nil {
-			if n == 0 && isTimeoutErr(werr) {
-				// The entry write itself reached its (possibly
-				// search-bounded) deadline with zero bytes on
-				// the wire: no partial PDU exists, so report
+			if searchDeadlineBinding && n == 0 && isTimeoutErr(werr) {
+				// The entry write itself reached its Search
+				// deadline (the operative, binding one — see
+				// searchDeadlineBinding above) with zero bytes
+				// on the wire: no partial PDU exists, so report
 				// timeLimitExceeded under a fresh ordinary
-				// deadline rather than closing.
+				// deadline rather than closing. A zero-byte
+				// timeout under the ordinary write deadline
+				// (searchDeadlineBinding false — either
+				// timeLimit==0 or the ordinary deadline was
+				// earlier) is a plain transport write stall,
+				// not a time-limit event, and falls through to
+				// the close below.
 				logSearchTerminal(username, int(sizeLimit), int(timeLimit), false, emitted, resultTimeLimitExceeded)
 				return c.writeSearchResultDone(msgID, resultTimeLimitExceeded, diagEmpty)
 			}
-			// Any bytes already written, or any other transport
-			// error: never append a further PDU after a partial
-			// one — the caller (server.go) closes on any non-nil
-			// error from this function.
+			// Any bytes already written, any other transport
+			// error, or a zero-byte timeout under the ordinary
+			// (non-Search) write deadline: never append a further
+			// PDU after a partial one, and never misreport a
+			// plain write stall as a time-limit event — the
+			// caller (server.go) closes on any non-nil error from
+			// this function.
 			return werr
 		}
 

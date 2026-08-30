@@ -121,7 +121,10 @@ func TestValidateConfig_UserRDNAttribute(t *testing.T) {
 // proves parsedConfig keeps UserRDNAttribute's exact configured spelling
 // (so it can be echoed back in operator-facing output unchanged) while
 // every comparison against it is defined to be case-insensitive
-// (strings.EqualFold), per Config.UserRDNAttribute's doc comment.
+// (asciiEqualFold), per Config.UserRDNAttribute's doc comment. This test
+// itself still uses strings.EqualFold to check the two spellings below,
+// since both are plain ASCII and it is comparing operator-configured
+// values, not wire bytes.
 func TestParseConfig_UserRDNAttributeSpellingPreservedCaseInsensitiveCompare(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.UserRDNAttribute = "UID"

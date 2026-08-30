@@ -1,14 +1,17 @@
 package profile
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/cryptobyte/asn1"
@@ -656,6 +659,22 @@ func TestDecodeMembershipFilter_NonRecursive(t *testing.T) {
 	}
 }
 
+// TestDecodeMembershipFilter_UnicodeFoldDescriptorRejected proves the
+// objectClass/member descriptor match uses ASCII-only case folding, not
+// strings.EqualFold's full Unicode folding. "objectClaſs" (U+017F LATIN
+// SMALL LETTER LONG S in place of the final 's') is
+// strings.EqualFold-equivalent to "objectClass" — Go's Unicode
+// case-folding tables fold U+017F to 's' — but attribute-type descriptors
+// are ASCII by grammar (see ValidAttributeDescriptor/asciiEqualFold), so
+// this out-of-profile descriptor must be rejected as filterShapeInvalid,
+// never silently accepted as the fixed objectClass predicate.
+func TestDecodeMembershipFilter_UnicodeFoldDescriptorRejected(t *testing.T) {
+	filter := filterAnd(filterEquality("objectClaſs", "groupOfNames"), filterEquality("member", testBoundDN))
+	if got := decodeMembershipFilter(0xa0, cryptobyte.String(filter[2:]), DN{}); got != filterShapeInvalid {
+		t.Fatalf("Unicode-fold-equivalent objectClass descriptor: got %v, want filterShapeInvalid", got)
+	}
+}
+
 // =========================================================================
 // sizeLimit / timeLimit execution
 // =========================================================================
@@ -896,6 +915,150 @@ func TestHandleSearch_TerminalResult3DeadlineIsFreshNotExpiredSearchDeadline(t *
 	expiredSearchDeadline := now.Add(1 * time.Second)
 	if !last.After(expiredSearchDeadline.Add(500 * time.Millisecond)) {
 		t.Fatalf("terminal Done deadline %v must not inherit the already-expired search deadline %v", last, expiredSearchDeadline)
+	}
+}
+
+// =========================================================================
+// Write-stall vs Search-deadline classification
+// =========================================================================
+
+// TestHandleSearch_WriteStallWithTimeLimitZeroClosesNotResult3 proves a
+// plain zero-byte write timeout under the ordinary (non-Search) write
+// deadline is classified as a transport write stall — the connection is
+// closed — not misreported as timeLimitExceeded. timeLimit=0 means no
+// Search deadline is ever operative, so the ordinary writeTimeout is the
+// sole binding deadline on the stalled entry write: the client here never
+// reads at all, so the first entry's Write blocks until that ordinary
+// deadline fires with zero bytes on the wire.
+func TestHandleSearch_WriteStallWithTimeLimitZeroClosesNotResult3(t *testing.T) {
+	groupBase := "ou=groups,dc=profile,dc=test"
+	roles := rolesNamed(2, "role")
+
+	parsed, err := parseConfig(newTestConfig())
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	boundDN, err := ParseDN(testBoundDN)
+	if err != nil {
+		t.Fatalf("ParseDN: %v", err)
+	}
+	clientConn, serverConn := net.Pipe()
+	c := &connection{
+		nc: serverConn, ctx: context.Background(), cfg: &parsed,
+		verifier: newFakeVerifier(), roles: newFakeResolver(),
+		clock: time.Now, writeTimeout: 200 * time.Millisecond,
+	}
+	c.replaceAuth(authState{Username: "alice", BoundDN: testBoundDN, boundDN: boundDN, Roles: roles})
+	defer func() { _ = clientConn.Close() }()
+
+	// timeLimit=0.
+	op := searchOp(groupBase, 2, 0, 0, 0, false, validMembershipFilter(testBoundDN), "cn")
+
+	var buf bytes.Buffer
+	orig := log.Logger
+	log.Logger = zerolog.New(&buf).Level(zerolog.InfoLevel)
+	var searchErr error
+	done := make(chan struct{})
+	go func() {
+		searchErr = c.handleSearch(1, cryptobyte.String(op), false)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for handleSearch to return")
+	}
+	log.Logger = orig
+
+	if searchErr == nil {
+		t.Fatal("a write stall with no operative Search deadline must close the connection (non-nil error), got nil")
+	}
+	if logged := strings.TrimSpace(buf.String()); logged != "" {
+		t.Fatalf("write stall must not log anything (in particular no time-limit-exceeded terminal), got: %s", logged)
+	}
+}
+
+// TestHandleSearch_WriteStallWithOperativeSearchDeadlineReturnsResult3
+// proves the complementary case: when the Search deadline genuinely is the
+// binding one (timeLimit small, ordinary writeTimeout larger), a zero-byte
+// write timeout on the first entry still reports timeLimitExceeded (result
+// 3) rather than closing — the entry write blocks with no reader present
+// until the (shorter) Search deadline fires, then the terminal
+// SearchResultDone is written under a fresh ordinary deadline once a
+// reader appears.
+func TestHandleSearch_WriteStallWithOperativeSearchDeadlineReturnsResult3(t *testing.T) {
+	groupBase := "ou=groups,dc=profile,dc=test"
+	roles := rolesNamed(2, "role")
+
+	parsed, err := parseConfig(newTestConfig())
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	boundDN, err := ParseDN(testBoundDN)
+	if err != nil {
+		t.Fatalf("ParseDN: %v", err)
+	}
+	clientConn, serverConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+	c := &connection{
+		nc: serverConn, ctx: context.Background(), cfg: &parsed,
+		verifier: newFakeVerifier(), roles: newFakeResolver(),
+		clock: time.Now, writeTimeout: 3 * time.Second,
+	}
+	c.replaceAuth(authState{Username: "alice", BoundDN: testBoundDN, boundDN: boundDN, Roles: roles})
+
+	// timeLimit=1s (searchDeadline), well inside the 3s ordinary
+	// writeTimeout, so the Search deadline is the binding one.
+	op := searchOp(groupBase, 2, 0, 0, 1, false, validMembershipFilter(testBoundDN), "cn")
+
+	type readResult struct {
+		env Envelope
+		err error
+	}
+	readCh := make(chan readResult, 1)
+	go func() {
+		// Deliberately does not read at all until well after the 1s
+		// Search deadline has fired, so the first entry's write
+		// genuinely stalls (zero bytes on the wire) until that
+		// deadline, rather than succeeding immediately against an
+		// eager reader.
+		time.Sleep(1300 * time.Millisecond)
+		body, err := readFrame(clientConn)
+		if err != nil {
+			readCh <- readResult{err: err}
+			return
+		}
+		env, decErr := decodeEnvelope(body)
+		readCh <- readResult{env: env, err: decErr}
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.handleSearch(1, cryptobyte.String(op), false)
+	}()
+
+	var searchErr error
+	select {
+	case searchErr = <-errCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handleSearch to return")
+	}
+	if searchErr != nil {
+		t.Fatalf("handleSearch: unexpected error: %v", searchErr)
+	}
+
+	var res readResult
+	select {
+	case res = <-readCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the terminal SearchResultDone")
+	}
+	if res.err != nil {
+		t.Fatalf("reading terminal SearchResultDone: %v", res.err)
+	}
+	code, _, _ := readSearchResultDone(t, res.env)
+	if code != int(resultTimeLimitExceeded) {
+		t.Fatalf("result = %d, want timeLimitExceeded (3)", code)
 	}
 }
 

@@ -88,7 +88,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 
 	"golang.org/x/crypto/cryptobyte"
@@ -154,8 +153,8 @@ type diffMessage struct {
 // description/value bytes (not just a classification quirk local to one
 // side) is what would make the two decoders disagree here.
 func classifyMembershipPair(desc1, val1, desc2, val2 string) (objectClass, memberDN string, ok bool) {
-	isObjClass1, isMember1 := strings.EqualFold(desc1, "objectClass"), strings.EqualFold(desc1, "member")
-	isObjClass2, isMember2 := strings.EqualFold(desc2, "objectClass"), strings.EqualFold(desc2, "member")
+	isObjClass1, isMember1 := asciiEqualFold(desc1, "objectClass"), asciiEqualFold(desc1, "member")
+	isObjClass2, isMember2 := asciiEqualFold(desc2, "objectClass"), asciiEqualFold(desc2, "member")
 	switch {
 	case isObjClass1 && isMember2 && !isObjClass2 && !isMember1:
 		return val1, val2, true

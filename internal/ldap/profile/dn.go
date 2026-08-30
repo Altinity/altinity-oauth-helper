@@ -67,7 +67,7 @@ func (d DN) Equal(other DN) bool {
 		return false
 	}
 	for i := range d.rdns {
-		if !strings.EqualFold(d.rdns[i].attrType, other.rdns[i].attrType) {
+		if !asciiEqualFold(d.rdns[i].attrType, other.rdns[i].attrType) {
 			return false
 		}
 		if d.rdns[i].value != other.rdns[i].value {
@@ -117,6 +117,42 @@ func isDescriptorChar(c byte, first bool) bool {
 		return false
 	}
 	return (c >= '0' && c <= '9') || c == '-'
+}
+
+// asciiEqualFold reports whether a and b are equal under ASCII-only
+// case-folding (only 'A'-'Z' vs 'a'-'z' are considered equivalent; every
+// other byte, including any non-ASCII byte, must match exactly).
+// attribute-type descriptors are grammar-restricted to
+// [A-Za-z][A-Za-z0-9-]* (see ValidAttributeDescriptor/isDescriptorChar), so
+// this is the correct equivalence for comparing them — unlike
+// strings.EqualFold, which performs full Unicode case-folding and so
+// treats some non-ASCII code points (e.g. U+017F LATIN SMALL LETTER LONG S)
+// as equal to an ASCII letter ('s'). Using strings.EqualFold on a
+// wire-derived descriptor would let such a byte sequence be misclassified
+// as in-profile.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca == cb {
+			continue
+		}
+		if asciiToLower(ca) != asciiToLower(cb) {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiToLower lower-cases c if it is an ASCII uppercase letter, leaving
+// every other byte (including non-ASCII bytes) unchanged.
+func asciiToLower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // isSpecialEscapeChar reports whether a two-byte '\'+c escape represents c
@@ -176,7 +212,7 @@ func ParseDN(raw string) (DN, error) {
 		// Insignificant unescaped spaces between the descriptor and '='.
 		i = skipSpaces(b, i)
 		if i >= len(b) || b[i] != '=' {
-			return DN{}, fmt.Errorf("profile: dn: expected '=' after attribute type %q", attrType)
+			return DN{}, fmt.Errorf("profile: dn: expected '=' after attribute-type descriptor starting at byte %d", typeStart)
 		}
 		i++ // consume '='
 
@@ -198,10 +234,10 @@ func ParseDN(raw string) (DN, error) {
 		value, escaped = trimTrailingUnescapedSpaces(value, escaped)
 
 		if bytesContainNUL(value) {
-			return DN{}, fmt.Errorf("profile: dn: value for attribute type %q decodes to a NUL byte", attrType)
+			return DN{}, fmt.Errorf("profile: dn: value for the attribute type starting at byte %d decodes to a NUL byte", typeStart)
 		}
 		if !utf8.Valid(value) {
-			return DN{}, fmt.Errorf("profile: dn: value for attribute type %q does not decode to valid UTF-8", attrType)
+			return DN{}, fmt.Errorf("profile: dn: value for the attribute type starting at byte %d does not decode to valid UTF-8", typeStart)
 		}
 
 		rdns = append(rdns, attributeTypeAndValue{attrType: attrType, value: string(value)})
@@ -356,8 +392,8 @@ func ParseBindDN(candidate string, base DN, rdnAttribute string) (string, error)
 	}
 
 	leading := parsed.rdns[0]
-	if !strings.EqualFold(leading.attrType, rdnAttribute) {
-		return "", fmt.Errorf("profile: dn: bind DN leading RDN attribute %q does not match configured user_rdn_attribute %q", leading.attrType, rdnAttribute)
+	if !asciiEqualFold(leading.attrType, rdnAttribute) {
+		return "", errors.New("profile: dn: bind DN leading RDN attribute does not match configured user_rdn_attribute")
 	}
 	if leading.value == "" {
 		return "", errors.New("profile: dn: bind DN leading RDN value must not be empty")

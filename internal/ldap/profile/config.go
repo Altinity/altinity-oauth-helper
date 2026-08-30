@@ -27,8 +27,12 @@ type Config struct {
 	// UserRDNAttribute is the attribute type that must lead every Bind DN's
 	// leading RDN (e.g. "uid"). Its configured spelling is preserved for
 	// display/config-echo purposes; every comparison against a request's
-	// attribute type is case-insensitive (strings.EqualFold), matching LDAP
-	// attribute-type equivalence.
+	// (wire-derived) attribute type is case-insensitive under ASCII-only
+	// folding (asciiEqualFold, not strings.EqualFold — attribute-type
+	// descriptors are ASCII by grammar, and strings.EqualFold's full
+	// Unicode folding would let a non-ASCII byte sequence be misclassified
+	// as equivalent to an ASCII letter), matching LDAP attribute-type
+	// equivalence over this profile's restricted descriptor grammar.
 	UserRDNAttribute string
 	// RoleCNPrefix is prepended to every mapped role name when rendering a
 	// synthetic group DN's "cn" value. It is a transport-formatting prefix,
@@ -85,7 +89,7 @@ type parsedConfig struct {
 	// canonicalized re-rendering.
 	groupBaseText string
 	// rdnAttribute preserves Config.UserRDNAttribute's exact configured
-	// spelling; every comparison against it must use strings.EqualFold, per
+	// spelling; every comparison against it must use asciiEqualFold, per
 	// Config.UserRDNAttribute's doc comment.
 	rdnAttribute string
 	rolePrefix   string

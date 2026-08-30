@@ -661,9 +661,23 @@ Measured physical LOC for the nine production files this replaces
 (`server.go`, `frame.go`, `protocol.go`, `session.go`, `bind.go`,
 `search.go`, `dn.go`, `encode.go`, `logging.go`) plus `config.go` (the public
 `Config`/`ValidateConfig` surface) and `doc.go` (package-status doc) — using
-Phase 1's physical-line definition, comments and blanks counted — is
-recorded in the Phase 2 sub-task handoff; see that record for the exact
-per-file total and its relationship to the plan's 2,500-line landing zone.
+Phase 1's physical-line definition, comments and blanks counted, i.e.
+`wc -l` summed over exactly those eleven files (equivalently: `wc -l
+$(ls internal/ldap/profile/*.go | grep -v _test.go)`) — is **2,659** as of
+the phase-2 compat-profile sub-task that hardened the write-stall/Search-
+deadline classification, the DN parse-error redaction, and the wire-facing
+descriptor comparisons (each of those touched `dn.go`, `config.go`, and/or
+`search.go`). It was previously measured at 2,608 (nine-file total 2,426 +
+`config.go` 148 + `doc.go` 34) before that sub-task. The plan's
+consolidation-review trigger is 2,500 physical LOC for this package; the
+coordinator's recorded disposition on the earlier 2,608 figure — accepted,
+since the overshoot is exactly the `config.go`/`doc.go` public-surface and
+package-status files the plan's own file table omitted, not undocumented
+growth — stands unchanged at 2,659: both figures are well below ADR #32's
+separate ~3,500-line architecture-review trigger, and consolidation review
+against that trigger still folds into Phase 4's legacy deletion, not this
+sub-task. That disposition is recorded in the issue #33 ship log; see it
+for the full accounting, not a restatement here.
 
 ### 11.2 Restricted-profile acceptance: what the replacement accepts
 
@@ -686,7 +700,16 @@ current production does not have at all. Phase 3 must explicitly accept or
 reject each one before Phase 4 is authorized:
 
 1. Bind version `!= 3` changes from current incidental acceptance to result
-   2 `protocolError` (LDAPv3-only).
+   2 `protocolError` (LDAPv3-only). This narrowing's own result-2 path is
+   reached only for a version value that decodes successfully (minimally
+   encoded, in range `1..MaxInt32`) and simply isn't 3: the version field is
+   decoded through the same shared minimal-positive-INTEGER rule
+   (`minimalPositiveInt32`) the LDAPMessage envelope's MessageID uses, so a
+   version of 0, a negative version, or a non-minimally-encoded value is
+   malformed at decode time and closes the connection before the version
+   check ever runs — it never reaches result 2. This matches legacy
+   goldap's own decode window for this field (a 1..127 range at the
+   single-octet BER-integer level).
 2. Search `derefAliases != 0` changes from current tolerance to result 50.
 3. Search `typesOnly=true` changes from current supported generic rendering
    to result 50.
