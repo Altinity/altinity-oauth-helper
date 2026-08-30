@@ -22,11 +22,32 @@ import (
 //
 //   - Trigger set is exactly `pull_request` (with `types` restricted to
 //     `opened`, `synchronize`, `reopened`, `edited` — no other key, e.g. no
-//     `branches`/`paths`) plus `push` on `main`. A `paths:`/`paths-ignore:`
-//     filter anywhere, or a narrowed `types` list, means some pull requests
-//     never run the gate at all — and a required check that never runs on a
-//     documentation-only-looking PR is how an unverified change reaches
-//     `main` looking green. `edited` specifically is load-bearing, not
+//     `branches`/`paths`) plus `push` on `main`.
+//
+//     Two DIFFERENT failure modes hide behind "the gate did not run", and they
+//     are not equally dangerous — do not conflate them:
+//
+//     A `paths:`/`paths-ignore:` filter that skips the whole WORKFLOW fails
+//     CLOSED: GitHub documents that when a workflow is skipped by path or
+//     branch filtering, its associated required check stays *Pending* and
+//     blocks merging. So a path filter does not smuggle an unverified change
+//     through — it deadlocks the PR instead, and the realistic hazard is that
+//     someone then drops the requirement to unblock a stuck merge, or that
+//     coverage silently becomes a judgement call about which paths "matter"
+//     when a shared file or dependency changes the LDAP/security boundary in
+//     a non-obvious way (issue #23's own reason for forbidding filters).
+//     That is why this file forbids them: universal coverage and no stuck
+//     required checks, NOT because a filtered PR would merge green.
+//
+//     A skipped JOB is the opposite and is the genuinely dangerous case:
+//     GitHub reports a job skipped by a conditional as *Success*, which
+//     satisfies a required check. That is what
+//     TestPRGateContract_JobIsUnconditionalAndFailsClosed exists for.
+//
+//     A narrowed `types` list is dangerous in its own third way: the run
+//     never happens AND no new check is expected, so an existing green check
+//     on an unchanged head SHA continues to satisfy the requirement.
+//     `edited` specifically is load-bearing, not
 //     decorative: a base-branch retarget is delivered as an `edited`
 //     activity (not a new `synchronize`) and keeps the same head SHA, so
 //     without it a PR proven green against base A can be retargeted onto
@@ -345,7 +366,7 @@ func TestPRGateContract_TriggersAreUnfilteredPRAndMainPush(t *testing.T) {
 		t.Fatalf("securitytest: %s `on.pull_request` must be a mapping with exactly `types: %v`, got %v — without an explicit `types` list a base-branch retarget (delivered as `edited`, not `synchronize`) never re-triggers the gate, letting a PR keep a green required check while merging an untested new base", prGateWorkflowRelPath, prGateExpectedPullRequestTypes, pr)
 	}
 	if keys := yamlMapKeys(pr); strings.Join(keys, ",") != "types" {
-		t.Errorf("securitytest: %s `on.pull_request` keys are %v, want exactly [types] — any other key here (branches, paths, paths-ignore) means some pull requests merge without ever running the gate", prGateWorkflowRelPath, keys)
+		t.Errorf("securitytest: %s `on.pull_request` keys are %v, want exactly [types] — a `branches`/`paths`/`paths-ignore` filter here means some pull requests never run the gate. That fails closed rather than green (a required check whose workflow was filtered out stays Pending and blocks merging), but it still costs universal coverage and leaves those PRs deadlocked; see this file's header comment for why the three skip modes are not equivalent", prGateWorkflowRelPath, keys)
 	}
 	typesNode := yamlMapValue(pr, "types")
 	var gotTypes []string
@@ -390,7 +411,7 @@ func TestPRGateContract_NoPrivilegedTriggers(t *testing.T) {
 func TestPRGateContract_NoPathFiltersAnywhere(t *testing.T) {
 	top := loadPRGateWorkflow(t)
 	if found := findMappingKeysAnywhere(top, prGatePathFilterKeys...); len(found) > 0 {
-		t.Errorf("securitytest: %s contains path filter(s) %v, but the gate must be unfiltered — a path filter means some pull requests merge unverified (the check is simply never reported for them, which branch protection cannot distinguish from a change that needs no verification)", prGateWorkflowRelPath, found)
+		t.Errorf("securitytest: %s contains path filter(s) %v, but the gate must be unfiltered. A path filter does NOT let a PR merge green — GitHub keeps a required check whose workflow was skipped by path/branch filtering in a Pending state, which blocks merging. It deadlocks those PRs instead, and the pressure that follows is to drop the requirement to unblock them. It also turns coverage into a judgement call about which paths matter, which issue #23 forbids precisely because a shared file, a dependency bump or a generated fixture can move the LDAP/security boundary in a non-obvious way. Remove the filter; the gate is cheap enough to run for every pull request", prGateWorkflowRelPath, found)
 	}
 }
 

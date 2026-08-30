@@ -16,6 +16,20 @@ on:
   # existing check when the test-merge commit has none of its own. Do not
   # special-case skip title/body-only edits to "optimize" this back down —
   # that reopens the exact gap this closes.
+  #
+  # Known limit of that protection: events produced with the repository's own
+  # `GITHUB_TOKEN` do not start new workflow runs (GitHub's recursion
+  # guard). So `edited` closes the retarget gap only for base changes made by
+  # a human or by an actor whose events actually trigger Actions. No
+  # repository automation may retarget a pull request's base with
+  # `GITHUB_TOKEN` unless it also produces a real `synchronize` (or otherwise
+  # forces a fresh gate run) — `strict: true` branch protection narrows the
+  # reachable cases but is not a complete substitute, since an unchanged head
+  # can already be up to date with the newly selected base. This constraint
+  # is external to this file and deliberately has no contract test: a YAML
+  # check cannot observe it. If automated retargeting ever becomes a real
+  # requirement, revisit the enforcement mechanism rather than assuming this
+  # trigger covers it.
   pull_request:
     types: [opened, synchronize, reopened, edited]
   push:
