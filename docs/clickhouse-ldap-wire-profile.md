@@ -649,10 +649,16 @@ entirely outside the Docker ClickHouse suite:
   proving the profile is absent from `./cmd/ch-oauth-ldap`'s live closure and
   that the profile's own closure requires `golang.org/x/crypto/cryptobyte`
   while excluding the vendored/general LDAP stack;
-* an architecture contract (`internal/securitytest/profile_architecture_contract_test.go`)
-  mechanically enforcing exactly one production goroutine spawn, no
-  request-indexed state, a nonrecursive two-child membership-filter decoder,
-  and diagnostic/reason bytes reachable only through their closed enums;
+* an architecture contract in two files: the syntactic invariants
+  (`internal/securitytest/profile_architecture_contract_test.go` — exactly
+  one production goroutine spawn, a nonrecursive two-child
+  membership-filter decoder, diagnostic/reason bytes reachable only through
+  their closed enums, and the import bans) plus the type-semantic
+  invariants (`internal/securitytest/profile_types_contract_test.go` — no
+  request-indexed map/channel state beyond the allowlisted `Server` fields,
+  and `Verifier.Verify`/`RoleResolver.Roles` each referenced exactly once,
+  in `bind.go`), the latter enforced over the fully type-checked package
+  with go/types on gc export data, not AST shape enumeration;
 * redaction-inventory coverage (`internal/securitytest`'s `scopeDirs`, sink
   kind `ldap-profile-diagnostic`) with marker-bearing proofs at default and
   trace log levels.
