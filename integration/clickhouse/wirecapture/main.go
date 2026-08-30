@@ -101,6 +101,27 @@ func runSanitize(args []string, stdin *fileWriter, stdout *fileWriter) error {
 	line := fs.String("line", "", "tracked line label, e.g. 24.8")
 	mode := fs.String("mode", "", "success | timeout-abandon")
 	sql := fs.String("sql", "", "the controlled SQL statement issued for this session")
+
+	// Optional profile.json flags (plan §9/§26): profile.json is per-line
+	// provenance, written once via WriteProfileFromInput below when
+	// --profile-out is set. Left unset, sanitize's behavior is unchanged
+	// from before this flag set existed.
+	profileOut := fs.String("profile-out", "", "optional: line directory to also write profile.json into")
+	trackedImage := fs.String("tracked-image", "", "profile: exact tracked image string from run-all-builds.sh BUILDS")
+	chRepository := fs.String("clickhouse-repository", "", "profile: ClickHouse repository")
+	chTag := fs.String("clickhouse-tag", "", "profile: ClickHouse tag")
+	chCommit := fs.String("clickhouse-commit", "", "profile: ClickHouse commit")
+	blobLDAPClientCPP := fs.String("blob-ldapclient-cpp", "", "profile: LDAPClient.cpp source blob SHA")
+	blobLDAPClientH := fs.String("blob-ldapclient-h", "", "profile: LDAPClient.h source blob SHA")
+	blobLDAPAccessStorageCPP := fs.String("blob-ldapaccessstorage-cpp", "", "profile: LDAPAccessStorage.cpp source blob SHA")
+	blobExternalAuthenticatorsCPP := fs.String("blob-externalauthenticators-cpp", "", "profile: ExternalAuthenticators.cpp source blob SHA")
+	openldapRepository := fs.String("openldap-repository", "", "profile: OpenLDAP repository")
+	openldapPin := fs.String("openldap-pin", "", "profile: OpenLDAP pin")
+	openldapVersion := fs.String("openldap-version", "", "profile: OpenLDAP version")
+	configPath := fs.String("config-path", "", "profile: canonical config path")
+	configFile := fs.String("config-file", "", "profile: path to the ClickHouse LDAP config file to hash in-container (mutually exclusive with --config-sha256)")
+	configSHA256 := fs.String("config-sha256", "", "profile: precomputed trimmed <clickhouse> element SHA-256 (mutually exclusive with --config-file)")
+	sessionPaths := fs.String("session-paths", "", "profile: comma-separated session directory names for this line, e.g. success,timeout-abandon")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -122,6 +143,35 @@ func runSanitize(args []string, stdin *fileWriter, stdout *fileWriter) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "wirecapture: sanitized %d PDUs into %s\n", len(session.PDUs), *sanitizedDir)
+
+	if *profileOut != "" {
+		var paths []string
+		if *sessionPaths != "" {
+			paths = strings.Split(*sessionPaths, ",")
+		}
+		if _, err := WriteProfileFromInput(ProfileInput{
+			OutDir:                         *profileOut,
+			Line:                           *line,
+			TrackedImage:                   *trackedImage,
+			ClickHouseRepository:           *chRepository,
+			ClickHouseTag:                  *chTag,
+			ClickHouseCommit:               *chCommit,
+			BlobLDAPClientCPP:              *blobLDAPClientCPP,
+			BlobLDAPClientH:                *blobLDAPClientH,
+			BlobLDAPAccessStorageCPP:       *blobLDAPAccessStorageCPP,
+			BlobExternalAuthenticatorsCPP:  *blobExternalAuthenticatorsCPP,
+			OpenLDAPRepository:             *openldapRepository,
+			OpenLDAPPin:                    *openldapPin,
+			OpenLDAPVersion:                *openldapVersion,
+			ConfigPath:                     *configPath,
+			ConfigFile:                     *configFile,
+			ConfigSHA256:                   *configSHA256,
+			SessionPaths:                   paths,
+		}); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "wirecapture: wrote profile.json into %s\n", *profileOut)
+	}
 	return nil
 }
 
