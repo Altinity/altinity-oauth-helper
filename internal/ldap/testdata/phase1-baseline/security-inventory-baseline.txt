@@ -1,0 +1,150 @@
+Phase-1 baseline: security/redaction inventory snapshot
+=========================================================
+
+Recorded on the unmodified pre-Phase-1 tree (HEAD e9c7c3c, see
+source-head.txt in this directory) as the historical anchor Phase 3/4
+compare against, per plan §4.4. This file is never rewritten later.
+
+1. Redaction manifest rows for the three scopes this sub-task snapshots
+------------------------------------------------------------------------
+
+Source: internal/securitytest/testdata/redaction-sites.tsv
+
+Header row (column contract, copied verbatim):
+
+scope	path	function	sink_kind	fingerprint	credential_reachable	data_class	ownership	proof_type	proof_test	state	gate
+
+--- scope = cmd/ch-oauth-ldap (13 rows) ---
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	LoadConfig	fmt-errorf	lit:read config: %w	no	config-error-text	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	LoadConfig	fmt-errorf	lit:parse config: %w	no	config-error-text	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:oauth: either issuer or jwks_url must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: listen must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: user_base_dn must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: group_base_dn must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: user_rdn_attribute must be set	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: invalid user_base_dn: %w	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: invalid group_base_dn: %w	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	main	zerolog-terminal	Fatal|Err|lit:ch-oauth-ldap exited with error	no	infra-error-text	local	structural	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	run	zerolog-terminal	Info|Str(network,tcp)|Str(address)|Str(version)|lit:ch-oauth-ldap listening	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	run	zerolog-terminal	Info|lit:ch-oauth-ldap shutting down	no	none	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	run	zerolog-terminal	Warn|Err|lit:closing LDAP listener during shutdown	no	infra-error-text	local	structural	n/a	safe	-
+
+--- scope = internal/ldap (26 rows) ---
+internal/ldap	internal/ldap/bind.go	connectionHandler.handleBind	ldap-diagnostic	lit:only simple authentication is supported	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.handleBind	zerolog-terminal	Info|Str(op,bind)|Bool(success)|Int(result)|lit:ldap bind rejected: unsupported authentication choice	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.handleBind	zerolog-terminal	Info|Str(op,bind)|Bool(success)|Int(result)|Str(username)|Str(correlation_id)|Int(roles)|lit:ldap bind succeeded	no	verified-identity-metadata	local	marker	TestProtocol_SentinelCredentialAbsentFromLogs	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.failBind	ldap-diagnostic	constref:invalidCredentialsDiagnostic	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/bind.go	connectionHandler.failBind	zerolog-terminal	Info|Str(op,bind)|Bool(success)|Int(result)|Str(reason)|lit:ldap bind failed	no	fixed-reason-literal	local	marker	TestProtocol_SentinelCredentialAbsentFromLogs	safe	-
+internal/ldap	internal/ldap/controls.go	criticalControlGuard.ServeLDAP	ldap-diagnostic	constref:criticalControlDiagnostic	no	protocol-constant	local	marker	TestControls_CriticalControlMarkerNeverReachesLogOrDiagnostic	safe	-
+internal/ldap	internal/ldap/controls.go	logCriticalControlRejected	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|lit:ldap operation rejected: unsupported critical control	no	protocol-constant	local	marker	TestControls_CriticalControlMarkerNeverReachesLogOrDiagnostic	safe	-
+internal/ldap	internal/ldap/dn.go	NewUserBaseDN	errors-new	lit:ldap: user_rdn_attribute must not be empty	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/dn.go	NewUserBaseDN	fmt-errorf	lit:ldap: invalid user base DN %q: %w	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	fmt-errorf	lit:ldap: malformed bind DN: %w	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap: bind DN is not exactly one RDN below the configured user base	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap: bind DN leading RDN must carry exactly one attribute	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	fmt-errorf	lit:ldap: bind DN leading RDN attribute %q does not match configured user_rdn_attribute %q	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap: bind DN does not structurally match the configured user base	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	UserBaseDN.ExtractUsername	errors-new	lit:ldap: bind DN leading attribute value is empty	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap	internal/ldap/dn.go	NewGroupBaseDN	fmt-errorf	lit:ldap: invalid group base DN %q: %w	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/entry.go	NewGroupEntry	errors-new	lit:ldap: group base DN is nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/entry.go	NewGroupEntry	errors-new	lit:ldap: role must not be empty	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/search.go	connectionHandler.finishSearch	zerolog-terminal	Info|Str(op,search)|Bool(success)|Int(result)|Str(username)|Int(size_limit)|Int(time_limit)|Bool(types_only)|Int...#b2a1f2a3	no	search-telemetry-safe	local	marker	TestRedactionBoundary_SearchTelemetryOmitsRoleValues,TestProtocol_ZeroRoleBindGetsSuccessfulEmptySearch,TestProtocol_SearchReturnsFullSyntheticEntry	safe	-
+internal/ldap	internal/ldap/search.go	connectionHandler.failSearch	ldap-diagnostic	constref:searchNotAuthorizedDiagnostic	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/search.go	connectionHandler.failSearch	zerolog-terminal	Info|Str(op,search)|Bool(success)|Int(result)|Str(reason)|lit:ldap search rejected	no	protocol-constant	local	structural	TestProtocol_WrongBaseScopeFilterTable	safe	-
+internal/ldap	internal/ldap/server.go	New	errors-new	lit:ldap: rootCtx must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/server.go	New	errors-new	lit:ldap: verifier must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/server.go	New	errors-new	lit:ldap: roleResolver must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap	internal/ldap/unsupported.go	logUnsupported	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|lit:ldap operation rejected: unsupported	no	protocol-constant	local	structural	TestProtocol_UnsupportedOperationsFailClosed	safe	-
+internal/ldap	internal/ldap/unsupported.go	connectionHandler.handleNotFound	ldap-diagnostic	constref:unsupportedOperationDiagnostic	no	protocol-constant	local	non-credential	n/a	safe	-
+
+--- scope = third_party/ldapserver (22 rows) ---
+third_party/ldapserver	third_party/ldapserver/client.go	client.callOnClose.closure	vendored-logger-print	lit:panic in OnClientClose for client [%d]: %v,sel:Numero,constref:r	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve.closure	vendored-logger-print	lit:client %d write error, closing connection: %s,sel:Numero,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Erreur OnNewConnection: %s,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Sorry client %d, i can not wait anymore (reading timeout) ! %s,sel:Numero,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Error readMessagePacket: %s,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Error reading Message : %s %x,call:sel:Error(),sel:bytes	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:<<< %d - %s - hex=%x,sel:Numero,call:sel:ProtocolOpName(),constref:messagePacket	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client %d close(),sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client %d close() - stop reading from client,sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:Client %d close() - sent abandon signal to request[messageID = %d],sel:Numero,constref:messageID	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client %d close() - Abandon signal sent to processors,sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client [%d] request processors ended,sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.close	vendored-logger-print	lit:client [%d] connection closed,sel:Numero	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/client.go	client.writeMessage	vendored-logger-print	lit:>>> %d - %s - hex=%x,sel:Numero,call:sel:ProtocolOpName(),call:sel:Bytes()	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/route.go	RouteMux.ServeLDAP	vendored-logger-print	lit:	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/route.go	RouteMux.ServeLDAP	vendored-logger-print	lit: ROUTE MATCH ; %s,sel:label	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.ListenAndServe	vendored-logger-print	lit:Listening on %s ,constref:addr	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.serve	vendored-logger-print	lit:Stopping server	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.serve	vendored-logger-print	constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.serve	vendored-logger-print	lit:Connection client [%d] from %s accepted,sel:Numero,call:sel:String()	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.Stop	vendored-logger-print	lit:gracefully closing client connections...	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+third_party/ldapserver	third_party/ldapserver/server.go	Server.Stop	vendored-logger-print	lit:all clients connection closed	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
+
+2. sha256 of the current redaction manifest/inventory implementation
+-----------------------------------------------------------------------
+
+6e9f74da67faf1fea23be53e099405ce6562509de6d89118c746df399e777041  internal/securitytest/redaction_inventory_test.go
+eabce7b5c7f52a339deca95898e58a6882ec5110542716c6056ff4a6e3de3d00  internal/securitytest/doc.go
+901a387cb3760b14c54b505d1851a29de85f7cd99bbe0fcb20018af1baffc340  internal/securitytest/testdata/redaction-sites.tsv
+
+3. Current fixed scopeDirs list (internal/securitytest/doc.go)
+-----------------------------------------------------------------
+
+AST-enumerated first-party scopeDirs (exactly six entries, in source order):
+
+  cmd/ch-oauth-ldap
+  cmd/ch-jwt-verify
+  internal/ldap
+  internal/verification
+  internal/identity
+  internal/roles
+
+Plus the separately AST-enumerated vendoredScope constant:
+
+  third_party/ldapserver
+
+(discoverSites reads direct .go files from each scope directory only — it
+does not recurse into subdirectories; see §4 below.)
+
+4. third_party/goldap is explicitly NOT an AST-enumerated scope
+--------------------------------------------------------------------
+
+third_party/goldap (the vendored, patched github.com/vjeantet/goldap
+message package) is not a member of scopeDirs, is not vendoredScope, and
+has no external-pinned rows in redaction-sites.tsv. It is production-
+reachable (see production-nonstdlib-deps.txt / production-ldap-loc.tsv in
+this same directory: github.com/vjeantet/goldap/message is part of
+./cmd/ch-oauth-ldap's dependency closure) but its ~5,600 lines of BER
+encode/decode code carry zero redaction-inventory coverage as of this
+baseline. This is a pre-existing, honestly recorded gap in the current
+inventory scope, not a claim that it is covered.
+
+5. Pre-existing gap: integration/clickhouse/ha/session-probe
+-----------------------------------------------------------------
+
+integration/clickhouse/ha/session-probe is credential-bearing integration
+tooling (it holds a same-socket LDAP session probe used by the manual HA
+harness, run-ha.sh / compose-ha.yml) that lives entirely outside the fixed
+six-directory scopeDirs list above, and is not vendoredScope either. It is
+therefore not AST-enumerated by redaction_inventory_test.go at all. This is
+recorded here explicitly, per plan §4.4/§50, as a known pre-existing scope
+limitation — not claimed as covered by this or any other current security
+inventory test.
+
+6. Existing inventory tests: pass/fail on this baseline tree
+-----------------------------------------------------------------
+
+Command run on the unmodified HEAD e9c7c3c tree, from the module root:
+
+  go test ./internal/securitytest -run RedactionInventory -count=1 -v
+
+Result: PASS (ok), all six subtests green:
+
+  --- PASS: TestRedactionInventory_NoUnmappedSinks
+  --- PASS: TestRedactionInventory_NoStaleManifestRows
+  --- PASS: TestRedactionInventory_NoDuplicateManifestRows
+  --- PASS: TestRedactionInventory_ManifestRowsWellFormed
+  --- PASS: TestRedactionInventory_CredentialReachableLocalSinksHaveMarkerProof
+  --- PASS: TestRedactionInventory_ProofTestsExist
+  ok  	github.com/altinity/altinity-oauth-helper/internal/securitytest	0.036s

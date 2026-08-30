@@ -1,0 +1,7 @@
+go version go1.26.2 darwin/arm64
+
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go env GOVERSION GOOS GOARCH CGO_ENABLED:
+go1.26.2
+linux
+amd64
+0
