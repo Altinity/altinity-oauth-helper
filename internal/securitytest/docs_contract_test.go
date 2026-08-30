@@ -17,6 +17,23 @@ import (
 // documents (README.md and docs/ch-oauth-ldap-operator-guide.md) can never
 // silently drift into an invented or stale claim.
 //
+// docs/clickhouse-ldap-wire-profile.md (issue #33 phase 1) is deliberately
+// NOT a docsContractMarkdownFiles entry and this file enforces nothing about
+// it — README.md and the operator guide remain the only two
+// "operator-facing narrative" documents this repo asks an operator to read
+// for "how do I configure and run this," and that pair is what this file's
+// fence/phrase contract exists to protect. The wire-profile doc is a
+// different kind of artifact: engineering evidence (exact ClickHouse/OpenLDAP
+// source citations, the committed wire corpus, and the cryptobyte-vs-bounded-
+// parser decision) for Phase 2/3's implementer, not a second configuration
+// narrative — README.md links it, but only as a pointer, never by
+// duplicating canonical config into it (plan §35). Its own internal
+// consistency (exactly one decision marker, no XML/YAML configuration
+// fences, static source-provenance matrix, JWT-shape scan) is owned entirely
+// by internal/securitytest/wire_profile_contract_test.go, a separate file
+// with a separate mandate; do not fold its checks into this one or add it to
+// docsContractMarkdownFiles.
+//
 // Every YAML/XML configuration fence this repo's docs show an operator is
 // meant to be an EXACT, byte-for-byte contiguous excerpt of a real,
 // executable/loaded source file — never hand-retyped, never "close enough".
@@ -60,7 +77,12 @@ import (
 
 // docsContractMarkdownFiles is every markdown file this contract enforces
 // config-source fences and the required/forbidden HA-and-trust-boundary
-// wording guards across.
+// wording guards across — the complete operator-facing configuration
+// narrative. docs/clickhouse-ldap-wire-profile.md is intentionally absent:
+// it is engineering evidence, not operator-facing configuration narrative,
+// and its own doc-boundary rules (exactly one decision marker, no XML/YAML
+// fences) live in wire_profile_contract_test.go instead — see this file's
+// package comment above.
 var docsContractMarkdownFiles = []string{
 	"docs/ch-oauth-ldap-operator-guide.md",
 	"README.md",

@@ -191,6 +191,16 @@ What the fixture proves, and what you should expect in production:
 
   `integration/clickhouse/lib/expectations.sh` records these per-version
   outcomes and the suite fails loudly if ClickHouse's behavior changes.
+- **The exact byte-level LDAP request wire format is documented and
+  evidenced separately.** [`docs/clickhouse-ldap-wire-profile.md`](docs/clickhouse-ldap-wire-profile.md)
+  is the issue #33 phase-1 engineering evidence: source-cited ClickHouse
+  (`Altinity/ClickHouse`) and OpenLDAP behavior for both tracked lines, a
+  committed non-secret corpus of sanitized captured request PDUs under
+  [`internal/ldap/testdata/clickhouse-wire/`](internal/ldap/testdata/clickhouse-wire/),
+  and the resulting `cryptobyte`-vs-bounded-first-party-cursor primitive
+  decision for the future replacement parser. It does not restate this
+  fixture's configuration and is not a second operator-facing guide — read
+  it only if you're implementing or reviewing that replacement.
 - **⚠️ This validates plain LDAP only — the OAuth bearer travels in clear
   text.** TLS, LDAPS and StartTLS are out of MVP scope, so the JWT (the
   OAuth bearer) crosses the ClickHouse→helper hop as the *LDAP simple-bind password*,
@@ -354,12 +364,20 @@ sub-tag) that already exists in the registry; there is no force override.
 cmd/ch-jwt-verify/     # the sidecar binary (main, config, settings, verify)
 cmd/ch-oauth-ldap/     # the standalone LDAPv3 server (main, config)
 internal/ldap/         # LDAP session/DN/filter/entry primitives + Bind/Search handlers
+internal/ldap/testdata/phase1-baseline/ # immutable pre-replacement snapshot (issue #33 phase 1; never rewritten)
+internal/ldap/testdata/clickhouse-wire/ # committed sanitized ClickHouse LDAP request corpus (issue #33 phase 1)
+internal/wirefixture/  # shared Profile/Session/PDU schema + constructed-fixture generator (issue #33 phase 1;
+                       # test/tooling support only, mechanically absent from the production closure)
 internal/securitytest/ # phase-5 AST redaction inventory, SDK contract, docs contract (see its doc.go)
 third_party/goldap/    # vendored, patched github.com/vjeantet/goldap message package (see its PATCHES.md)
 third_party/ldapserver/ # vendored, patched github.com/vjeantet/ldapserver LDAP server package
 docs/                  # ch-oauth-ldap-operator-guide.md: config/roles/cache/Search-limit/trust/HA consolidated
+                       # clickhouse-ldap-wire-profile.md: byte-level wire evidence + primitive decision (issue #33 phase 1)
 integration/clickhouse/ # real-ClickHouse acceptance suite for ch-oauth-ldap (manual; see its README)
                        # scenarios/65-ldap-search-limits.sh (G'), compose-ha.yml/run-ha.sh/ha/ (Docker HA harness)
+                       # wirecapture/ (ldap-wire-recorder: capture/sanitize/construct/compare tool),
+                       # compose-wirecapture.yml + capture-ldap-wire.sh (issue #33 phase-1 wire-capture fixture),
+                       # tests/cases/wirecapture-*.sh (compose/fallback/collision parity, daemon-free)
 helm/ch-jwt-verify/    # Helm chart (ConfigMaps + container fragment, no Deployment)
 helm/ch-oauth-ldap/    # Helm chart (Deployment + ClusterIP Service + NetworkPolicy + PDB + ConfigMaps)
 scripts/build-image.sh # multi-arch image build & push (ch-jwt-verify)
