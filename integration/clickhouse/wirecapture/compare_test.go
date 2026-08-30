@@ -18,10 +18,14 @@ func writeFixtureDir(t *testing.T, dir string, session *wirefixture.Session, pdu
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-	if err := wirefixture.WriteSession(filepath.Join(dir, "session.json"), session); err != nil {
+	if err := wirefixture.WriteSession(filepath.Join(dir, "session.json"), *session); err != nil {
 		t.Fatalf("WriteSession: %v", err)
 	}
 }
+
+// int64Ptr is a small test-only helper for wirefixture.PDU.ObservedElapsedMS,
+// which is *int64 (nil means "not recorded") rather than a plain int64.
+func int64Ptr(v int64) *int64 { return &v }
 
 func baseSession(placeholderLen int, observedElapsedMS int64) (*wirefixture.Session, map[string][]byte) {
 	bind := buildBindRequest(1, "uid=alice,dc=test", "xxxxxxxxxxxxxxxxxxxx")
@@ -33,13 +37,14 @@ func baseSession(placeholderLen int, observedElapsedMS int64) (*wirefixture.Sess
 	session := &wirefixture.Session{
 		SchemaVersion:     wirefixture.SchemaVersion,
 		Line:              "24.8",
-		Provenance:        wirefixture.ProvenanceCapturedRedacted,
+		Applicability:     []string{"24.8"},
+		ProvenanceClass:   wirefixture.ProvenanceCapturedRedacted,
 		Mode:              "success",
 		ConnectionCount:   1,
 		PlaceholderLength: placeholderLen,
 		PDUs: []wirefixture.PDU{
-			{Sequence: 1, Filename: "001-bind-request.ber", Direction: "client-to-server", Operation: "bind", MessageID: 1, SanitizedSHA256: wirefixture.SHA256Hex(bind), RedactionStatus: "redacted"},
-			{Sequence: 2, Filename: "002-search-request.ber", Direction: "client-to-server", Operation: "search", MessageID: 2, SanitizedSHA256: wirefixture.SHA256Hex(search), RedactionStatus: "no-credential-present", ObservedElapsedMS: observedElapsedMS},
+			{Sequence: 1, Filename: "001-bind-request.ber", Direction: wirefixture.DirectionClientToServer, Operation: wirefixture.OperationBindRequest, MessageID: 1, SanitizedSHA256: sha256Hex(bind), RedactionStatus: wirefixture.RedactionRedacted},
+			{Sequence: 2, Filename: "002-search-request.ber", Direction: wirefixture.DirectionClientToServer, Operation: wirefixture.OperationSearchRequest, MessageID: 2, SanitizedSHA256: sha256Hex(search), RedactionStatus: "no-credential-present", ObservedElapsedMS: int64Ptr(observedElapsedMS)},
 		},
 	}
 	return session, pdus
@@ -147,14 +152,15 @@ func TestCompare_TimeoutModeDiagnostics(t *testing.T) {
 		return &wirefixture.Session{
 			SchemaVersion:     wirefixture.SchemaVersion,
 			Line:              "24.8",
-			Provenance:        wirefixture.ProvenanceCapturedRedacted,
+			Applicability:     []string{"24.8"},
+			ProvenanceClass:   wirefixture.ProvenanceCapturedRedacted,
 			Mode:              "timeout-abandon",
 			ConnectionCount:   1,
 			PlaceholderLength: 20,
 			PDUs: []wirefixture.PDU{
-				{Sequence: 1, Filename: "001-bind-request.ber", Operation: "bind", MessageID: 1, SanitizedSHA256: wirefixture.SHA256Hex(bind), RedactionStatus: "redacted"},
-				{Sequence: 2, Filename: "002-search-request.ber", Operation: "search", MessageID: 2, SanitizedSHA256: wirefixture.SHA256Hex(search), RedactionStatus: "no-credential-present"},
-				{Sequence: 3, Filename: "003-abandon-request.ber", Operation: "abandon", MessageID: 3, SanitizedSHA256: wirefixture.SHA256Hex(abandon), RedactionStatus: "no-credential-present", ObservedElapsedMS: elapsed},
+				{Sequence: 1, Filename: "001-bind-request.ber", Operation: wirefixture.OperationBindRequest, MessageID: 1, SanitizedSHA256: sha256Hex(bind), RedactionStatus: wirefixture.RedactionRedacted},
+				{Sequence: 2, Filename: "002-search-request.ber", Operation: wirefixture.OperationSearchRequest, MessageID: 2, SanitizedSHA256: sha256Hex(search), RedactionStatus: "no-credential-present"},
+				{Sequence: 3, Filename: "003-abandon-request.ber", Operation: wirefixture.OperationAbandonRequest, MessageID: 3, SanitizedSHA256: sha256Hex(abandon), RedactionStatus: "no-credential-present", ObservedElapsedMS: int64Ptr(elapsed)},
 			},
 		}
 	}

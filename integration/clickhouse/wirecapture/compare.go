@@ -58,8 +58,8 @@ func Compare(in CompareInput) (*CompareResult, error) {
 		return result, nil
 	}
 
-	stableCommitted := wirefixture.StableSession(*committed)
-	stableFresh := wirefixture.StableSession(*fresh)
+	stableCommitted := wirefixture.StableSession(committed)
+	stableFresh := wirefixture.StableSession(fresh)
 	if !reflect.DeepEqual(stableCommitted, stableFresh) {
 		result.Diffs = append(result.Diffs, "stable session metadata differs from committed fixture")
 	}
@@ -98,7 +98,7 @@ func Compare(in CompareInput) (*CompareResult, error) {
 		if err != nil {
 			return nil, errInvalidMetadata("read fresh profile.json", err)
 		}
-		if !reflect.DeepEqual(wirefixture.StableProfile(*cprof), wirefixture.StableProfile(*fprof)) {
+		if !reflect.DeepEqual(wirefixture.StableProfile(cprof), wirefixture.StableProfile(fprof)) {
 			result.Diffs = append(result.Diffs, "stable profile metadata differs from committed fixture")
 		}
 	}
@@ -110,11 +110,11 @@ func Compare(in CompareInput) (*CompareResult, error) {
 		searchSeq, abandonSeq := -1, -1
 		for _, p := range fresh.PDUs {
 			switch p.Operation {
-			case "search":
+			case wirefixture.OperationSearchRequest:
 				searchSeq = p.Sequence
-			case "abandon":
+			case wirefixture.OperationAbandonRequest:
 				abandonSeq = p.Sequence
-				if p.ObservedElapsedMS > 0 {
+				if p.ObservedElapsedMS != nil && *p.ObservedElapsedMS > 0 {
 					result.TimeoutElapsedMSPositive = true
 				}
 			}

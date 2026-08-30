@@ -23,8 +23,8 @@ func TestConstructMessageIDBoundary_WritesReproducibleBundle(t *testing.T) {
 	if len(session.PDUs) != 2 {
 		t.Fatalf("got %d PDUs, want 2", len(session.PDUs))
 	}
-	if session.Provenance != wirefixture.ProvenanceConstructed {
-		t.Fatalf("Provenance = %q, want constructed", session.Provenance)
+	if session.ProvenanceClass != wirefixture.ProvenanceConstructed {
+		t.Fatalf("ProvenanceClass = %q, want constructed", session.ProvenanceClass)
 	}
 
 	want127, err := wirefixture.BuildConstructedSimpleBind(127)

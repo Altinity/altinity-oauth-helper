@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -29,12 +30,21 @@ func ConstructMessageIDBoundary(in ConstructInput) (*wirefixture.Session, error)
 	if err := os.MkdirAll(in.OutputDir, 0o700); err != nil {
 		return nil, errConstructGeneration("create output directory", err)
 	}
-	for name, content := range files {
+	// files is returned in the same order as session.PDUs (see
+	// BuildConstructedMessageIDBoundarySession's doc comment), so each
+	// payload's committed filename comes from the corresponding PDU entry
+	// rather than from files itself, which carries no names.
+	for i, content := range files {
+		if i >= len(session.PDUs) {
+			return nil, errConstructGeneration("write constructed PDU file",
+				fmt.Errorf("more constructed payloads (%d) than session PDUs (%d)", len(files), len(session.PDUs)))
+		}
+		name := session.PDUs[i].Filename
 		if err := os.WriteFile(filepath.Join(in.OutputDir, name), content, 0o600); err != nil {
 			return nil, errConstructGeneration("write constructed PDU file", err)
 		}
 	}
-	if err := wirefixture.WriteSession(filepath.Join(in.OutputDir, "session.json"), &session); err != nil {
+	if err := wirefixture.WriteSession(filepath.Join(in.OutputDir, "session.json"), session); err != nil {
 		return nil, errInvalidMetadata("write constructed session.json", err)
 	}
 	return &session, nil

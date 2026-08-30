@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +14,42 @@ import (
 
 	"github.com/altinity/altinity-oauth-helper/internal/wirefixture"
 )
+
+// sha256Hex returns the hex-encoded SHA-256 of b. internal/wirefixture has
+// its own equivalent helper but does not export it (it is an internal
+// convenience for BuildConstructedMessageIDBoundarySession, not part of the
+// package's committed API) — this package computes the same hash locally
+// rather than either depending on an unexported symbol or asking wirefixture
+// to export tooling convenience it does not otherwise need.
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// wirefixtureOperation maps a recorder-scoped protocolOp application tag
+// (ber.go's tag* constants) to the canonical Operation* vocabulary that
+// internal/wirefixture.PDU.Operation commits to disk (plan section 9: the
+// on-disk schema, including its vocabulary, is wirefixture's alone to
+// define). operationLabel's own short-form labels ("bind", "search", ...)
+// remain in local use for filenames and in-process branching; they are a
+// distinct, unexported concern from the committed field's value.
+func wirefixtureOperation(tag byte) string {
+	switch tag {
+	case tagBindRequest:
+		return wirefixture.OperationBindRequest
+	case tagSearchRequest:
+		return wirefixture.OperationSearchRequest
+	case tagAbandonRequest:
+		return wirefixture.OperationAbandonRequest
+	case tagUnbindRequest:
+		return wirefixture.OperationUnbindRequest
+	default:
+		// Out of the recorder's client-request scope (plan section 22); fall
+		// back to the local label rather than fabricating a wirefixture
+		// vocabulary value that was never defined for it.
+		return operationLabel(tag)
+	}
+}
 
 // maxCredentialBytes bounds the stdin read in readCredentialFromStdin
 // (plan §24): the credential is a compact JWT, never anywhere close to
@@ -127,27 +165,28 @@ func Sanitize(in SanitizeInput) (*wirefixture.Session, error) {
 		wp := wirefixture.PDU{
 			Sequence:        i + 1,
 			Filename:        outName,
-			Direction:       "client-to-server",
-			Operation:       operationLabel(f.decoded.opTag),
+			Direction:       wirefixture.DirectionClientToServer,
+			Operation:       wirefixtureOperation(f.decoded.opTag),
 			MessageID:       f.decoded.messageID,
-			SanitizedSHA256: wirefixture.SHA256Hex(content),
+			SanitizedSHA256: sha256Hex(content),
 		}
 		if f.decoded.hasAbandon {
 			target := f.decoded.abandonTarget
 			wp.AbandonTarget = &target
 		}
 		if i == matchFile {
-			wp.RedactionStatus = "redacted"
+			wp.RedactionStatus = wirefixture.RedactionRedacted
 		} else {
 			wp.RedactionStatus = "no-credential-present"
 		}
 		pdus = append(pdus, wp)
 	}
 
-	session := &wirefixture.Session{
+	session := wirefixture.Session{
 		SchemaVersion:     wirefixture.SchemaVersion,
 		Line:              in.Line,
-		Provenance:        wirefixture.ProvenanceCapturedRedacted,
+		Applicability:     []string{in.Line},
+		ProvenanceClass:   wirefixture.ProvenanceCapturedRedacted,
 		Mode:              in.Mode,
 		ConnectionCount:   1,
 		SQL:               in.SQL,
@@ -157,7 +196,7 @@ func Sanitize(in SanitizeInput) (*wirefixture.Session, error) {
 	if err := wirefixture.WriteSession(filepath.Join(in.SanitizedDir, "session.json"), session); err != nil {
 		return nil, errInvalidMetadata("write sanitized session.json", err)
 	}
-	return session, nil
+	return &session, nil
 }
 
 func listConnDirs(rawDir string) ([]string, error) {
