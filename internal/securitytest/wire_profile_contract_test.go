@@ -1291,6 +1291,42 @@ func TestWireProfileContract_LDAPOptionSentinelMatchesAuditedSet(t *testing.T) {
 // Removing either leg's claim (the doc prose, or the byte-level truth it
 // describes) now fails this test, instead of both drifting together
 // silently.
+//
+// # Search filter structure/values leg (review pass 3)
+//
+// A review found that this sentinel's fixture-side leg still stopped short
+// of the single most security-relevant field in the whole request: the §6
+// table's "Search filter" row claims every captured/constructed searchRequest
+// carries exactly `(&(objectClass=groupOfNames)(member={bind_dn}))` — an AND
+// of two equalityMatch terms — sourced from the ClickHouse config XML
+// (checked, as a wholly separate artifact, by TestWireProfileContract_
+// ConfigContract). Nothing previously tied that claim to the actual decoded
+// Filter structure/values inside the committed .ber wire bytes: a fixture's
+// Search filter tag could be changed from AND (0xa0) to OR (0xa1) — a
+// same-shape edit, since Filter::and and Filter::or are both `SET OF Filter`
+// with byte-identical children/lengths — with sanitized_sha256 updated to
+// match, and this whole package's suite (including cryptobyte's own,
+// deliberately narrow "and"/"equalityMatch"-only characterization) would stay
+// green: cryptobyte would reject the mutated fixture outright (an unsupported
+// filter tag), but a corrupted-fixture rejection is not what any check here
+// treats as evidence of the mutation — nothing decoded the *valid* AND/OR
+// shape and compared it against the canonical profile.
+//
+// assertSearchProfileFixedFields below closes this: for every committed
+// searchRequest PDU it independently decodes the Filter (still via the same
+// goldap decoder, never recomputing internal/ldap's cryptobyte verdict) and
+// requires it to be exactly FilterAnd{FilterEqualityMatch(objectClass,
+// groupOfNames), FilterEqualityMatch(member, <this session's own Bind DN>)}
+// — not a hardcoded literal Bind DN (which would itself be an unverified
+// second copy of "alice@example.com" that could silently drift from what a
+// future recapture actually uses), but the exact Bind DN bytes this
+// sentinel independently decodes from the *same session's own* bindRequest
+// PDU. That is the only ground truth {bind_dn} can mean on a real
+// connection (§6.3/§8.4: Search always follows a successful Bind on the same
+// libldap handle, using that handle's own bind DN), so cross-checking against
+// it — rather than a literal this test would otherwise have to keep in sync
+// by hand — proves the Search filter's member value is genuinely the bound
+// identity, not merely well-formed BER.
 
 // searchProfileDocDerefAliasesLabel is the §6 source-of-value table's row
 // label for derefAliases, stripped of surrounding backticks the same way
@@ -1351,13 +1387,48 @@ func TestWireProfileContract_SearchProfileFixedFieldsSentinel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wire_profile_contract: read session.json for %s: %v", label, err)
 		}
+
+		// Ground truth for {bind_dn}: independently decode this session's
+		// own bindRequest PDU first (a second, structurally distinct
+		// decoder from internal/ldap's cryptobyte characterizer, exactly
+		// like every other decode in this sentinel), so the Search filter's
+		// "member" value below is checked against what this connection
+		// actually bound as — not a hardcoded literal duplicating that
+		// value from elsewhere.
+		var bindDN string
+		var sawBindRequest bool
+		for _, pdu := range sess.PDUs {
+			if pdu.Operation != wirefixture.OperationBindRequest {
+				continue
+			}
+			path := filepath.Join(sessDir, pdu.Filename)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("wire_profile_contract: read %s: %v", path, err)
+			}
+			msg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, raw))
+			if err != nil {
+				t.Fatalf("wire_profile_contract: %s: independent goldap BER decode of bindRequest failed: %v", path, err)
+			}
+			bind, ok := msg.ProtocolOp().(goldapmessage.BindRequest)
+			if !ok {
+				t.Fatalf("wire_profile_contract: %s: committed metadata says operation %q but decoded protocolOp is %T", path, pdu.Operation, msg.ProtocolOp())
+			}
+			bindDN = string(bind.Name())
+			sawBindRequest = true
+			break
+		}
+		if !sawBindRequest {
+			t.Fatalf("wire_profile_contract: session %s has no bindRequest PDU — the Search filter leg has no Bind DN ground truth to check against", label)
+		}
+
 		for _, pdu := range sess.PDUs {
 			path := filepath.Join(sessDir, pdu.Filename)
 			raw, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("wire_profile_contract: read %s: %v", path, err)
 			}
-			assertSearchProfileFixedFields(t, path, pdu.Operation, raw, &sawSearchRequest)
+			assertSearchProfileFixedFields(t, path, pdu.Operation, raw, bindDN, &sawSearchRequest)
 		}
 	}
 
@@ -1401,10 +1472,14 @@ func TestWireProfileContract_SearchProfileFixedFieldsSentinel(t *testing.T) {
 //
 // This never recomputes internal/ldap's cryptobyte-vs-local-ber-cursor
 // verdict (plan §33 reserves that to TestClickHouseWireCryptobyteDecision
-// alone) — goldap is used here purely to read two specific decoded field
+// alone) — goldap is used here purely to read specific decoded field
 // values, an orthogonal concern from which BER primitive parser ClickHouse
 // wire traffic should use.
-func assertSearchProfileFixedFields(t *testing.T, path, operation string, raw []byte, sawSearchRequest *bool) {
+//
+// wantBindDN is the exact Bind DN this same session's own bindRequest PDU
+// decoded to (see the caller, checkSession) — the ground truth the Search
+// filter's "member" equalityMatch value is checked against.
+func assertSearchProfileFixedFields(t *testing.T, path, operation string, raw []byte, wantBindDN string, sawSearchRequest *bool) {
 	t.Helper()
 
 	msg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, raw))
@@ -1427,6 +1502,176 @@ func assertSearchProfileFixedFields(t *testing.T, path, operation string, raw []
 	*sawSearchRequest = true
 	if got := int(search.DerefAliases()); got != 0 {
 		t.Errorf("wire_profile_contract: %s: decoded derefAliases=%d, want neverDerefAliases(0)", path, got)
+	}
+	for _, msg := range canonicalGroupMembershipFilterDefects(search.Filter(), wantBindDN) {
+		t.Errorf("wire_profile_contract: %s: %s", path, msg)
+	}
+}
+
+// canonicalGroupMembershipFilterDefects requires filter to be exactly the
+// canonical §6/§8.2 shape — AND(equalityMatch(objectClass, groupOfNames),
+// equalityMatch(member, wantBindDN)) — decoded structurally (Filter CHOICE
+// type and AttributeValueAssertion field values), never by re-encoding and
+// byte-comparing, and returns one human-readable defect string per violated
+// property (nil/empty means the filter fully matches). It is a pure
+// function, rather than one taking *testing.T directly, so
+// TestWireProfileContract_SearchFilterStructureIsDiscriminating below can
+// call it directly on a deliberately mutated fixture and assert the defect
+// list is non-empty, without needing a fake sub-test harness.
+//
+// A same-shape tag swap (AND 0xa0 -> OR 0xa1, or any other Filter CHOICE
+// alternative) fails the very first type assertion below, because goldap's
+// Filter() already decoded it as a different concrete Go type (FilterOr,
+// FilterNot, FilterSubstrings, ...) — this is what closes the review-pass-3
+// gap: cryptobyte's characterization stays purely structural/tag-based (plan
+// §32's deliberately narrow profile) and the wire-profile doc's
+// derefAliases/Controls sentinel never inspected the filter at all, so
+// nothing previously would have noticed such a swap on a fixture whose
+// sanitized_sha256 was updated to match.
+func canonicalGroupMembershipFilterDefects(filter goldapmessage.Filter, wantBindDN string) []string {
+	var defects []string
+
+	and, ok := filter.(goldapmessage.FilterAnd)
+	if !ok {
+		return append(defects, fmt.Sprintf("decoded Search filter is %T, want an AND (FilterAnd) of two equalityMatch terms (plan §6/§8.2)", filter))
+	}
+	if len(and) != 2 {
+		return append(defects, fmt.Sprintf("decoded Search filter AND has %d child term(s), want exactly 2", len(and)))
+	}
+
+	objectClassTerm, ok := and[0].(goldapmessage.FilterEqualityMatch)
+	if !ok {
+		defects = append(defects, fmt.Sprintf("decoded Search filter AND's first term is %T, want an equalityMatch (FilterEqualityMatch)", and[0]))
+	} else {
+		if got := string(objectClassTerm.AttributeDesc()); got != "objectClass" {
+			defects = append(defects, fmt.Sprintf("AND's first term attribute description is %q, want %q", got, "objectClass"))
+		}
+		if got := string(objectClassTerm.AssertionValue()); got != "groupOfNames" {
+			defects = append(defects, fmt.Sprintf("AND's first term assertion value is %q, want %q", got, "groupOfNames"))
+		}
+	}
+
+	memberTerm, ok := and[1].(goldapmessage.FilterEqualityMatch)
+	if !ok {
+		defects = append(defects, fmt.Sprintf("decoded Search filter AND's second term is %T, want an equalityMatch (FilterEqualityMatch)", and[1]))
+	} else {
+		if got := string(memberTerm.AttributeDesc()); got != "member" {
+			defects = append(defects, fmt.Sprintf("AND's second term attribute description is %q, want %q", got, "member"))
+		}
+		if got := string(memberTerm.AssertionValue()); got != wantBindDN {
+			defects = append(defects, fmt.Sprintf("AND's second term assertion value is %q, want this session's own decoded Bind DN %q ({bind_dn}, plan §6.3)", got, wantBindDN))
+		}
+	}
+	return defects
+}
+
+// TestWireProfileContract_SearchFilterStructureIsDiscriminating is the
+// sabotage check for canonicalGroupMembershipFilterDefects itself (review
+// pass 3): it proves the new Search-filter structural/value check added to
+// TestWireProfileContract_SearchProfileFixedFieldsSentinel is a real,
+// discriminating check — not a rubber stamp — by reproducing the exact
+// scenario the review named: a committed searchRequest fixture's outer
+// filter tag mutated from AND (0xa0) to OR (0xa1), same shape and length,
+// which independent goldap decoding still accepts as well-formed BER (both
+// are `SET OF Filter`) but which must now be rejected as not matching the
+// canonical AND-of-two-equalityMatch profile.
+func TestWireProfileContract_SearchFilterStructureIsDiscriminating(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	fixtureRoot := wireProfileFixtureRoot(root)
+	lines, err := wirefixture.ValidateFixtureRoot(fixtureRoot)
+	if err != nil {
+		t.Fatalf("wire_profile_contract: validate fixture root %s: %v", fixtureRoot, err)
+	}
+
+	var searchTemplate []byte
+	findSearchTemplate := func(sessDir string) {
+		if searchTemplate != nil {
+			return
+		}
+		sess, err := wirefixture.ReadSession(wirefixture.SessionMetadataPath(sessDir))
+		if err != nil {
+			t.Fatalf("wire_profile_contract: read session.json for %s: %v", sessDir, err)
+		}
+		for _, pdu := range sess.PDUs {
+			if pdu.Operation != wirefixture.OperationSearchRequest {
+				continue
+			}
+			path := filepath.Join(sessDir, pdu.Filename)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("wire_profile_contract: read %s: %v", path, err)
+			}
+			searchTemplate = raw
+			return
+		}
+	}
+	for _, line := range lines {
+		lineDir := wirefixture.LineDir(fixtureRoot, line)
+		profile, err := wirefixture.ReadProfile(wirefixture.ProfilePath(lineDir))
+		if err != nil {
+			t.Fatalf("wire_profile_contract: read profile.json for line %s: %v", line, err)
+		}
+		for _, sp := range profile.SessionPaths {
+			findSearchTemplate(wirefixture.SessionDir(lineDir, sp))
+		}
+	}
+	if searchTemplate == nil {
+		t.Fatalf("wire_profile_contract: no committed searchRequest fixture found under %s", fixtureRoot)
+	}
+
+	// Sanity check: the un-mutated template must itself pass, against its
+	// own actual decoded Bind DN (whatever the fixture's real value is —
+	// this sabotage check does not depend on a hardcoded Bind DN literal).
+	sanityMsg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, searchTemplate))
+	if err != nil {
+		t.Fatalf("search template sanity check: independent goldap BER decode failed: %v", err)
+	}
+	sanitySearch, ok := sanityMsg.ProtocolOp().(goldapmessage.SearchRequest)
+	if !ok {
+		t.Fatalf("search template sanity check: decoded protocolOp is %T, want SearchRequest", sanityMsg.ProtocolOp())
+	}
+	sanityAnd, ok := sanitySearch.Filter().(goldapmessage.FilterAnd)
+	if !ok || len(sanityAnd) != 2 {
+		t.Fatalf("search template sanity check: filter is not the expected two-term AND shape")
+	}
+	memberTerm, ok := sanityAnd[1].(goldapmessage.FilterEqualityMatch)
+	if !ok {
+		t.Fatalf("search template sanity check: AND's second term is not an equalityMatch")
+	}
+	realBindDN := string(memberTerm.AssertionValue())
+	if defects := canonicalGroupMembershipFilterDefects(sanitySearch.Filter(), realBindDN); len(defects) != 0 {
+		t.Fatalf("search template sanity check: expected the un-mutated template to pass against its own decoded Bind DN, got defects: %v", defects)
+	}
+
+	// The outer "and" filter wrapper (a0 5f) immediately followed by the
+	// first equalityMatch element's tag+length (a3 1b) — same anchor
+	// clickhouse_wire_cryptobyte_test.go's "wrong-tag-filter" mutation uses,
+	// but mutating the AND wrapper's own tag byte (offset 0) instead of the
+	// nested equalityMatch tag (offset 2).
+	pattern := []byte{0xa0, 0x5f, 0xa3, 0x1b}
+	idx := bytes.Index(searchTemplate, pattern)
+	if idx < 0 {
+		t.Fatalf("mutation template: pattern %x not found in search template", pattern)
+	}
+	if searchTemplate[idx] != 0xa0 {
+		t.Fatalf("mutation template: byte at offset %d is 0x%02x, want 0xa0 (template shape may have changed)", idx, searchTemplate[idx])
+	}
+	mutated := append([]byte(nil), searchTemplate...)
+	mutated[idx] = 0xa1 // AND [0] -> OR [1]: same SET OF Filter shape, same length
+
+	mutatedMsg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, mutated))
+	if err != nil {
+		t.Fatalf("independent goldap decoder rejected the AND->OR mutation as malformed BER, expected it to still decode (same shape/length): %v", err)
+	}
+	mutatedSearch, ok := mutatedMsg.ProtocolOp().(goldapmessage.SearchRequest)
+	if !ok {
+		t.Fatalf("mutated fixture: decoded protocolOp is %T, want SearchRequest", mutatedMsg.ProtocolOp())
+	}
+	if defects := canonicalGroupMembershipFilterDefects(mutatedSearch.Filter(), realBindDN); len(defects) == 0 {
+		t.Fatalf("canonicalGroupMembershipFilterDefects accepted an AND(0xa0)->OR(0xa1) filter-tag mutation as the canonical shape — the discriminating check is a rubber stamp")
 	}
 }
 
