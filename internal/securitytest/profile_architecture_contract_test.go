@@ -61,6 +61,43 @@ package securitytest
 // this package's own unrelated `Roles` data-field accesses
 // (`c.auth.Roles`, `newState.Roles` — see selectorHasFieldRoot's comment).
 //
+// A third review pass (ChatGPT PR #38 pass 3) found the prior fixes for
+// invariants 4/6 and 12/13 each still had one more ordinary Go shape they
+// didn't cover:
+//
+//   - `var pending = map[int32]*request{}` — a `var`-keyword composite
+//     literal — fell through both the explicit-*ast.MapType ValueSpec case
+//     and the inferred-make()-call ValueSpec case, since neither ever
+//     unwrapped a *ast.CompositeLit from a `var`'s Values (only the
+//     AssignStmt case did, for `:=`/`=`). Closed by findMapTypedSites' now
+//     shared per-Value switch in the ValueSpec branch.
+//   - a function's declared result type (`func newActive()
+//     map[net.Conn]struct{} { ... }`) was never inspected by any case —
+//     every check looked only at struct fields, ValueSpecs, and
+//     AssignStmts, never at *ast.FuncType.Results on a FuncDecl or FuncLit.
+//     Closed by a FuncDecl/FuncLit case added to both findMapTypedSites and
+//     findChanTypedSites.
+//   - a second-level receiver alias (`v := c.verifier; w := v;
+//     w.Verify(...)`) bypassed fieldAliasIdents, whose direct-selector-only
+//     tracking recognized exactly one hop; and a parameter typed as the
+//     field's own named interface type (`func helper(v Verifier) {
+//     v.Verify(...) }`, called as `helper(o.verifier)`) was invisible from
+//     both the parameter side (never an assignment target) and the call
+//     side (passes the field selector as a plain argument, not as an
+//     assignment RHS). Closed by rewriting fieldAliasIdents as a fixed-point
+//     transitive closure seeded with every parameter of the field's
+//     interface type (see interfaceFieldTypeName/paramInfoOfType usage
+//     there).
+//
+// TestProfileArchitecture_DetectsVarMapCompositeLiteralAssignment,
+// TestProfileArchitecture_DetectsFuncResultMapType,
+// TestProfileArchitecture_DetectsFuncLitResultMapType,
+// TestProfileArchitecture_DetectsFuncResultChanType,
+// TestProfileArchitecture_DetectsTransitiveReceiverAliasVerifyCall, and
+// TestProfileArchitecture_DetectsInterfaceTypedParameterVerifyCall are the
+// regression tests proving each of these three closed gaps is actually
+// caught.
+//
 // Sabotage checks (run manually, restored afterward — see the sub-task
 // return for the recorded results): `diagnostic(err.Error())` at a result
 // callsite; a Verify call inserted into the unsupported-op dispatch; a
@@ -686,27 +723,79 @@ func findMapTypedSites(files []profileFile) []mapSite {
 					return true
 				}
 				// No explicit type: the type is inferred entirely from
-				// Values (`var pending = make(map[int32]*request)`) — the
-				// same shape the AssignStmt case below already catches
-				// for `:=`, mirrored here for `var`.
+				// Values — either a make(map[...]...) call
+				// (`var pending = make(map[int32]*request)`, the same
+				// shape the AssignStmt case below already catches for
+				// `:=`, mirrored here for `var`) or a map composite
+				// literal (`var pending = map[int32]*request{}`). The
+				// composite-literal branch closes a review finding: the
+				// AssignStmt case a few lines down already handled a
+				// map composite literal for `:=`/`=`, but a `var`
+				// declaration's initializer was only ever checked for a
+				// make() CallExpr — the identical literal spelled with
+				// the `var` keyword instead of `:=` fell through both
+				// branches undetected.
 				for i, val := range node.Values {
-					call, ok := val.(*ast.CallExpr)
-					if !ok {
-						continue
-					}
-					mt, ok := makeMapType(call)
-					if !ok {
-						continue
-					}
 					name := "<unnamed>"
 					if i < len(node.Names) {
 						name = node.Names[i].Name
 					}
-					sites = append(sites, mapSite{
-						loc:        pf.pos(node.Pos()),
-						fieldOrVar: name,
-						typeStr:    formatNode(pf, mt),
-					})
+					switch v := val.(type) {
+					case *ast.CallExpr:
+						if mt, ok := makeMapType(v); ok {
+							sites = append(sites, mapSite{
+								loc:        pf.pos(node.Pos()),
+								fieldOrVar: name,
+								typeStr:    formatNode(pf, mt),
+							})
+						}
+					case *ast.CompositeLit:
+						if v.Type != nil {
+							if mt, ok := resolveMapType(v.Type); ok {
+								sites = append(sites, mapSite{
+									loc:        pf.pos(node.Pos()),
+									fieldOrVar: name,
+									typeStr:    formatNode(pf, mt),
+								})
+							}
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				// A function's declared result type is an equally ordinary
+				// site for a map-typed value — the case this closes: a
+				// helper such as
+				// `func newActive() map[net.Conn]struct{} { ... }` carries
+				// its map type on *ast.FuncType.Results, a node shape none
+				// of the ValueSpec/AssignStmt/StructType cases above ever
+				// inspected, so it was invisible from the
+				// declared-signature side no matter what the function's
+				// body did.
+				if node.Type != nil && node.Type.Results != nil {
+					for _, field := range node.Type.Results.List {
+						if mt, ok := resolveMapType(field.Type); ok {
+							sites = append(sites, mapSite{
+								loc:        pf.pos(field.Pos()),
+								fieldOrVar: fmt.Sprintf("%s() return value", node.Name.Name),
+								typeStr:    formatNode(pf, mt),
+							})
+						}
+					}
+				}
+			case *ast.FuncLit:
+				// Closure counterpart of the FuncDecl case above — a
+				// map-typed result on an anonymous function literal is the
+				// same undetected shape.
+				if node.Type != nil && node.Type.Results != nil {
+					for _, field := range node.Type.Results.List {
+						if mt, ok := resolveMapType(field.Type); ok {
+							sites = append(sites, mapSite{
+								loc:        pf.pos(field.Pos()),
+								fieldOrVar: "<closure> return value",
+								typeStr:    formatNode(pf, mt),
+							})
+						}
+					}
 				}
 			case *ast.AssignStmt:
 				for i, rhs := range node.Rhs {
@@ -904,6 +993,141 @@ type Server struct {
 	}
 }
 
+// TestProfileArchitecture_DetectsVarMapCompositeLiteralAssignment is a
+// regression test for the ChatGPT PR #38 pass-3 review finding: a `var`
+// declaration initialized with a map composite literal —
+// `var pending = map[int32]*request{}` — is a distinct AST shape from both
+// TestProfileArchitecture_DetectsInferredVarMakeMapAssignment's `var` +
+// make() form and TestProfileArchitecture_DetectsMapCompositeLiteralAssignment's
+// `:=` + composite-literal form. The predecessor's ValueSpec branch (no
+// explicit Type) only ever unwrapped a make() CallExpr from node.Values,
+// never a CompositeLit, so this exact `var`-keyword spelling of an
+// otherwise-already-caught pattern fell through undetected.
+func TestProfileArchitecture_DetectsVarMapCompositeLiteralAssignment(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func bad() {
+	var pending = map[int32]*request{}
+	_ = pending
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findMapTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findMapTypedSites to catch the `var pending = map[int32]*request{}` declaration, found %d site(s): %+v", len(sites), sites)
+	}
+	if sites[0].fieldOrVar != "pending" || !strings.Contains(sites[0].typeStr, "map[int32]") {
+		t.Fatalf("unexpected site detail for the var map composite literal: %+v", sites[0])
+	}
+}
+
+// TestProfileArchitecture_DetectsFuncResultMapType is a regression test for
+// the ChatGPT PR #38 pass-3 review finding that no case anywhere in this
+// file inspected a function's declared result types: a helper such as
+// `func newActive() map[net.Conn]struct{} { ... }` carries its map type on
+// *ast.FuncType.Results, a node shape distinct from every struct
+// field/ValueSpec/AssignStmt site the predecessor checked, so it bypassed
+// mechanical detection entirely regardless of what the function body did.
+func TestProfileArchitecture_DetectsFuncResultMapType(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func newActive() map[int32]*request {
+	return map[int32]*request{}
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findMapTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findMapTypedSites to catch exactly newActive's declared map-typed return type, found %d site(s): %+v", len(sites), sites)
+	}
+	if !strings.Contains(sites[0].fieldOrVar, "newActive") || !strings.Contains(sites[0].typeStr, "map[int32]") {
+		t.Fatalf("unexpected site detail for the func-result map type: %+v", sites[0])
+	}
+}
+
+// TestProfileArchitecture_DetectsFuncLitResultMapType is the closure
+// counterpart of TestProfileArchitecture_DetectsFuncResultMapType — a
+// map-typed result on an anonymous function literal assigned to a local
+// variable is the identical undetected shape one level down.
+func TestProfileArchitecture_DetectsFuncLitResultMapType(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func bad() {
+	newActive := func() map[int32]*request {
+		return map[int32]*request{}
+	}
+	_ = newActive
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findMapTypedSites([]profileFile{pf})
+	var sawResultSite bool
+	for _, s := range sites {
+		if strings.Contains(s.fieldOrVar, "closure") && strings.Contains(s.typeStr, "map[int32]") {
+			sawResultSite = true
+		}
+	}
+	if !sawResultSite {
+		t.Fatalf("expected findMapTypedSites to catch the func literal's declared map-typed return type, found: %+v", sites)
+	}
+}
+
+// TestProfileArchitecture_DetectsFuncResultChanType is
+// TestProfileArchitecture_DetectsFuncResultMapType's channel-typed
+// counterpart, proving findChanTypedSites closes the identical gap for a
+// helper such as `func newDone() chan struct{} { ... }`.
+func TestProfileArchitecture_DetectsFuncResultChanType(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func newDone() chan request {
+	return make(chan request)
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findChanTypedSites([]profileFile{pf})
+	var sawResultSite bool
+	for _, s := range sites {
+		if strings.Contains(s.name, "newDone") && strings.Contains(s.typeStr, "request") {
+			sawResultSite = true
+		}
+	}
+	if !sawResultSite {
+		t.Fatalf("expected findChanTypedSites to catch newDone's declared channel-typed return type, found: %+v", sites)
+	}
+}
+
 // --- 5: no sync.Map ---
 
 func TestProfileArchitecture_NoSyncMap(t *testing.T) {
@@ -1022,6 +1246,36 @@ func findChanTypedSites(files []profileFile) []chanSite {
 						name:    name,
 						typeStr: formatNode(pf, ct),
 					})
+				}
+			case *ast.FuncDecl:
+				// Function-result counterpart of findMapTypedSites' identical
+				// FuncDecl case: a helper such as
+				// `func newDone() chan struct{} { ... }` carries its channel
+				// type on *ast.FuncType.Results, invisible to every case above
+				// this one no matter what the function's body did.
+				if node.Type != nil && node.Type.Results != nil {
+					for _, field := range node.Type.Results.List {
+						if ct, ok := resolveChanType(field.Type); ok {
+							sites = append(sites, chanSite{
+								loc:     pf.pos(field.Pos()),
+								name:    fmt.Sprintf("%s() return value", node.Name.Name),
+								typeStr: formatNode(pf, ct),
+							})
+						}
+					}
+				}
+			case *ast.FuncLit:
+				// Closure counterpart of the FuncDecl case above.
+				if node.Type != nil && node.Type.Results != nil {
+					for _, field := range node.Type.Results.List {
+						if ct, ok := resolveChanType(field.Type); ok {
+							sites = append(sites, chanSite{
+								loc:     pf.pos(field.Pos()),
+								name:    "<closure> return value",
+								typeStr: formatNode(pf, ct),
+							})
+						}
+					}
 				}
 			case *ast.AssignStmt:
 				for i, rhs := range node.Rhs {
@@ -1335,26 +1589,90 @@ func selectorHasFieldRoot(sel *ast.SelectorExpr, fieldName string) bool {
 	return ok && inner.Sel.Name == fieldName
 }
 
-// fieldAliasIdents finds every plain local identifier that was assigned
-// (via `:=`/`=` or a `var` ValueSpec) directly from a bare
-// `<something>.fieldName` selector — e.g. `v := c.verifier` — across
-// files. Per the review finding this closes: selectorHasFieldRoot alone
-// only recognizes the *immediate* `c.verifier.Verify` shape, so a receiver
-// alias (`v := c.verifier; v.Verify(...)`) bypasses it entirely — `v.Verify`
-// has sel.X as a plain *ast.Ident, never a SelectorExpr, no matter how
-// selectorHasFieldRoot is written. Recording which identifiers were
-// assigned from the field lets verifyOrRolesSelectorSites recognize a
-// selector on any of them as equivalent to the direct form. This is a
-// file-wide, not scope-precise, heuristic — consistent with this whole
-// file's documented go/ast-only, naming-convention approach (see
-// selectorHasFieldRoot's own comment).
-func fieldAliasIdents(files []profileFile, fieldName string) map[string]bool {
-	aliases := map[string]bool{}
-	recordFrom := func(rhs ast.Expr, name string) {
-		if sel, ok := rhs.(*ast.SelectorExpr); ok && sel.Sel.Name == fieldName {
-			aliases[name] = true
+// interfaceFieldTypeName finds the declared type name of a struct field
+// named fieldName — e.g. "verifier" -> "Verifier", "roles" -> "RoleResolver"
+// — by scanning every StructType across files for a field with that name
+// and a plain *ast.Ident type. Used by fieldAliasIdents to recognize a
+// second, equally legitimate carrier of the field's value that neither the
+// direct-selector tracking below nor selectorHasFieldRoot ever sees: a
+// function parameter typed as the field's own interface type (a parameter
+// is an *ast.Field, never an AssignStmt/ValueSpec target, so it can't be
+// caught by "assigned from a selector" tracking no matter how that tracking
+// is written).
+func interfaceFieldTypeName(files []profileFile, fieldName string) (string, bool) {
+	for _, pf := range files {
+		var found string
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			st, ok := n.(*ast.StructType)
+			if !ok {
+				return true
+			}
+			for _, field := range st.Fields.List {
+				for _, name := range field.Names {
+					if name.Name != fieldName {
+						continue
+					}
+					if ident, ok := field.Type.(*ast.Ident); ok {
+						found = ident.Name
+					}
+				}
+			}
+			return true
+		})
+		if found != "" {
+			return found, true
 		}
 	}
+	return "", false
+}
+
+// fieldAliasIdents finds every plain local identifier that carries the
+// field's value, across files:
+//
+//   - assigned (via `:=`/`=` or a `var` ValueSpec) directly from a bare
+//     `<something>.fieldName` selector — e.g. `v := c.verifier`;
+//   - assigned (by any of the same forms) from another identifier already
+//     known to carry the field's value, transitively, however many hops
+//     deep — e.g. `v := c.verifier; w := v` — closing the review finding
+//     that the predecessor's direct-selector-only check recognized exactly
+//     one hop and no more, so `v := c.verifier; w := v; w.Verify(...)` (a
+//     second-level alias) passed with w never added to the set;
+//   - a function parameter whose declared type is the field's own
+//     interface type (see interfaceFieldTypeName) — closing the review
+//     finding that such a parameter (`func helper(v Verifier) { v.Verify() }`
+//     called as `helper(o.verifier)`) was invisible from both sides: the
+//     parameter is never an assignment target, and the call site passes
+//     the field selector as a plain argument, not as the RHS of an
+//     assignment.
+//
+// Recording every one of these lets verifyOrRolesSelectorSites recognize a
+// selector rooted at any of them as equivalent to the direct
+// `c.verifier.Verify` form. This is a file-wide, not scope-precise,
+// heuristic — consistent with this whole file's documented go/ast-only,
+// naming-convention approach (see selectorHasFieldRoot's own comment) —
+// deliberately not resolved via go/types, so a name collision with an
+// unrelated identifier of the same spelling elsewhere in the package would
+// also be swept in; that is a known, accepted imprecision of this
+// mechanical check, not a correctness bug in the transitive-closure or
+// parameter-seeding logic itself.
+func fieldAliasIdents(files []profileFile, fieldName string) map[string]bool {
+	aliases := map[string]bool{}
+
+	// Seed with every function parameter typed as the field's own
+	// interface type, before the fixed point below runs, so a local that
+	// is itself assigned from such a parameter (a further hop past the
+	// parameter) is also picked up in the same pass.
+	if typeName, ok := interfaceFieldTypeName(files, fieldName); ok {
+		for _, info := range paramInfoOfType(files, typeName) {
+			aliases[info.name] = true
+		}
+	}
+
+	type assignment struct {
+		name string
+		rhs  ast.Expr
+	}
+	var assignments []assignment
 	for _, pf := range files {
 		ast.Inspect(pf.file, func(n ast.Node) bool {
 			switch node := n.(type) {
@@ -1362,19 +1680,45 @@ func fieldAliasIdents(files []profileFile, fieldName string) map[string]bool {
 				for i, rhs := range node.Rhs {
 					if i < len(node.Lhs) {
 						if id, ok := node.Lhs[i].(*ast.Ident); ok {
-							recordFrom(rhs, id.Name)
+							assignments = append(assignments, assignment{name: id.Name, rhs: rhs})
 						}
 					}
 				}
 			case *ast.ValueSpec:
 				for i, val := range node.Values {
 					if i < len(node.Names) {
-						recordFrom(val, node.Names[i].Name)
+						assignments = append(assignments, assignment{name: node.Names[i].Name, rhs: val})
 					}
 				}
 			}
 			return true
 		})
+	}
+
+	// Fixed point over the recorded assignments: an identifier assigned
+	// directly from the field selector, from a typed parameter (seeded
+	// above), or transitively from another already-known alias is itself
+	// added — repeating until a full pass adds nothing new, so a chain of
+	// any length (`v := c.verifier; w := v; x := w; ...`) closes in full.
+	for changed := true; changed; {
+		changed = false
+		for _, a := range assignments {
+			if aliases[a.name] {
+				continue
+			}
+			switch rhs := a.rhs.(type) {
+			case *ast.SelectorExpr:
+				if rhs.Sel.Name == fieldName {
+					aliases[a.name] = true
+					changed = true
+				}
+			case *ast.Ident:
+				if aliases[rhs.Name] {
+					aliases[a.name] = true
+					changed = true
+				}
+			}
+		}
 	}
 	return aliases
 }
@@ -1551,6 +1895,126 @@ func (o *other) sneak() {
 	sites := verifyOrRolesSelectorSites(withSneak, "Verify", "verifier")
 	if len(sites) != 2 {
 		t.Fatalf("expected the receiver-alias call site in sneaky.go (v := o.verifier; v.Verify(...)) to be counted alongside the legitimate bind.go call (2 total), found %d: %v", len(sites), sites)
+	}
+}
+
+// TestProfileArchitecture_DetectsTransitiveReceiverAliasVerifyCall is a
+// regression test for the ChatGPT PR #38 pass-3 review finding that the
+// pass-2 fix (TestProfileArchitecture_DetectsReceiverAliasVerifyCall) only
+// closed a single-hop receiver alias: fieldAliasIdents' predecessor
+// recorded a name as an alias only when its RHS was directly a
+// `<expr>.fieldName` selector, so a second-level alias
+// (`v := c.verifier; w := v; w.Verify(...)`) — where w is assigned from v,
+// not from the selector itself — was never added to the alias set no
+// matter how many times verifyOrRolesSelectorSites' own logic was
+// otherwise broadened. A second, illegitimate Verify call site introduced
+// this way must still be counted alongside the legitimate one.
+func TestProfileArchitecture_DetectsTransitiveReceiverAliasVerifyCall(t *testing.T) {
+	const legit = `package synthetic
+
+type connection struct {
+	verifier interface {
+		Verify(x string)
+	}
+}
+
+func (c *connection) handleBind() {
+	c.verifier.Verify("x")
+}
+`
+	const sneaky = `package synthetic
+
+type other struct {
+	verifier interface {
+		Verify(y string)
+	}
+}
+
+func (o *other) sneak() {
+	v := o.verifier
+	w := v
+	w.Verify("y")
+}
+`
+	parseOne := func(name, src string) profileFile {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatalf("parse synthetic source %s: %v", name, err)
+		}
+		return profileFile{name: name, fset: fset, file: f}
+	}
+
+	legitOnly := []profileFile{parseOne("bind.go", legit)}
+	if sites := verifyOrRolesSelectorSites(legitOnly, "Verify", "verifier"); len(sites) != 1 {
+		t.Fatalf("expected exactly one Verify site with only the legitimate call present, found %d: %v", len(sites), sites)
+	}
+
+	withSneak := []profileFile{parseOne("bind.go", legit), parseOne("sneaky.go", sneaky)}
+	sites := verifyOrRolesSelectorSites(withSneak, "Verify", "verifier")
+	if len(sites) != 2 {
+		t.Fatalf("expected the second-level alias call site in sneaky.go (v := o.verifier; w := v; w.Verify(...)) to be counted alongside the legitimate bind.go call (2 total), found %d: %v", len(sites), sites)
+	}
+}
+
+// TestProfileArchitecture_DetectsInterfaceTypedParameterVerifyCall is a
+// regression test for the ChatGPT PR #38 pass-3 review finding's second
+// half: a function parameter typed as the field's own named interface type
+// (`func helper(v Verifier) { v.Verify(...) }`, called elsewhere as
+// `helper(o.verifier)`) is invisible to both selectorHasFieldRoot (the
+// call inside helper is `v.Verify`, sel.X a plain *ast.Ident naming a
+// parameter, never a SelectorExpr) and to the predecessor's
+// assignment-based fieldAliasIdents (a parameter is an *ast.Field, never
+// an AssignStmt/ValueSpec target, so it can never appear on the LHS side
+// that tracking inspected). A second, illegitimate Verify path introduced
+// this way must still be counted alongside the legitimate one.
+func TestProfileArchitecture_DetectsInterfaceTypedParameterVerifyCall(t *testing.T) {
+	const legit = `package synthetic
+
+type Verifier interface {
+	Verify(x string)
+}
+
+type connection struct {
+	verifier Verifier
+}
+
+func (c *connection) handleBind() {
+	c.verifier.Verify("x")
+}
+`
+	const sneaky = `package synthetic
+
+type other struct {
+	verifier Verifier
+}
+
+func helper(v Verifier) {
+	v.Verify("z")
+}
+
+func (o *other) sneak() {
+	helper(o.verifier)
+}
+`
+	parseOne := func(name, src string) profileFile {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatalf("parse synthetic source %s: %v", name, err)
+		}
+		return profileFile{name: name, fset: fset, file: f}
+	}
+
+	legitOnly := []profileFile{parseOne("bind.go", legit)}
+	if sites := verifyOrRolesSelectorSites(legitOnly, "Verify", "verifier"); len(sites) != 1 {
+		t.Fatalf("expected exactly one Verify site with only the legitimate call present, found %d: %v", len(sites), sites)
+	}
+
+	withSneak := []profileFile{parseOne("bind.go", legit), parseOne("sneaky.go", sneaky)}
+	sites := verifyOrRolesSelectorSites(withSneak, "Verify", "verifier")
+	if len(sites) != 2 {
+		t.Fatalf("expected the interface-typed-parameter call site in sneaky.go (func helper(v Verifier) { v.Verify(...) }, called as helper(o.verifier)) to be counted alongside the legitimate bind.go call (2 total), found %d: %v", len(sites), sites)
 	}
 }
 
