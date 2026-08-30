@@ -8,16 +8,36 @@
 //  1. redaction_inventory_test.go AST-enumerates every zerolog terminal call
 //     (.Msg/.Msgf/.Send), stdlib log.Print*, fmt.Errorf, errors.New/Join,
 //     LDAP diagnostic construction (SetDiagnosticMessage) and HTTP/LDAP
-//     response-error construction (http.Error, fmt.Fprint*) across
+//     response-error construction (http.Error, fmt.Fprint*) across the
+//     explicit audited scope list named by scopeDirs below —
 //     cmd/ch-oauth-ldap, cmd/ch-jwt-verify, internal/ldap,
-//     internal/verification, internal/identity and internal/roles, plus
-//     every vendored Logger.Print*/Printf/Println call in the local
-//     third_party/ldapserver fork, and cross-checks the result against the
-//     checked-in manifest at testdata/redaction-sites.tsv. It fails on an
-//     unmapped (newly discovered, unregistered) sink, a stale manifest row
-//     no longer backed by real source, a duplicate fingerprint, a local
-//     credential-reachable sink lacking a marker-based proof, or a
-//     manifest-referenced proof test that no longer exists.
+//     internal/verification, internal/identity, internal/roles,
+//     internal/wirefixture and integration/clickhouse/wirecapture (the
+//     latter two added by issue #33 phase 1, plan §10/§35, once the
+//     ClickHouse-wire-capture tooling gave them non-test sinks of their
+//     own) — plus every vendored Logger.Print*/Printf/Println call in the
+//     local third_party/ldapserver fork, and cross-checks the result
+//     against the checked-in manifest at testdata/redaction-sites.tsv. It
+//     fails on an unmapped (newly discovered, unregistered) sink, a stale
+//     manifest row no longer backed by real source, a duplicate
+//     fingerprint, a local credential-reachable sink lacking a
+//     marker-based proof, or a manifest-referenced proof test that no
+//     longer exists. Each scopeDirs entry is deliberately NOT
+//     "everything under this path": discoverSites (below) reads only the
+//     direct, non-test .go files of each named directory and does not
+//     recurse into subdirectories — so a nested package added later under
+//     an audited root (e.g. a future integration/clickhouse/wirecapture/foo)
+//     is invisible to this inventory until its own path is added to
+//     scopeDirs explicitly. TestRedactionInventory_Phase1AuditedScopesRemainFlat
+//     is the mechanical guard against that gap going unnoticed: it walks
+//     internal/wirefixture and integration/clickhouse/wirecapture
+//     recursively and fails, with instructions to register the new
+//     subdirectory in scopeDirs (or restructure the inventory), the moment
+//     either one stops being flat. This audited-scope list is also not a
+//     claim that every credential-bearing tool in the repository is
+//     covered: integration/clickhouse/ha/session-probe is a pre-existing
+//     integration credential tool that remains outside scopeDirs (plan
+//     §50) — recorded here honestly rather than silently implied covered.
 //
 //  2. sdk_contract_test.go uses runtime/debug.ReadBuildInfo (falling back to
 //     parsing go.mod's require line per amendment A6 if the module is
@@ -241,6 +261,8 @@ var scopeDirs = []string{
 	"internal/verification",
 	"internal/identity",
 	"internal/roles",
+	"internal/wirefixture",
+	"integration/clickhouse/wirecapture",
 }
 
 // vendoredScope is the separate third_party/ldapserver enumeration (plan

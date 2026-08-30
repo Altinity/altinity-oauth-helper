@@ -7,8 +7,16 @@
 # Columns:
 #   scope                 one of: cmd/ch-oauth-ldap, cmd/ch-jwt-verify,
 #                         internal/ldap, internal/verification,
-#                         internal/identity, internal/roles (AST-enumerated
-#                         first-party packages, plan §5.1),
+#                         internal/identity, internal/roles,
+#                         internal/wirefixture, integration/clickhouse/
+#                         wirecapture (AST-enumerated first-party packages,
+#                         plan §5.1; internal/wirefixture and
+#                         integration/clickhouse/wirecapture were added by
+#                         issue #33 phase 1, plan §10/§35 — see doc.go's
+#                         scopeDirs and its own comment for why each of
+#                         those two directories must stay flat, non-
+#                         recursively enumerated, or be registered
+#                         explicitly),
 #                         third_party/ldapserver (separately AST-enumerated
 #                         vendored Logger.Print* sites, plan §5.1), or
 #                         external-pinned (declarative rows describing a
@@ -230,6 +238,87 @@ internal/roles	internal/roles/pipeline.go	parseSedTransform	fmt-errorf	lit:dupli
 internal/roles	internal/roles/pipeline.go	parseSedTransform	fmt-errorf	lit:unsupported flag %q	no	config-value	local	structural	TestRolesTransformUnsupportedFlagFailsConstruction	safe	-
 internal/roles	internal/roles/pipeline.go	parseSedTransform	fmt-errorf	lit:invalid pattern: %w	no	config-value	local	structural	TestRolesTransformInvalidRegexFailsConstruction	safe	-
 internal/roles	internal/roles/pipeline.go	splitOnUnescapedDelim	fmt-errorf	lit:expected %d delimiter-separated fields, got %d	no	config-value	local	structural	TestRolesTransformMissingFieldFailsConstruction	safe	-
+internal/wirefixture	internal/wirefixture/confighash.go	ClickHouseConfigElementSHA256	fmt-errorf	lit:wirefixture: config content has a duplicated %s...%s element (open=%d, close=%d)	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/confighash.go	ClickHouseConfigElementSHA256	fmt-errorf	lit:wirefixture: config content has no %s...%s element (open=%d, close=%d)	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/confighash.go	ClickHouseConfigElementSHA256	fmt-errorf	lit:wirefixture: config content's %s closing tag precedes its %s opening tag	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/constructed.go	BuildConstructedMessageIDBoundarySession	fmt-errorf	lit:wirefixture: BuildConstructedMessageIDBoundarySession: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/constructed.go	BuildConstructedSimpleBind	fmt-errorf	lit:wirefixture: BuildConstructedSimpleBind: encode messageID: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/constructed.go	BuildConstructedSimpleBind	fmt-errorf	lit:wirefixture: BuildConstructedSimpleBind: encode version: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/constructed.go	BuildConstructedSimpleBind	fmt-errorf	lit:wirefixture: BuildConstructedSimpleBind: messageID must be positive, got %d	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/constructed.go	minimalPositiveIntegerBytes	fmt-errorf	lit:wirefixture: negative INTEGER not supported by this builder, got %d	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/root.go	ModuleRoot	fmt-errorf	lit:wirefixture: determine working directory: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/root.go	moduleRootFrom	fmt-errorf	lit:wirefixture: no go.mod found above %s	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ReadProfile	fmt-errorf	lit:wirefixture: decode profile %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ReadProfile	fmt-errorf	lit:wirefixture: open profile %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ReadProfile	fmt-errorf	lit:wirefixture: profile %s: trailing content after JSON document	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ReadSession	fmt-errorf	lit:wirefixture: decode session %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ReadSession	fmt-errorf	lit:wirefixture: open session %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ReadSession	fmt-errorf	lit:wirefixture: session %s: trailing content after JSON document	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ValidateFixtureRoot	fmt-errorf	lit:wirefixture: fixture root %s: unexpected entry %q (want a tracked-line directory matching %s, or %q)	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ValidateFixtureRoot	fmt-errorf	lit:wirefixture: fixture root %s: unexpected non-directory entry %q	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	ValidateFixtureRoot	fmt-errorf	lit:wirefixture: read fixture root %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	WriteProfile	fmt-errorf	lit:wirefixture: encode profile for %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	WriteProfile	fmt-errorf	lit:wirefixture: write profile %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	WriteSession	fmt-errorf	lit:wirefixture: encode session for %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+internal/wirefixture	internal/wirefixture/schema.go	WriteSession	fmt-errorf	lit:wirefixture: write session %s: %w	no	sanitized-metadata-only	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLength	fmt-errorf	lit:indefinite length not supported	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLength	fmt-errorf	lit:non-minimal long-form length	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLength	fmt-errorf	lit:read length: %w	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLength	fmt-errorf	lit:read long-form length: %w	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLength	fmt-errorf	lit:unsupported long-form length octet count %d	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLengthFromSlice	fmt-errorf	lit:indefinite length not supported	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLengthFromSlice	fmt-errorf	lit:non-minimal long-form length	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLengthFromSlice	fmt-errorf	lit:read length: empty	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readDefiniteLengthFromSlice	fmt-errorf	lit:unsupported/truncated long-form length	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: AbandonRequest target length %d out of bounds	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: LDAPMessage content: %w	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: LDAPMessage length %d exceeds bound %d	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: LDAPMessage length: %w	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: LDAPMessage missing leading MessageID INTEGER	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: LDAPMessage missing protocolOp	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: MessageID content length %d out of bounds	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: MessageID length: %w	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: protocolOp content length %d exceeds remaining bytes	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: protocolOp length: %w	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/ber.go	readLDAPMessage	fmt-errorf	lit:wirecapture: unexpected outer LDAPMessage tag 0x%02x	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/construct.go	ConstructMessageIDBoundary	fmt-errorf	lit:more constructed payloads (%d) than session PDUs (%d)	no	synthetic-fixture-generation-count	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	run	fmt-fprint-response	lit:wirecapture: %v ,constref:err	yes	wrapped-subcommand-error-text	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	run	fmt-fprint-response	lit:wirecapture: missing subcommand (serve|sanitize|construct-message-id-boundary|compare)	no	cli-usage-text	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	run	fmt-fprint-response	lit:wirecapture: unknown subcommand %q ,constref:sub	no	cli-usage-text	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runCompare	fmt-errorf	lit:--committed-dir and --fresh-dir are required	no	fixed-literal-diagnostic	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runCompare	fmt-errorf	lit:credential-length mismatch (fresh placeholder length does not match committed fixture)	no	fixed-literal-diagnostic	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runCompare	fmt-errorf	lit:wire evidence does not match committed fixture	no	fixed-literal-diagnostic	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runCompare	fmt-fprint-response	lit: - %s ,constref:d	no	sanitized-fixture-diff-text	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runCompare	fmt-fprint-response	lit:wirecapture: compare FAILED (%d diffs): ,call:constref:len(sel:Diffs)	no	fixed-literal-diagnostic	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runCompare	fmt-fprint-response	lit:wirecapture: compare OK — stable metadata and sanitized PDUs match committed fixture	no	fixed-literal-diagnostic	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runCompare	fmt-fprint-response	lit:wirecapture: diagnostic — observed_elapsed_ms is positive	no	fixed-literal-diagnostic	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runCompare	fmt-fprint-response	lit:wirecapture: diagnostic — Search precedes Abandon as expected	no	fixed-literal-diagnostic	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runConstruct	fmt-errorf	lit:--output-dir is required	no	cli-usage-or-count-and-path	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runConstruct	fmt-fprint-response	lit:wirecapture: constructed %d MessageID-boundary PDUs into %s ,call:constref:len(sel:PDUs),expr	no	cli-usage-or-count-and-path	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runSanitize	fmt-fprint-response	lit:wirecapture: sanitized %d PDUs into %s ,call:constref:len(sel:PDUs),expr	no	count-and-cli-path	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runSanitize	fmt-fprint-response	lit:wirecapture: wrote profile.json into %s ,expr	no	count-and-cli-path	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runServe	fmt-errorf	lit:--mode must be "pass" or "stall-after-bind", got %q	no	cli-config-values	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/main.go	runServe	fmt-fprint-response	lit:wirecapture: serving mode=%s listen=%s upstream=%s ,expr,expr,expr	no	cli-config-values	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/recorder.go	Recorder.ListenAndServe	fmt-errorf	lit:wirecapture: listen %s: %w	no	listener-bind-error	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/recorder.go	Recorder.Serve	fmt-errorf	lit:wirecapture: accept: %w	no	accept-error	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/recorder.go	Recorder.stallAfterBind	fmt-errorf	lit:got operation %q	no	fixed-operation-vocabulary	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/recorder.go	Recorder.writeReadyFile	fmt-errorf	lit:wirecapture: create readiness directory: %w	no	readiness-file-io-error	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/recorder.go	Recorder.writeReadyFile	fmt-errorf	lit:wirecapture: write readiness file: %w	no	readiness-file-io-error	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errConnectionCountNotOne	fmt-errorf	lit:wirecapture: refuse to proceed: %d connections recorded, require exactly 1 (never selecting one heuristically)	yes	sanitize-connection-count	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errConstructGeneration	fmt-errorf	lit:wirecapture: constructed-generation error (%s): %w	yes	constructed-generation-error	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errInvalidMetadata	fmt-errorf	lit:wirecapture: invalid metadata (%s): %w	yes	metadata-validation-error	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errMalformedFrame	fmt-errorf	lit:wirecapture: malformed frame (%s): %w	yes	raw-pdu-framing	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errProfileConfigHashSource	fmt-errorf	lit:wirecapture: profile: %s (supply exactly one of --config-file or --config-sha256)	no	profile-flag-validation	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errProfileDrift	fmt-errorf	lit:wirecapture: profile: freshly built profile.json for line %q does not match the committed profile.json alrea...#6c7b7e95	no	profile-drift-classification	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errProfileFlagMissing	fmt-errorf	lit:wirecapture: profile: missing required %s	no	profile-flag-validation	local	non-credential	n/a	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errProxy	fmt-errorf	lit:wirecapture: proxy error (%s): %w	yes	proxy-forwarding-error	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errSanitizeMultipleMatches	fmt-errorf	lit:wirecapture: sanitize: credential occurred %d times across captured client PDUs (require exactly one, inside...#9cae9910	yes	sanitize-match-count	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errSanitizeNotInBind	fmt-errorf	lit:wirecapture: sanitize: credential's sole occurrence is in %s, not the Bind PDU	yes	sanitize-location-classification	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/redact.go	errSanitizeZeroMatch	fmt-errorf	lit:wirecapture: sanitize: credential occurred zero times across captured client PDUs (require exactly one, insi...#8e146965	yes	sanitize-match-count	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/sanitize.go	readCredentialFromStdin	fmt-errorf	lit:wirecapture: credential on stdin exceeds %d bytes	yes	raw-credential-stdin	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/sanitize.go	readCredentialFromStdin	fmt-errorf	lit:wirecapture: credential on stdin is empty	yes	raw-credential-stdin	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/sanitize.go	readCredentialFromStdin	fmt-errorf	lit:wirecapture: read credential from stdin: %w	yes	raw-credential-stdin	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/sanitize.go	Sanitize	fmt-errorf	lit:wirecapture: sanitize: empty credential	yes	raw-credential-stdin	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
 third_party/ldapserver	third_party/ldapserver/client.go	client.callOnClose.closure	vendored-logger-print	lit:panic in OnClientClose for client [%d]: %v,sel:Numero,constref:r	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
 third_party/ldapserver	third_party/ldapserver/client.go	client.serve.closure	vendored-logger-print	lit:client %d write error, closing connection: %s,sel:Numero,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
 third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Erreur OnNewConnection: %s,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-

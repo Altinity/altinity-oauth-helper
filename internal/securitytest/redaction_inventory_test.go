@@ -2,6 +2,7 @@ package securitytest
 
 import (
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -9,13 +10,25 @@ import (
 )
 
 // This file implements plan-19p5.md §5.1/§5.2's AST redaction inventory: it
-// AST-enumerates every log/error/response-construction sink in the six
-// first-party packages plus the vendored third_party/ldapserver fork (see
-// doc.go), and cross-checks the result against
-// testdata/redaction-sites.tsv. None of these tests capture logs or set
-// zerolog's global level, so — unlike the marker matrices in
+// AST-enumerates every log/error/response-construction sink in doc.go's
+// explicit scopeDirs list (originally six first-party packages; issue #33
+// phase 1, plan §10/§35, added internal/wirefixture and
+// integration/clickhouse/wirecapture once the ClickHouse-wire-capture
+// tooling gave them non-test sinks of their own) plus the vendored
+// third_party/ldapserver fork (see doc.go), and cross-checks the result
+// against testdata/redaction-sites.tsv. None of these tests capture logs or
+// set zerolog's global level, so — unlike the marker matrices in
 // internal/verification and cmd/ch-jwt-verify — nothing here needs the A2
 // non-parallel-capture discipline.
+//
+// TestRedactionInventory_Phase1AuditedScopesRemainFlat (below) guards the
+// specific gap discoverSites' non-recursive directory read leaves open:
+// every entry in scopeDirs is read one level deep only (doc.go's
+// discoverSites walks os.ReadDir on the directory itself, never descending
+// into a subdirectory), so a future nested Go package added under an
+// audited root would be silently invisible to every other test in this
+// file. That test exists to catch exactly that before it happens, for the
+// two directories issue #33 phase 1 added.
 
 func loadRealManifest(t *testing.T) []ManifestRow {
 	t.Helper()
@@ -238,5 +251,78 @@ func TestRedactionInventory_ProofTestsExist(t *testing.T) {
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		t.Fatalf("%d manifest row(s) reference a proof test that no longer exists:\n%s", len(missing), strings.Join(missing, "\n"))
+	}
+}
+
+// phase1AuditedFlatScopes is the exact issue-#33-phase-1 subset of doc.go's
+// scopeDirs that TestRedactionInventory_Phase1AuditedScopesRemainFlat
+// guards (plan §10/§35/§49's "Wirefixture/wirecapture redaction coverage
+// cannot silently lose nested packages" row). It deliberately does not
+// include the pre-existing six first-party command/internal scopes or
+// third_party/ldapserver — those are long-established, hand-maintained
+// production layouts this sub-task did not touch; this list is specifically
+// the safety net for the two new scopes issue #33 phase 1 added.
+var phase1AuditedFlatScopes = []string{
+	"internal/wirefixture",
+	"integration/clickhouse/wirecapture",
+}
+
+// TestRedactionInventory_Phase1AuditedScopesRemainFlat fails, with
+// actionable instructions, the moment either phase1AuditedFlatScopes root
+// stops being flat (plan §10's "No nested Go subpackages in this unit").
+// discoverSites (doc.go) reads only a scope directory's own immediate
+// entries via os.ReadDir and never descends into a subdirectory, so a
+// non-test .go file later added under a NESTED subdirectory of an audited
+// root would be completely invisible to every other test in this file —
+// TestRedactionInventory_NoUnmappedSinks would stay green even though a
+// brand-new, entirely unclassified sink had shipped. This test is the
+// mechanical trip-wire that catches that gap directly, rather than relying
+// on a reviewer noticing a new subdirectory landed under one of these two
+// roots.
+func TestRedactionInventory_Phase1AuditedScopesRemainFlat(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("securitytest: locate module root: %v", err)
+	}
+	for _, scope := range phase1AuditedFlatScopes {
+		dir := filepath.Join(root, filepath.FromSlash(scope))
+		var nested []string
+		walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if path == dir || d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
+				return nil
+			}
+			rel, relErr := filepath.Rel(dir, path)
+			if relErr != nil {
+				return relErr
+			}
+			if strings.ContainsRune(rel, filepath.Separator) {
+				// A non-test .go file that is NOT a direct child of the
+				// scope root — i.e. it lives inside a nested subdirectory
+				// discoverSites' os.ReadDir(dir) call can never see.
+				nested = append(nested, scope+"/"+filepath.ToSlash(rel))
+			}
+			return nil
+		})
+		if walkErr != nil {
+			t.Fatalf("securitytest: walk audited scope %s: %v", scope, walkErr)
+		}
+		if len(nested) > 0 {
+			sort.Strings(nested)
+			t.Fatalf("audited scope %q stopped being flat: found %d non-test .go file(s) inside a "+
+				"nested subdirectory, which discoverSites (doc.go) cannot see because it reads only "+
+				"%s's own immediate directory entries, never descending into subdirectories:\n%s\n\n"+
+				"fix: either move the file(s) directly into %s (keeping the scope flat), or "+
+				"explicitly register the new nested subpackage's own path as its own entry in "+
+				"doc.go's scopeDirs (adding a redaction-sites.tsv row for every sink it discovers) "+
+				"so redaction_inventory_test.go actually enumerates it — never leave a nested "+
+				"package silently unaudited.",
+				scope, len(nested), scope, strings.Join(nested, "\n"), scope)
+		}
 	}
 }
