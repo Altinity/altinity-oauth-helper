@@ -79,3 +79,31 @@ func errInvalidMetadata(context string, err error) error {
 func errConstructGeneration(context string, err error) error {
 	return fmt.Errorf("wirecapture: constructed-generation error (%s): %w", context, err)
 }
+
+// errProfileFlagMissing reports that a required profile-writing flag
+// (plan §9/§26's sanitize --profile-out extension) was left empty. field
+// is always one of profile.go's own fixed flag-name literals — never any
+// flag *value* — so this can never echo caller-supplied content.
+func errProfileFlagMissing(field string) error {
+	return fmt.Errorf("wirecapture: profile: missing required %s", field)
+}
+
+// errProfileConfigHashSource reports that --config-file and --config-sha256
+// were both supplied, or neither was, when writing profile.json. reason is
+// always one of profile.go's own fixed literals; never file content.
+func errProfileConfigHashSource(reason string) error {
+	return fmt.Errorf("wirecapture: profile: %s (supply exactly one of --config-file or --config-sha256)", reason)
+}
+
+// errProfileDrift reports that a freshly built profile.json for a tracked
+// line does not match (byte-for-byte, via the equal-Profile-value
+// guarantee documented on WriteProfileFromInput) the profile.json already
+// committed on disk for a prior session of the same line (plan §9/§26):
+// this tool refuses to silently overwrite per-line provenance metadata.
+// line is a safe, fixed classification value (e.g. "24.8"), never file
+// content.
+func errProfileDrift(line string) error {
+	return fmt.Errorf(
+		"wirecapture: profile: freshly built profile.json for line %q does not match the committed profile.json already on disk (refusing to overwrite; reconcile the source/tool inputs instead)",
+		line)
+}
