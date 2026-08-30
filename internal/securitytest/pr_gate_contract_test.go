@@ -217,11 +217,11 @@ func loadPRGateWorkflow(t *testing.T) *yaml.Node {
 	path := filepath.Join(root, filepath.FromSlash(prGateWorkflowRelPath))
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("securitytest: read %s: %v — the required PR verification gate must exist; with this workflow gone, nothing verifies a pull request before it merges to main", prGateWorkflowRelPath, err)
+		t.Fatalf("securitytest: read %s: %v — the required PR verification gate must exist. Once branch protection requires `%s`, deleting this workflow does NOT let pull requests merge unverified: the required context is simply never reported, so every PR stalls. The hazard is the follow-on action — dropping the requirement to unblock a stuck queue — and that is what actually permits unverified merging. Restore the workflow rather than relaxing protection", prGateWorkflowRelPath, err, prGateRequiredCheckName)
 	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		t.Fatalf("securitytest: parse %s: %v — an unparseable gate workflow does not run, so PRs would merge unverified", prGateWorkflowRelPath, err)
+		t.Fatalf("securitytest: parse %s: %v — an unparseable gate workflow cannot verify anything, but it fails CLOSED rather than open: GitHub generates a FAILED workflow run for an invalid workflow file on new commits, and a required check that is failing or unreported blocks the merge either way. Fix the YAML; do not relax protection to route around it", prGateWorkflowRelPath, err)
 	}
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
 		t.Fatalf("securitytest: %s must be exactly one YAML document, got kind=%v with %d document(s)", prGateWorkflowRelPath, doc.Kind, len(doc.Content))

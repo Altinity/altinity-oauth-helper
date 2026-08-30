@@ -17,19 +17,32 @@ on:
   # special-case skip title/body-only edits to "optimize" this back down —
   # that reopens the exact gap this closes.
   #
-  # Known limit of that protection: events produced with the repository's own
-  # `GITHUB_TOKEN` do not start new workflow runs (GitHub's recursion
-  # guard). So `edited` closes the retarget gap only for base changes made by
-  # a human or by an actor whose events actually trigger Actions. No
-  # repository automation may retarget a pull request's base with
-  # `GITHUB_TOKEN` unless it also produces a real `synchronize` (or otherwise
-  # forces a fresh gate run) — `strict: true` branch protection narrows the
-  # reachable cases but is not a complete substitute, since an unchanged head
-  # can already be up to date with the newly selected base. This constraint
-  # is external to this file and deliberately has no contract test: a YAML
-  # check cannot observe it. If automated retargeting ever becomes a real
-  # requirement, revisit the enforcement mechanism rather than assuming this
-  # trigger covers it.
+  # Known limit of that protection, stated precisely because the general
+  # version of it is wrong: a `pull_request.edited` event produced with the
+  # repository's own `GITHUB_TOKEN` does NOT create a workflow run. The
+  # recursion guard has documented exceptions — `workflow_dispatch` and
+  # `repository_dispatch` always create runs, and `pull_request` with
+  # `opened`/`synchronize`/`reopened` does create runs but in an
+  # APPROVAL-REQUIRED state (someone with write access must approve them).
+  # `edited` is not among those exceptions.
+  #
+  # So `edited` closes the retarget gap only for base changes whose events
+  # actually reach Actions — a human, or an actor other than `GITHUB_TOKEN`.
+  # Repository automation must not retarget a pull request's base with
+  # `GITHUB_TOKEN`: it produces no gate run at all, and note that "just make
+  # it emit a synchronize instead" is not an automatic fix either, since a
+  # `GITHUB_TOKEN`-generated `synchronize` yields an approval-gated run rather
+  # than silent revalidation. Both cases fail closed, but an operator should
+  # not expect automatic revalidation from either.
+  #
+  # `strict: true` branch protection narrows the reachable cases without being
+  # a complete substitute: an unchanged head can already be up to date with
+  # the newly selected base. This constraint is external to this file and
+  # deliberately has NO contract test — a structural YAML check cannot observe
+  # an event-delivery property, and asserting it would be exactly the kind of
+  # false assurance this file's other comments were corrected for. If
+  # automated retargeting ever becomes a real requirement, revisit the
+  # enforcement mechanism rather than assuming this trigger covers it.
   pull_request:
     types: [opened, synchronize, reopened, edited]
   push:
