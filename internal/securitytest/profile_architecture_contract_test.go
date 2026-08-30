@@ -33,8 +33,33 @@ package securitytest
 //      production site — plus, per Amendment 3, the identical
 //      constant-only/no-conversion rule applied to every `reason`
 //      parameter (logBindFailed, logSearchRejected);
-//  12. `.Verify(` appears exactly once in production, inside bind.go;
-//  13. `.Roles(` appears exactly once in production, inside bind.go.
+//  12. `.Verify` is referenced exactly once in production, inside bind.go;
+//  13. `.Roles` is referenced exactly once in production, inside bind.go.
+//
+// Invariants 4 and 6 inspect struct fields and *ast.ValueSpec/StructType
+// nodes with an explicit map/chan type, AND every AssignStmt whose RHS is a
+// make(map[...]...)/make(chan ...) call — closing a review-finding gap
+// where an idiomatic inferred short-variable-declaration (`pending :=
+// make(map[int32]*request)`) parses to an AssignStmt with no
+// ValueSpec/explicit-type node anywhere, so it used to pass both bans
+// silently despite this file's own claim to be an absolute, mechanical one.
+// Invariants 12 and 13 count every matching *ast.SelectorExpr node (see
+// selectorHasFieldRoot/verifyOrRolesSelectorSites), not only ones
+// immediately called — closing a second review-finding gap where
+// extracting a method value first (`verify := c.verifier.Verify;
+// verify(...)`) produced neither a selector-shaped CallExpr (the extraction
+// is a bare SelectorExpr) nor a selector-shaped Fun on the later call
+// (Fun is a plain Ident), so a second verification path introduced this way
+// would have left the recorded count at 1 and passed silently.
+// TestProfileArchitecture_DetectsInferredMakeMapAssignment,
+// TestProfileArchitecture_DetectsInferredMakeChanAssignment,
+// TestProfileArchitecture_DetectsVerifyMethodValueExtraction, and
+// TestProfileArchitecture_SelectorHeuristicIgnoresUnrelatedRolesField are
+// synthetic regression tests (parsing an in-memory source string, never the
+// real profile package) proving each closed gap is actually caught, and
+// that the broadened invariant-12/13 check still doesn't false-positive on
+// this package's own unrelated `Roles` data-field accesses
+// (`c.auth.Roles`, `newState.Roles` — see selectorHasFieldRoot's comment).
 //
 // Sabotage checks (run manually, restored afterward — see the sub-task
 // return for the recorded results): `diagnostic(err.Error())` at a result
@@ -532,17 +557,43 @@ func TestProfileArchitecture_SingleGoroutineSpawnsServeConnection(t *testing.T) 
 
 // --- 4: only Server's active-connection map exists ---
 
-func TestProfileArchitecture_OnlyActiveConnectionMapExists(t *testing.T) {
-	files := loadProfileFiles(t)
+// mapSite records one map-typed field, explicitly-typed var, or
+// make(map[...]...)-initialized local variable found anywhere in the
+// package.
+type mapSite struct {
+	loc        string
+	fieldOrVar string
+	structName string
+	typeStr    string
+}
 
-	type mapSite struct {
-		loc        string
-		fieldOrVar string
-		structName string
-		typeStr    string
+// makeMapType reports whether call is a bare (unqualified — "make" is a
+// builtin, never import-qualified) call to make() whose first argument is a
+// map type, returning that *ast.MapType. This is what an idiomatic
+// short-variable-declaration such as `pending := make(map[int32]*request)`
+// looks like in the AST: the map type never appears as an explicit
+// *ast.ValueSpec/struct-field Type (which the checks above this function
+// already caught before this fix) — it appears only inside the make() call
+// itself, so a check that inspects only ValueSpec/StructType nodes misses
+// it entirely.
+func makeMapType(call *ast.CallExpr) (*ast.MapType, bool) {
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "make" || len(call.Args) == 0 {
+		return nil, false
 	}
-	var sites []mapSite
+	mt, ok := call.Args[0].(*ast.MapType)
+	return mt, ok
+}
 
+// findMapTypedSites collects every map-typed site in files: struct fields,
+// package/function-level vars with an explicit map type, AND — per the
+// review finding that closed this gap — any assignment (`:=` or `=`) whose
+// right-hand side is a make(map[...]...) call, however that call's map type
+// was inferred rather than spelled out in a ValueSpec. Exported for reuse by
+// both the real-package test and the synthetic regression test below that
+// proves this exact inferred form is now caught.
+func findMapTypedSites(files []profileFile) []mapSite {
+	var sites []mapSite
 	for _, pf := range files {
 		ast.Inspect(pf.file, func(n ast.Node) bool {
 			switch node := n.(type) {
@@ -569,10 +620,38 @@ func TestProfileArchitecture_OnlyActiveConnectionMapExists(t *testing.T) {
 						typeStr:    formatNode(pf, mt),
 					})
 				}
+			case *ast.AssignStmt:
+				for i, rhs := range node.Rhs {
+					call, ok := rhs.(*ast.CallExpr)
+					if !ok {
+						continue
+					}
+					mt, ok := makeMapType(call)
+					if !ok {
+						continue
+					}
+					name := "<non-ident-lhs>"
+					if i < len(node.Lhs) {
+						if id, ok := node.Lhs[i].(*ast.Ident); ok {
+							name = id.Name
+						}
+					}
+					sites = append(sites, mapSite{
+						loc:        pf.pos(node.Pos()),
+						fieldOrVar: name,
+						typeStr:    formatNode(pf, mt),
+					})
+				}
 			}
 			return true
 		})
 	}
+	return sites
+}
+
+func TestProfileArchitecture_OnlyActiveConnectionMapExists(t *testing.T) {
+	files := loadProfileFiles(t)
+	sites := findMapTypedSites(files)
 
 	const wantType = "map[net.Conn]struct{}"
 	found := 0
@@ -591,6 +670,41 @@ func TestProfileArchitecture_OnlyActiveConnectionMapExists(t *testing.T) {
 	if len(bad) > 0 {
 		sort.Strings(bad)
 		t.Fatalf("found %d disallowed map-typed field/var declaration(s) in %s:\n%s", len(bad), profileRelDir, strings.Join(bad, "\n"))
+	}
+}
+
+// TestProfileArchitecture_DetectsInferredMakeMapAssignment is a regression
+// test for the review finding that findMapTypedSites' predecessor (which
+// inspected only *ast.StructType fields and explicit *ast.ValueSpec
+// MapType/ChanType declarations) missed an idiomatic inferred
+// short-variable-declaration such as `pending := make(map[int32]*request)`
+// — an AssignStmt with no ValueSpec/explicit-type node anywhere, so the
+// mechanical ban was bypassable by ordinary Go syntax. It parses a small
+// synthetic source file (never the real profile package) declaring exactly
+// that pattern and asserts findMapTypedSites reports it.
+func TestProfileArchitecture_DetectsInferredMakeMapAssignment(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func bad() {
+	pending := make(map[int32]*request)
+	_ = pending
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findMapTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findMapTypedSites to catch the inferred `pending := make(map[int32]*request)` assignment, found %d site(s): %+v", len(sites), sites)
+	}
+	if sites[0].fieldOrVar != "pending" || !strings.Contains(sites[0].typeStr, "map[int32]") {
+		t.Fatalf("unexpected site detail for the inferred map assignment: %+v", sites[0])
 	}
 }
 
@@ -625,16 +739,32 @@ func TestProfileArchitecture_NoSyncMap(t *testing.T) {
 
 // --- 6: no channel other than serveDone/stopDone ---
 
-func TestProfileArchitecture_OnlyAllowlistedChannelsExist(t *testing.T) {
-	files := loadProfileFiles(t)
+// chanSite records one channel-typed field, explicitly-typed var, or
+// make(chan ...)-initialized local variable found anywhere in the package.
+type chanSite struct {
+	loc     string
+	name    string
+	typeStr string
+}
 
-	type chanSite struct {
-		loc     string
-		name    string
-		typeStr string
+// makeChanType is makeMapType's channel-typed counterpart: reports whether
+// call is a bare make() call whose first argument is a channel type.
+func makeChanType(call *ast.CallExpr) (*ast.ChanType, bool) {
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "make" || len(call.Args) == 0 {
+		return nil, false
 	}
-	var sites []chanSite
+	ct, ok := call.Args[0].(*ast.ChanType)
+	return ct, ok
+}
 
+// findChanTypedSites is findMapTypedSites' channel-typed counterpart,
+// closing the identical gap for invariant 6: an idiomatic
+// `work := make(chan request)` is an *ast.AssignStmt with no
+// ValueSpec/explicit-type node, which the struct-field/ValueSpec-only scan
+// below this function's predecessor used to miss entirely.
+func findChanTypedSites(files []profileFile) []chanSite {
+	var sites []chanSite
 	for _, pf := range files {
 		ast.Inspect(pf.file, func(n ast.Node) bool {
 			switch node := n.(type) {
@@ -656,10 +786,38 @@ func TestProfileArchitecture_OnlyAllowlistedChannelsExist(t *testing.T) {
 						typeStr: formatNode(pf, node.Type),
 					})
 				}
+			case *ast.AssignStmt:
+				for i, rhs := range node.Rhs {
+					call, ok := rhs.(*ast.CallExpr)
+					if !ok {
+						continue
+					}
+					ct, ok := makeChanType(call)
+					if !ok {
+						continue
+					}
+					name := "<non-ident-lhs>"
+					if i < len(node.Lhs) {
+						if id, ok := node.Lhs[i].(*ast.Ident); ok {
+							name = id.Name
+						}
+					}
+					sites = append(sites, chanSite{
+						loc:     pf.pos(node.Pos()),
+						name:    name,
+						typeStr: formatNode(pf, ct),
+					})
+				}
 			}
 			return true
 		})
 	}
+	return sites
+}
+
+func TestProfileArchitecture_OnlyAllowlistedChannelsExist(t *testing.T) {
+	files := loadProfileFiles(t)
+	sites := findChanTypedSites(files)
 
 	allow := map[string]bool{"serveDone": true, "stopDone": true}
 	var bad []string
@@ -674,6 +832,37 @@ func TestProfileArchitecture_OnlyAllowlistedChannelsExist(t *testing.T) {
 	if len(bad) > 0 {
 		sort.Strings(bad)
 		t.Fatalf("found %d disallowed channel-typed declaration(s) in %s:\n%s", len(bad), profileRelDir, strings.Join(bad, "\n"))
+	}
+}
+
+// TestProfileArchitecture_DetectsInferredMakeChanAssignment is
+// TestProfileArchitecture_DetectsInferredMakeMapAssignment's channel-typed
+// counterpart: a synthetic `work := make(chan request)` must be caught by
+// findChanTypedSites even though it carries no explicit *ast.ChanType
+// ValueSpec.
+func TestProfileArchitecture_DetectsInferredMakeChanAssignment(t *testing.T) {
+	const src = `package synthetic
+
+type request struct{}
+
+func bad() {
+	work := make(chan request)
+	_ = work
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "synthetic.go", fset: fset, file: f}
+
+	sites := findChanTypedSites([]profileFile{pf})
+	if len(sites) != 1 {
+		t.Fatalf("expected findChanTypedSites to catch the inferred `work := make(chan request)` assignment, found %d site(s): %+v", len(sites), sites)
+	}
+	if sites[0].name != "work" || !strings.Contains(sites[0].typeStr, "request") {
+		t.Fatalf("unexpected site detail for the inferred channel assignment: %+v", sites[0])
 	}
 }
 
@@ -831,36 +1020,165 @@ func TestProfileArchitecture_ReasonIsConstantOnlyAcrossLogHelpers(t *testing.T) 
 	}
 }
 
-// --- 12-13: Verify/Roles selector calls exactly once each, inside bind.go ---
+// --- 12-13: Verify/Roles referenced exactly once each, inside bind.go ---
+
+// selectorHasFieldRoot reports whether sel's receiver expression is itself
+// a *ast.SelectorExpr whose own Sel.Name is fieldName — the shape every
+// production reference to the connection/Server's verifier/roles field
+// takes (`c.verifier.Verify`, `c.roles.Roles`). This package's
+// architecture-contract file is deliberately go/ast-only (no go/types, per
+// the file's top comment matching redaction_inventory_test.go's
+// discipline), so telling a genuine Verifier.Verify/RoleResolver.Roles
+// reference apart from an unrelated, coincidentally same-named selector —
+// a plain data field such as `c.auth.Roles` or `newState.Roles` — has to be
+// done by this naming-convention heuristic rather than by resolved types.
+func selectorHasFieldRoot(sel *ast.SelectorExpr, fieldName string) bool {
+	inner, ok := sel.X.(*ast.SelectorExpr)
+	return ok && inner.Sel.Name == fieldName
+}
+
+// verifyOrRolesSelectorSites finds every *ast.SelectorExpr anywhere in
+// files matching selName/fieldName (see selectorHasFieldRoot), regardless
+// of whether that selector is immediately called. This is deliberately
+// broader than "every CallExpr whose Fun is such a selector": the review
+// finding this closes showed that a method-value extraction
+// (`verify := c.verifier.Verify` followed by a later `verify(...)` call)
+// produces exactly that shape — a bare SelectorExpr assigned to a variable,
+// with the later call's Fun being a plain *ast.Ident, not a SelectorExpr —
+// so a check that only counted selector-shaped CallExprs would see zero
+// occurrences for a second verification path introduced this way. Counting
+// every matching SelectorExpr node instead means the extraction itself
+// (assigning `c.verifier.Verify` anywhere, called or not) is what gets
+// counted, so a second path is caught the moment it's written, independent
+// of how many times or where the extracted value is later invoked.
+func verifyOrRolesSelectorSites(files []profileFile, selName, fieldName string) []string {
+	var sites []string
+	for _, pf := range files {
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != selName {
+				return true
+			}
+			if !selectorHasFieldRoot(sel, fieldName) {
+				return true
+			}
+			sites = append(sites, pf.pos(sel.Pos()))
+			return true
+		})
+	}
+	return sites
+}
 
 func TestProfileArchitecture_VerifyAndRolesOnlyOnceInBind(t *testing.T) {
 	files := loadProfileFiles(t)
 
-	checkOne := func(selName string) {
-		var sites []string
-		for _, pf := range files {
-			ast.Inspect(pf.file, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != selName {
-					return true
-				}
-				sites = append(sites, pf.pos(call.Pos()))
-				return true
-			})
-		}
+	checkOne := func(selName, fieldName string) {
+		sites := verifyOrRolesSelectorSites(files, selName, fieldName)
 		if len(sites) != 1 {
-			t.Fatalf("expected exactly one .%s( call site in %s, found %d: %s",
-				selName, profileRelDir, len(sites), strings.Join(sites, ", "))
+			t.Fatalf("expected exactly one .%s( reference (via .%s.%s) in %s, found %d: %s",
+				selName, fieldName, selName, profileRelDir, len(sites), strings.Join(sites, ", "))
 		}
 		if !strings.HasPrefix(sites[0], "bind.go:") {
-			t.Fatalf(".%s( call site must be inside bind.go, found: %s", selName, sites[0])
+			t.Fatalf(".%s( reference must be inside bind.go, found: %s", selName, sites[0])
 		}
 	}
 
-	checkOne("Verify")
-	checkOne("Roles")
+	checkOne("Verify", "verifier")
+	checkOne("Roles", "roles")
+}
+
+// TestProfileArchitecture_DetectsVerifyMethodValueExtraction is a
+// regression test for the review finding that the previous
+// selector-CallExpr-only check could be bypassed by extracting a method
+// value first (`verify := c.verifier.Verify; verify(...)`) — neither the
+// extraction (a bare SelectorExpr, not a CallExpr) nor the later call
+// (Fun is a plain Ident, not a SelectorExpr) was ever counted. It builds a
+// synthetic two-site package — one legitimate `c.verifier.Verify(...)` call
+// plus a second file that only extracts the method value without calling
+// it — and asserts verifyOrRolesSelectorSites reports both, proving a
+// second verification path introduced this way now trips the "exactly
+// one" invariant.
+func TestProfileArchitecture_DetectsVerifyMethodValueExtraction(t *testing.T) {
+	const legit = `package synthetic
+
+type connection struct {
+	verifier interface {
+		Verify()
+	}
+}
+
+func (c *connection) handleBind() {
+	c.verifier.Verify()
+}
+`
+	const sneaky = `package synthetic
+
+type other struct {
+	verifier interface {
+		Verify()
+	}
+}
+
+func (o *other) sneak() {
+	verify := o.verifier.Verify
+	verify()
+}
+`
+	parseOne := func(name, src string) profileFile {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatalf("parse synthetic source %s: %v", name, err)
+		}
+		return profileFile{name: name, fset: fset, file: f}
+	}
+
+	legitOnly := []profileFile{parseOne("bind.go", legit)}
+	if sites := verifyOrRolesSelectorSites(legitOnly, "Verify", "verifier"); len(sites) != 1 {
+		t.Fatalf("expected exactly one Verify site with only the legitimate call present, found %d: %v", len(sites), sites)
+	}
+
+	withSneak := []profileFile{parseOne("bind.go", legit), parseOne("sneaky.go", sneaky)}
+	sites := verifyOrRolesSelectorSites(withSneak, "Verify", "verifier")
+	if len(sites) != 2 {
+		t.Fatalf("expected the method-value-extraction site in sneaky.go to be counted alongside the legitimate bind.go call (2 total), found %d: %v", len(sites), sites)
+	}
+}
+
+// TestProfileArchitecture_SelectorHeuristicIgnoresUnrelatedRolesField
+// proves selectorHasFieldRoot does not false-positive on the package's own
+// legitimate non-method `Roles` field accesses (`c.auth.Roles`,
+// `newState.Roles`) — the reason the broadened check above cannot simply
+// count every SelectorExpr named "Roles" and must instead require the
+// `.roles.Roles` receiver shape.
+func TestProfileArchitecture_SelectorHeuristicIgnoresUnrelatedRolesField(t *testing.T) {
+	const src = `package synthetic
+
+type authState struct {
+	Roles []string
+}
+
+type connection struct {
+	auth authState
+}
+
+func (c *connection) readSnapshot() []string {
+	roles := c.auth.Roles
+	return roles
+}
+
+func assignField(newState *authState, roles []string) {
+	newState.Roles = roles
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "search.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	pf := profileFile{name: "search.go", fset: fset, file: f}
+
+	if sites := verifyOrRolesSelectorSites([]profileFile{pf}, "Roles", "roles"); len(sites) != 0 {
+		t.Fatalf("expected zero Roles-method sites for plain data-field accesses (c.auth.Roles, newState.Roles), found %d: %v", len(sites), sites)
+	}
 }

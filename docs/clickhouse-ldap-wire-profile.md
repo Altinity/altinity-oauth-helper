@@ -707,9 +707,18 @@ reject each one before Phase 4 is authorized:
    (`minimalPositiveInt32`) the LDAPMessage envelope's MessageID uses, so a
    version of 0, a negative version, or a non-minimally-encoded value is
    malformed at decode time and closes the connection before the version
-   check ever runs — it never reaches result 2. This matches legacy
-   goldap's own decode window for this field (a 1..127 range at the
-   single-octet BER-integer level).
+   check ever runs — it never reaches result 2. **(new client-visible
+   behavior, not parity)** This does *not* match legacy: legacy goldap's own
+   Bind version decoder (`BindRequestVersionMin`/`BindRequestVersionMax` in
+   `third_party/goldap/message/struct.go`) only accepts `1..127` and returns
+   a decode error — closing the connection, no response written — for
+   anything outside that window. This profile's `1..MaxInt32` decode range
+   is wider than legacy's, not equivalent to it: a version `>=128` decodes
+   successfully here and receives a graceful result-2 `protocolError`
+   response, a case legacy never reaches because it never gets past decode.
+   Phase 3 must explicitly accept this widening or narrow the version decode
+   to legacy's `1..127`, the same way items 9-10 below are called out rather
+   than left implicit.
 2. Search `derefAliases != 0` changes from current tolerance to result 50.
 3. Search `typesOnly=true` changes from current supported generic rendering
    to result 50.
@@ -741,13 +750,18 @@ reject each one before Phase 4 is authorized:
 
 ### 11.4 Phase 4's bounded test-only cursor supersedes this document's oracle
 
-§10's `TestClickHouseWireCryptobyteDecision` currently uses `cryptobyte`
-itself as the independent decoder proving fixture well-formedness. Phase 2's
-plan deliberately selects, for Phase 4, a **bounded test-only cursor** as
-that independent oracle's replacement — not the Phase 2 `profile` decoder —
-because using the eventual production decoder to prove fixture
-well-formedness for itself would be self-referential. Phase 4 must
-therefore: delete `internal/ldap/profile/differential_test.go`; replace this
+§10's `TestClickHouseWireCryptobyteDecision` characterizes each fixture with
+`cryptobyte` itself, but a cryptobyte characterization failure only counts
+as evidence (the local-ber-cursor justification) once it is corroborated by
+`independentlyWellFormedBER` — the vendored, patched goldap decoder — as a
+*second, structurally independent* decoder proving fixture well-formedness
+(see `internal/ldap/clickhouse_wire_cryptobyte_test.go`'s own doc comments).
+Phase 2's plan deliberately selects, for Phase 4, a **bounded test-only
+cursor** as *that independent goldap oracle's* replacement — not cryptobyte,
+and not the Phase 2 `profile` decoder — because using the eventual
+production decoder to prove fixture well-formedness for itself would be
+self-referential. Phase 4 must therefore: delete
+`internal/ldap/profile/differential_test.go`; replace this
 document's/`internal/ldap`'s independent goldap fixture decoder with a small,
 bounded, test-only definite-length structural cursor; preserve the
 well-formedness/filter-structure anti-drift assertions the current oracle
