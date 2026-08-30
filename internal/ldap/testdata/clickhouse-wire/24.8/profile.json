@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "line": "24.8",
+  "tracked_image": "altinity/clickhouse-server:24.8.11.51285.altinitystable",
+  "clickhouse_repository": "Altinity/ClickHouse",
+  "clickhouse_tag": "v24.8.11.51285.altinitystable",
+  "clickhouse_commit": "351edb1a2ec26940aee4c2d1d332fd280c232964",
+  "clickhouse_source_blobs": {
+    "ExternalAuthenticators.cpp": "77812ac5eb5d0027f081ac43dccc6b89110aeb73",
+    "LDAPAccessStorage.cpp": "917ad7cbb922083ab82f85ab25c120a17fd009c7",
+    "LDAPClient.cpp": "3a0b82b9a760e8c0e4f37f422e673a1c5a2228e0",
+    "LDAPClient.h": "0bbd2c6e9c4662d3d31f83bd8ed457647d436cc6"
+  },
+  "openldap_repository": "ClickHouse/openldap",
+  "openldap_pin": "5671b80e369df2caf5f34e02924316205a43c895",
+  "openldap_version": "2.5.16",
+  "canonical_config_path": "integration/clickhouse/clickhouse/common/config.d/ldap.xml",
+  "clickhouse_config_element_sha256": "898df8b5dca27603ac5234bde65862484a81aa22de7558c3c4b7e030f1901f3f",
+  "capture_tool_schema_version": 1,
+  "session_paths": [
+    "success",
+    "timeout-abandon"
+  ]
+}
