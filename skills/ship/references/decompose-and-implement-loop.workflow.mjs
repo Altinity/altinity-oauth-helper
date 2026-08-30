@@ -128,7 +128,7 @@ function runParallelSubtask(task, priorSummaries, alreadyDoneSummary) {
   const wipBranch = `wip/${unitSlug}-${task.id}`
   return agent(
     `You are implementing ONE sub-task of the approved plan at ${planFile} for issue ${issueRef} (${alreadyDoneSummary}). This sub-task runs CONCURRENTLY with other independent sub-tasks in this same wave, each in its OWN isolated git worktree — you will NOT see their edits and they will not see yours until an automated integration step merges every branch back together afterward, so do not assume any file outside your own declared scope has already changed, and do not touch anything outside that scope.\n\n` +
-    `FIRST, before any other work: create and check out your own branch from the current HEAD: \`git checkout -b ${wipBranch}\`. Commit all your work to THIS branch and no other.\n\n` +
+    `FIRST, before any other work: create and check out your own branch based EXPLICITLY on the unit branch: \`git checkout -b ${wipBranch} ${branch}\` (not bare \`git checkout -b\` — an isolated worktree is created from local main, NOT from ${branch}, so the current HEAD here may predate every earlier sub-task's merged work; observed live on #33 phase 1, where a consumer package was written against an imagined API because its worktree never contained the schema package merged one wave earlier). Then confirm \`git rev-parse HEAD\` equals \`git rev-parse ${branch}\` before touching any file. Commit all your work to THIS branch and no other.\n\n` +
     `Your sub-task: ${task.id} — ${task.title}\n` +
     `Covers plan sections: ${task.planSections.join(', ')}\n` +
     `Description: ${task.description}\n` +
@@ -167,6 +167,13 @@ for (const [waveIndex, wave] of waves.entries()) {
   const missingBranch = waveOutputs.find(o => !o.branchName)
   if (missingBranch) {
     return { status: 'error', reason: `a wave ${waveIndex + 1} sub-task did not report a branch to merge`, completedSubtasks: results.map(r => r.task.id) }
+  }
+  // Never merge a sub-task whose own agent reported a red gate: integrating it only moves the
+  // break onto the unit branch (observed on #33 phase 1 — a gateGreen:false branch was merged
+  // and the post-merge gate then failed for exactly the reason the sub-task had reported).
+  const redGate = wave.filter((_, i) => waveOutputs[i].gateGreen !== true).map(t => t.id)
+  if (redGate.length) {
+    return { status: 'error', reason: `wave ${waveIndex + 1} sub-task(s) reported gateGreen=false, not merged: ${redGate.join(', ')} — their wip/<unit>-<id> branches are left unmerged for inspection`, completedSubtasks: results.filter(r => !redGate.includes(r.task.id)).map(r => r.task.id), redGateSubtasks: redGate }
   }
 
   phase('Integrate')
