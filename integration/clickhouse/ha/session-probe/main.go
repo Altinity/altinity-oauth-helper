@@ -51,14 +51,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
-
-	ldap "github.com/go-ldap/ldap/v3"
 )
 
 // forbiddenFlagNames are exact (case-insensitive) flag-name matches refused
@@ -228,38 +225,6 @@ func unquoteJSONString(s string) string {
 	return s
 }
 
-// classifyError maps a library error into one of a small closed set of
-// safe classes. It deliberately never returns the underlying error text:
-// go-ldap's own error strings are not documented as credential-free, so
-// they are treated as unsafe to print by default.
-func classifyError(err error) string {
-	var ldapErr *ldap.Error
-	if errors.As(err, &ldapErr) {
-		switch ldapErr.ResultCode {
-		case ldap.LDAPResultInvalidCredentials:
-			return "invalid-credentials"
-		case ldap.ErrorNetwork:
-			return "network-error"
-		default:
-			return "ldap-result-error"
-		}
-	}
-
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		if netErr.Timeout() {
-			return "timeout"
-		}
-		return "network-error"
-	}
-
-	if errors.Is(err, io.EOF) {
-		return "connection-closed"
-	}
-
-	return "unknown-error"
-}
-
 func printMarker(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), msg)
 }
@@ -334,47 +299,34 @@ func run(ctx context.Context, args []string, environ []string, stdin io.Reader, 
 		return 1
 	}
 
-	bindDN := fmt.Sprintf("%s=%s,%s", cfg.rdnAttr, ldap.EscapeDN(username), cfg.userBaseDN)
+	bindDN := fmt.Sprintf("%s=%s,%s", cfg.rdnAttr, escapeDN(username), cfg.userBaseDN)
 
-	conn, err := ldap.DialURL("ldap://" + cfg.addr)
+	const roundTripTimeout = 5 * time.Second
+
+	conn, err := dialProbe(cfg.addr, roundTripTimeout)
 	if err != nil {
 		printMarker(out, fmt.Sprintf("probe: failed dial-%s", classifyError(err)))
 		return 1
 	}
 	defer conn.Close()
-	conn.SetTimeout(5 * time.Second)
 
-	if err := conn.Bind(bindDN, token); err != nil {
+	if err := conn.simpleBind(bindDN, token, roundTripTimeout); err != nil {
 		printMarker(out, fmt.Sprintf("probe: failed bind-%s", classifyError(err)))
 		return 1
 	}
 	printMarker(out, "probe: bound")
 
-	filter := fmt.Sprintf("(&(objectClass=groupOfNames)(member=%s))", ldap.EscapeFilter(bindDN))
-	searchReq := ldap.NewSearchRequest(
-		cfg.groupBaseDN,
-		ldap.ScopeWholeSubtree,
-		ldap.NeverDerefAliases,
-		0, // sizeLimit: unbounded — the probe just counts what it gets back
-		0, // timeLimit: unbounded — conn.SetTimeout already bounds the round trip
-		false,
-		filter,
-		[]string{"cn"},
-		nil,
-	)
-
 	heartbeat := 0
 	for {
 		heartbeat++
-		result, searchErr := conn.Search(searchReq)
+		cns, searchErr := conn.searchMembership(cfg.groupBaseDN, bindDN, roundTripTimeout)
 		if searchErr != nil {
 			printMarker(out, fmt.Sprintf("probe: failed search-%s", classifyError(searchErr)))
 			return 1
 		}
 
 		entries := 0
-		for _, e := range result.Entries {
-			cn := e.GetAttributeValue("cn")
+		for _, cn := range cns {
 			if cfg.rolePrefix == "" || strings.HasPrefix(cn, cfg.rolePrefix) {
 				entries++
 			}

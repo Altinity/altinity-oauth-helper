@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	ber "github.com/go-asn1-ber/asn1-ber"
-	ldap "github.com/go-ldap/ldap/v3"
+	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/cryptobyte/asn1"
 )
 
 // ---------------------------------------------------------------------
@@ -19,51 +19,69 @@ import (
 // This does not reuse internal/ldap's production server: that server is
 // wired to a full verifier/role-resolver pipeline this package must not
 // import (the probe is intentionally a standalone, dependency-light
-// binary — see the package doc comment). Instead this hand-builds just
-// enough real LDAPv3 wire responses — BindResponse, SearchResultEntry,
-// SearchResultDone — using the same github.com/go-asn1-ber/asn1-ber
-// primitives go-ldap/ldap/v3 itself uses to encode requests, so the
-// probe's real, unmodified go-ldap client decodes them exactly as it
-// would decode a real server's responses.
+// binary — see the package doc comment). It also does not reuse
+// internal/ldap/profile's decoder: the probe under test must be exercised
+// exactly as any external client would be, over a real net.Conn, not by
+// calling into either implementation.
+//
+// Instead this hand-builds just enough real LDAPv3 wire responses —
+// BindResponse, SearchResultEntry, SearchResultDone — using this
+// package's own cryptobyte-based encoders from ldapclient.go (the same
+// tag constants and encodeMessage helper the probe's real client uses to
+// build its requests), and decodes incoming requests with that same
+// file's readFrame/decodeEnvelope. Neither github.com/go-ldap/ldap/v3 nor
+// github.com/go-asn1-ber/asn1-ber is imported anywhere in this package.
 // ---------------------------------------------------------------------
 
-func ldapEnvelope(msgID int64, protocolOp *ber.Packet) []byte {
-	envelope := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Response")
-	envelope.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, msgID, "MessageID"))
-	envelope.AppendChild(protocolOp)
-	return envelope.Bytes()
+func bindResponseBytes(msgID int32, resultCode int) []byte {
+	msg, err := encodeMessage(func(b *cryptobyte.Builder) {
+		b.AddASN1Int64(int64(msgID))
+		b.AddASN1(tagBindResponse, func(b *cryptobyte.Builder) {
+			b.AddASN1Enum(int64(resultCode))
+			b.AddASN1OctetString(nil) // matchedDN
+			b.AddASN1OctetString(nil) // diagnosticMessage
+		})
+	})
+	if err != nil {
+		panic(err) // test-only fixture construction; a build failure here is a test bug
+	}
+	return msg
 }
 
-func bindResponseBytes(msgID int64, resultCode int) []byte {
-	resp := ber.Encode(ber.ClassApplication, ber.TypeConstructed, ber.Tag(ldap.ApplicationBindResponse), nil, "Bind Response")
-	resp.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagEnumerated, uint64(resultCode), "resultCode"))
-	resp.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "matchedDN"))
-	resp.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "diagnosticMessage"))
-	return ldapEnvelope(msgID, resp)
+func searchResultEntryBytes(msgID int32, dn, cnValue string) []byte {
+	msg, err := encodeMessage(func(b *cryptobyte.Builder) {
+		b.AddASN1Int64(int64(msgID))
+		b.AddASN1(tagSearchResultEntry, func(b *cryptobyte.Builder) {
+			b.AddASN1OctetString([]byte(dn))
+			b.AddASN1(asn1.SEQUENCE, func(b *cryptobyte.Builder) { // attributes
+				b.AddASN1(asn1.SEQUENCE, func(b *cryptobyte.Builder) { // one PartialAttribute
+					b.AddASN1OctetString([]byte("cn"))
+					b.AddASN1(asn1.SET, func(b *cryptobyte.Builder) {
+						b.AddASN1OctetString([]byte(cnValue))
+					})
+				})
+			})
+		})
+	})
+	if err != nil {
+		panic(err)
+	}
+	return msg
 }
 
-func searchResultEntryBytes(msgID int64, dn, cnValue string) []byte {
-	entry := ber.Encode(ber.ClassApplication, ber.TypeConstructed, ber.Tag(ldap.ApplicationSearchResultEntry), nil, "Search Result Entry")
-	entry.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, dn, "Object Name"))
-
-	attrs := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "Attributes")
-	attr := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "Attribute")
-	attr.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "cn", "Attribute Name"))
-	values := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSet, nil, "Attribute Values")
-	values.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, cnValue, "Attribute Value"))
-	attr.AppendChild(values)
-	attrs.AppendChild(attr)
-	entry.AppendChild(attrs)
-
-	return ldapEnvelope(msgID, entry)
-}
-
-func searchResultDoneBytes(msgID int64, resultCode int) []byte {
-	done := ber.Encode(ber.ClassApplication, ber.TypeConstructed, ber.Tag(ldap.ApplicationSearchResultDone), nil, "Search Result Done")
-	done.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagEnumerated, uint64(resultCode), "resultCode"))
-	done.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "matchedDN"))
-	done.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "diagnosticMessage"))
-	return ldapEnvelope(msgID, done)
+func searchResultDoneBytes(msgID int32, resultCode int) []byte {
+	msg, err := encodeMessage(func(b *cryptobyte.Builder) {
+		b.AddASN1Int64(int64(msgID))
+		b.AddASN1(tagSearchResultDone, func(b *cryptobyte.Builder) {
+			b.AddASN1Enum(int64(resultCode))
+			b.AddASN1OctetString(nil) // matchedDN
+			b.AddASN1OctetString(nil) // diagnosticMessage
+		})
+	})
+	if err != nil {
+		panic(err)
+	}
+	return msg
 }
 
 // fakeServer accepts LDAP connections and answers exactly the two
@@ -114,29 +132,28 @@ func (fs *fakeServer) handleConn(conn net.Conn) {
 
 	localSearches := 0
 	for {
-		pkt, err := ber.ReadPacket(conn)
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			return
+		}
+		body, err := readFrame(conn)
 		if err != nil {
 			return
 		}
-		if len(pkt.Children) < 2 {
-			continue
+		env, err := decodeEnvelope(body)
+		if err != nil {
+			return
 		}
-		msgID, ok := pkt.Children[0].Value.(int64)
-		if !ok {
-			continue
-		}
-		op := pkt.Children[1]
 
-		switch int(op.Tag) {
-		case ldap.ApplicationBindRequest:
+		switch env.tag {
+		case tagBindRequest:
 			fs.mu.Lock()
 			fs.binds++
 			fs.mu.Unlock()
-			if _, werr := conn.Write(bindResponseBytes(msgID, 0)); werr != nil {
+			if _, werr := conn.Write(bindResponseBytes(env.messageID, 0)); werr != nil {
 				return
 			}
 
-		case ldap.ApplicationSearchRequest:
+		case tagSearchRequest:
 			localSearches++
 			fs.mu.Lock()
 			fs.searchesTotal++
@@ -146,22 +163,21 @@ func (fs *fakeServer) handleConn(conn net.Conn) {
 
 			for _, cn := range cnValues {
 				dn := "cn=" + cn + ",ou=groups,dc=proto,dc=test"
-				if _, werr := conn.Write(searchResultEntryBytes(msgID, dn, cn)); werr != nil {
+				if _, werr := conn.Write(searchResultEntryBytes(env.messageID, dn, cn)); werr != nil {
 					return
 				}
 			}
-			if _, werr := conn.Write(searchResultDoneBytes(msgID, 0)); werr != nil {
+			if _, werr := conn.Write(searchResultDoneBytes(env.messageID, 0)); werr != nil {
 				return
 			}
 			if closeAfter > 0 && localSearches >= closeAfter {
 				return
 			}
 
-		case ldap.ApplicationUnbindRequest:
-			return
-
 		default:
-			// Ignore anything else this fake server doesn't need to model.
+			// Ignore anything else this fake server doesn't need to model
+			// (e.g. an Unbind — this package's own client never sends
+			// one; it simply closes the socket).
 		}
 	}
 }
@@ -507,5 +523,103 @@ func TestRun_ContextCancellationStopsGracefully(t *testing.T) {
 	connections, binds, _ := fs.snapshot()
 	if connections != 1 || binds != 1 {
 		t.Errorf("expected exactly one connection/bind, got connections=%d binds=%d", connections, binds)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Direct coverage of the raw client and its DN-escaping helper — the
+// pieces main_test.go's end-to-end tests above exercise only indirectly.
+// ---------------------------------------------------------------------
+
+func TestEscapeDN(t *testing.T) {
+	cases := map[string]string{
+		"alice@example.com": "alice@example.com",
+		" leading":          `\ leading`,
+		"trailing ":         `trailing\ `,
+		"#leading-hash":     `\#leading-hash`,
+		`a,b+c;d<e>f\g"h`:   `a\,b\+c\;d\<e\>f\\g\"h`,
+	}
+	for in, want := range cases {
+		if got := escapeDN(in); got != want {
+			t.Errorf("escapeDN(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestProbeConn_BindAndSearchOnSameConnection(t *testing.T) {
+	fs := newFakeServer(t, []string{"ch_role_a", "ch_role_b"}, 0)
+
+	conn, err := dialProbe(fs.addr(), time.Second)
+	if err != nil {
+		t.Fatalf("dialProbe: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.simpleBind("uid=probe,ou=users,dc=test", "jwt", time.Second); err != nil {
+		t.Fatalf("simpleBind: %v", err)
+	}
+
+	cns, err := conn.searchMembership("ou=groups,dc=test", "uid=probe,ou=users,dc=test", time.Second)
+	if err != nil {
+		t.Fatalf("searchMembership: %v", err)
+	}
+	if len(cns) != 2 || cns[0] != "ch_role_a" || cns[1] != "ch_role_b" {
+		t.Fatalf("unexpected cn values: %v", cns)
+	}
+
+	// A second Search on the same, still-open connection must also
+	// succeed — the probe's "repeated Search on one connection" shape.
+	cns, err = conn.searchMembership("ou=groups,dc=test", "uid=probe,ou=users,dc=test", time.Second)
+	if err != nil {
+		t.Fatalf("second searchMembership: %v", err)
+	}
+	if len(cns) != 2 {
+		t.Fatalf("unexpected cn values on second search: %v", cns)
+	}
+
+	connections, binds, searches := fs.snapshot()
+	if connections != 1 || binds != 1 || searches != 2 {
+		t.Fatalf("unexpected server-observed counts: connections=%d binds=%d searches=%d", connections, binds, searches)
+	}
+}
+
+func TestProbeConn_BindInvalidCredentialsClassifiesCorrectly(t *testing.T) {
+	// newFakeServer's Bind handler always returns success, so this test
+	// dials a small one-shot listener directly to return a crafted
+	// resultCode-49 BindResponse instead.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		body, err := readFrame(conn)
+		if err != nil {
+			return
+		}
+		env, err := decodeEnvelope(body)
+		if err != nil || env.tag != tagBindRequest {
+			return
+		}
+		_, _ = conn.Write(bindResponseBytes(env.messageID, ldapResultInvalidCredentials))
+	}()
+
+	conn, err := dialProbe(ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("dialProbe: %v", err)
+	}
+	defer conn.Close()
+
+	err = conn.simpleBind("uid=probe,ou=users,dc=test", "wrong-jwt", time.Second)
+	if err == nil {
+		t.Fatalf("expected a Bind failure for resultCode 49")
+	}
+	if classifyError(err) != "invalid-credentials" {
+		t.Fatalf("classifyError(%v) = %q, want invalid-credentials", err, classifyError(err))
 	}
 }
