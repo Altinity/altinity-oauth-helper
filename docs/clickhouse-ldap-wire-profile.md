@@ -22,8 +22,13 @@ and function name against them, in addition to the plan's own pre-verified
 function-name citations this document had wrong — one in §4, the rest in
 §7 and §8.3 — including one bullet that named the wrong OpenLDAP function
 entirely (§7's Unbind citation); see those sections for the corrected
-values. Commit hashes, blob SHAs, and OpenLDAP pins were all already
-correct and needed no change. No committed fixture and no source citation,
+values. Within the scope of that Phase 1 audit — the `24.8` and `25.8`
+lines, the only ones tracked at the time — commit hashes, blob SHAs and
+OpenLDAP pins were all already correct and needed no change. That scoping
+is load-bearing rather than pedantic: the later `26.3`/`26.8` expansion did
+have to correct a commit hash, because `v26.8.1.2041-lts` is an annotated
+tag and its tag-object SHA was recorded where the peeled commit belonged
+(§2.1, §11.7). No committed fixture and no source citation,
 corrected or otherwise, contradicted the architecture this phase assumes
 (plan §1's stop condition was checked and did not fire), so the evidence
 and the decision below are recorded as final for Phase 1.
@@ -184,16 +189,20 @@ becomes a socket write. Each hop below is cited as
 
 1. **`LDAPAccessStorage::authenticateImpl`**
    (`Altinity/ClickHouse@568824f4:src/Access/LDAPAccessStorage.cpp:453`,
-   `@351edb1a:...:456`) calls into
+   `@351edb1a:...:456`, `@8de06fed:...:438`,
+   `ClickHouse/ClickHouse@537693a9:...:439`) calls into
 2. **`LDAPAccessStorage::areLDAPCredentialsValidNoLock`**
-   (`@568824f4:...:347`, `@351edb1a:...:350`), which — for a
+   (`@568824f4:...:347`, `@351edb1a:...:350`, `@8de06fed:...:332`,
+   `@537693a9:...:333`), which — for a
    `BasicCredentials` (the caller's email+JWT repacked as HTTP Basic,
    exactly the shape `cmd/ch-jwt-verify` produces) — calls
 3. **`ExternalAuthenticators::checkLDAPCredentials`**
    (`@568824f4:src/Access/ExternalAuthenticators.cpp:399`,
-   `@351edb1a:...:389`), which constructs an `LDAPSimpleAuthClient` from the
-   parsed `LDAPClient::Params` (built by `parseLDAPServer`, same file,
-   reading the `<ldap_servers><oauth_helper>` block) and calls
+   `@351edb1a:...:389`, and `:403` in both `@8de06fed` and `@537693a9`),
+   which constructs an `LDAPSimpleAuthClient` from the
+   parsed `LDAPClient::Params` (built by `parseLDAPServer`, same file —
+   `:61` in both 26.x commits — reading the `<ldap_servers><oauth_helper>`
+   block) and calls
 4. **`LDAPSimpleAuthClient::authenticate`**
    (`Altinity/ClickHouse@351edb1a2ec26940aee4c2d1d332fd280c232964:src/Access/LDAPClient.cpp::LDAPSimpleAuthClient::authenticate`,
    line 587 → 600 — identical within each source pair), which drives the
@@ -1352,9 +1361,11 @@ partially.
 that every Docker/fuzz/wire-capture command and script named in this section
 (Supported ClickHouse matrix, HA, Wire-capture verification, Fuzz smoke) was
 run to completion against `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
-(`manual_verification_head` above, which for this attestation is the same
-commit as `tested_behavior_head` — the certified surface changed, so the
-suites were re-run rather than carried forward), that `git status
+(`manual_verification_head` above — **not** `tested_behavior_head`, which
+has since advanced to `16d16142e39c2282594d2134625c86e46bfa7909` for the
+behavior-preserving provenance correction described above; manual
+verification remains at the earlier commit and this attestation
+deliberately cites that one), that `git status
 --porcelain` was unchanged by verification, and that `docker ps -a` showed
 no suite leftovers after verification.
 
@@ -1378,9 +1389,13 @@ Docker-and-fuzz evidence no test can produce.
 
 **Certification identity**
 
-- **Tested at:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the same
-  commit §11.6 now names as both `tested_behavior_head` and
-  `manual_verification_head`.
+- **Tested at:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the commit
+  §11.6 records as `manual_verification_head`. §11.6's
+  `tested_behavior_head` has since advanced to
+  `16d16142e39c2282594d2134625c86e46bfa7909`, one commit later, for the
+  behavior-preserving provenance correction recorded as finding 3 below;
+  the manual suites in this section were run against the earlier commit and
+  were not re-run for that correction, apart from `--mode verify`.
 - **Composition:** unchanged. Ordinary, untagged production
   (`cmd/ch-oauth-ldap` → `internal/ldap/profile`); no build tag, no
   selector, no second backend. Adding tracked lines changes what the suite
