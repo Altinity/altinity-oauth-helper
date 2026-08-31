@@ -611,7 +611,7 @@ for should extend the fixture corpus and this document together, in the
 same change — not silently widen the replacement parser past what the
 evidence here actually supports.
 
-### 11.1 Phase 2 implementation status
+### 11.1 Phase 2 implementation status and the corrected LOC baseline
 
 Phase 2 built the replacement at `internal/ldap/profile/` (package
 `profile`), following the primitive decision above: `cryptobyte` for every
@@ -622,11 +622,22 @@ and then validated with the identical minimal-positive-INTEGER rule the
 LDAPMessage envelope's MessageID uses (the same shared rule the 127/128
 boundary and the differential oracle below both exercise for Abandon).
 
-This is implementation and test evidence only. `cmd/ch-oauth-ldap` still
-runs the legacy `internal/ldap` server in production; nothing
-production-reachable imports `internal/ldap/profile` yet — that import
-happens in Phase 4. Proof of the replacement's correctness comes from,
-entirely outside the Docker ClickHouse suite:
+This is implementation and test evidence only. `cmd/ch-oauth-ldap` built
+the ordinary, untagged way — which is what `Dockerfile.ch-oauth-ldap`,
+`scripts/build-ch-oauth-ldap-image.sh`, and
+`.github/workflows/build-ch-oauth-ldap.yml` all still do — still runs the
+legacy `internal/ldap` server in production, and nothing reachable from
+that ordinary build imports `internal/ldap/profile`. Phase 3 adds a
+second, temporary `cmd/ch-oauth-ldap` composition, selected only by the
+`phase3profile` build tag (`ldap_backend_phase3profile.go`, alongside the
+default `ldap_backend_legacy.go`), that *does* import
+`internal/ldap/profile` — but that tagged composition is exercised only by
+`internal/securitytest`'s Docker-free tagged-build/closure contracts and
+by `integration/clickhouse/Dockerfile`'s helper build (§11.4a), never by
+the published production image. Full production cutover — making the
+profile adapter the only one, deleting the legacy adapter and the tag —
+remains Phase 4's, per §11.4's handoff list. Proof of the replacement's
+correctness comes from, entirely outside the Docker ClickHouse suite:
 
 * real-TCP black-box tests driving the profile server directly (ported from
   the legacy `protocol_test.go`, plus adversarial/mid-Search/hostile-DN/
@@ -663,27 +674,50 @@ entirely outside the Docker ClickHouse suite:
   kind `ldap-profile-diagnostic`) with marker-bearing proofs at default and
   trace log levels.
 
+**Corrected LOC baseline.** This section previously recorded **2,659** as
+if it were the figure standing unchanged into Phase 3. It is not: 2,659
+was an intermediate Phase 2 measurement, and repository history shows
+further Phase 2 review work landed after it, before merge. This
+correction replaces the earlier text rather than merely appending a
+caveat to it.
+
 Measured physical LOC for the nine production files this replaces
 (`server.go`, `frame.go`, `protocol.go`, `session.go`, `bind.go`,
 `search.go`, `dn.go`, `encode.go`, `logging.go`) plus `config.go` (the public
 `Config`/`ValidateConfig` surface) and `doc.go` (package-status doc) — using
 Phase 1's physical-line definition, comments and blanks counted, i.e.
 `wc -l` summed over exactly those eleven files (equivalently: `wc -l
-$(ls internal/ldap/profile/*.go | grep -v _test.go)`) — is **2,659** as of
-the phase-2 compat-profile sub-task that hardened the write-stall/Search-
-deadline classification, the DN parse-error redaction, and the wire-facing
-descriptor comparisons (each of those touched `dn.go`, `config.go`, and/or
-`search.go`). It was previously measured at 2,608 (nine-file total 2,426 +
-`config.go` 148 + `doc.go` 34) before that sub-task. The plan's
-consolidation-review trigger is 2,500 physical LOC for this package; the
-coordinator's recorded disposition on the earlier 2,608 figure — accepted,
-since the overshoot is exactly the `config.go`/`doc.go` public-surface and
-package-status files the plan's own file table omitted, not undocumented
-growth — stands unchanged at 2,659: both figures are well below ADR #32's
-separate ~3,500-line architecture-review trigger, and consolidation review
-against that trigger still folds into Phase 4's legacy deletion, not this
-sub-task. That disposition is recorded in the issue #33 ship log; see it
-for the full accounting, not a restatement here.
+$(ls internal/ldap/profile/*.go | grep -v _test.go)`):
+
+* commit `d273414` recorded **2,659** as of the phase-2 compat-profile
+  sub-task that hardened the write-stall/Search-deadline classification,
+  the DN parse-error redaction, and the wire-facing descriptor comparisons
+  (each of those touched `dn.go`, `config.go`, and/or `search.go`). It was
+  previously measured at 2,608 (nine-file total 2,426 + `config.go` 148 +
+  `doc.go` 34) before that sub-task — the coordinator's recorded
+  disposition on that earlier 2,608 figure (accepted, since the overshoot
+  is exactly the `config.go`/`doc.go` public-surface and package-status
+  files the plan's own file table omitted, not undocumented growth) is
+  recorded in the issue #33 ship log and is not restated here.
+* between the `d273414` measurement and merged `main`, further Phase 2
+  **review** work — not Phase 3 growth — changed two more files:
+  `search.go` changed `+39/-17` (net `+22`), and between the later
+  `f3bf13b` review state and merged `main`, `bind.go` changed `+3/-2` (net
+  `+1`). Together, a net `+23` lines landed on top of the `d273414`
+  measurement before Phase 2 merged.
+* the **merged Phase 2 baseline — the number Phase 3 actually starts
+  from — is therefore `2,682`, pinned to this repository's Phase 2 merge
+  commit `e26e30f`, not `2,659`.** `2,682` is a historical fact about that
+  one commit. It is never recomputed against today's tree, and no future
+  edit is expected to keep it accurate — Phase 3's own final measurement
+  is a separate, freshly recomputed number, recorded in §11.5, not here.
+
+The plan's consolidation-review trigger is 2,500 physical LOC for this
+package; both `2,659` and `2,682` are above that trigger and both remain
+well below ADR #32's separate ~3,500-line architecture-review trigger —
+the prior `>2,500` acceptance covers both figures, and consolidation
+review against the ~3,500 trigger still folds into Phase 4's legacy
+deletion, not this sub-task or Phase 3 generally.
 
 ### 11.2 Restricted-profile acceptance: what the replacement accepts
 
@@ -698,7 +732,7 @@ Unbind/close. Every mapped unsupported operation and every out-of-profile
 Search form returns a fixed result code — never a decode error that would
 suggest the input was malformed.
 
-### 11.3 The ten Phase-3 narrowings
+### 11.3 The Phase-3 narrowings and their cutover dispositions
 
 Cutover replaces several places where current production is more permissive
 than the documented ClickHouse traffic actually requires, or adds a bound
@@ -761,6 +795,34 @@ reject each one before Phase 4 is authorized:
     production (`internal/ldap/dn.go`, `cmd/ch-oauth-ldap/config.go`) only
     rejects an empty/whitespace value.
 
+#### 11.3 dispositions
+
+The Phase 3 coordinator/maintainer, not a test, owns the cutover
+adjudication below — tests establish behavior and applicability, they do
+not decide product acceptance. Item 1 above covers two independently
+adjudicated rows: `1` itself, and `1a`, the decoder-boundary note about
+versions `0`/negative/non-minimal and `>=128` embedded in item 1's own
+prose. The only permitted disposition values are the exact strings
+`ACCEPT` or `REJECT` — no prefix grammar, no variants such as `ACCEPT AS
+DOCUMENTED`. If any row below is ever changed to `REJECT`, the bounded
+correction must be implemented and tested before certification, and — if
+the correction materially widens the compatibility profile — the unit
+returns to ADR #32 for reconsideration.
+
+| ID | Disposition | Evidence / hardening label | Rationale |
+| -- | ------------ | --------------------------- | --------- |
+| 1  | `ACCEPT` | wire-evidence: item 1 above; `bind.go`/`bind_test.go`/`protocol_test.go`; replayed against every tracked-line session | Decodable simple Bind version `!=3` returns result 2. Tracked ClickHouse traffic is LDAPv3 simple Bind; generic older/newer LDAP versions are outside the supported profile. |
+| 1a | `ACCEPT` | wire-evidence: item 1's decoder-boundary paragraph above; `bind_test.go`/fuzz seed corpus covering the shared minimal-positive-INTEGER rule | Version 0, negative, or non-minimal values close as malformed; minimally encoded values `>=128` can decode and receive result 2 although legacy goldap closed above 127. Tracked ClickHouse emits version 3, so the parser is not widened or narrowed merely to copy incidental legacy behavior. |
+| 2  | `ACCEPT` | wire-evidence: item 2 above; `search.go`/`search_test.go`; every tracked session's recorded `derefAliases=0` | `derefAliases != 0` returns result 50. Supported ClickHouse sends 0. |
+| 3  | `ACCEPT` | wire-evidence: item 3 above; `search.go`/`search_test.go`; scenario G' recorded `types_only=false` | `typesOnly=true` returns result 50. Supported ClickHouse sends false. |
+| 4  | `ACCEPT` | wire-evidence: item 4 above; `search.go`/`search_test.go`/`search_fuzz_test.go`; every tracked session's single recorded `cn` attribute request | Empty, `*`, `1.1`, non-`cn`, or multi-attribute projections return result 50. Supported role mapping asks for exactly `cn`. |
+| 5  | `ACCEPT` | wire-evidence: item 5 above; `dn.go`/`dn_test.go`/`hostile_dn_test.go`/`dn_fuzz_test.go`; every tracked capture's plain single-RDN Bind/Search DNs | Restricted DN grammar intentionally drops generic RFC4514/go-ldap forms not emitted by the tracked configuration. |
+| 6  | `ACCEPT` | hardening: lifecycle (synchronous-connection tradeoff, not a wire-parity claim) | Peer EOF does not asynchronously cancel a blocked `Verify`. |
+| 7  | `ACCEPT` | wire-evidence: item 7 above; `protocol.go`/`server.go`/`protocol_test.go`/`replay_test.go`; the tracked timeout-abandon session's Abandon PDU | Abandon is recognized/dropped without target cancellation, matching ADR #32's bounded compatibility decision. |
+| 8  | `ACCEPT` | wire-evidence: item 8 above; `protocol.go`/`protocol_test.go`; absence of any Cancel/Extended PDU in every tracked capture | RFC 3909 Cancel loses the generic RouteMux semantics and returns the fixed unsupported-Extended result. Tracked ClickHouse does not emit Cancel. |
+| 9  | `ACCEPT` | hardening: resource (deliberate 64 KiB outbound bound; not a legacy-parity claim — legacy has none) | New 64 KiB outbound PDU cap fails closed using `adminLimitExceeded`. |
+| 10 | `ACCEPT` | hardening: config (deliberate operator-config check; not a legacy-parity claim — legacy only rejects empty/whitespace) | Startup `UserRDNAttribute` descriptor check is consistent with the restricted structural DN model. |
+
 ### 11.4 Phase 4's bounded test-only cursor supersedes this document's oracle
 
 §10's `TestClickHouseWireCryptobyteDecision` characterizes each fixture with
@@ -782,3 +844,181 @@ provides; and never use the production `profile` package as that
 independent oracle. This explicitly supersedes the alternative the Phase 1
 ship log left open (replacing the oracle with the production decoder
 itself).
+
+### 11.4a Wire-capture verification policy (Phase 3)
+
+`compose-wirecapture.yml` runs `/bin/ch-oauth-ldap` from the same
+integration image as `ldap-helper-upstream`; once that image's helper
+build carries `-tags=phase3profile` (§11.4/`integration/clickhouse/Dockerfile`),
+that service's traffic is served by the replacement.
+
+The committed `captured-redacted` corpus under
+`internal/ldap/testdata/clickhouse-wire/**` remains Phase 1 evidence of
+real libldap request traffic and keeps its historical provenance
+unchanged. Phase 3's policy toward it is deliberately narrow:
+
+* **`--mode generate` is frozen.** No committed fixture is regenerated or
+  promoted by Phase 3, regardless of which server answers the capture.
+* **only `--mode verify` runs**, against the existing corpus:
+
+  ```text
+  bash integration/clickhouse/capture-ldap-wire.sh \
+    --mode verify \
+    --fixtures internal/ldap/testdata/clickhouse-wire
+  ```
+
+  (invoked via `bash <path>` rather than `./<path>` — the script is
+  tracked non-executable; see §11.5's evidence for the observed
+  workaround).
+* a passing verify run is **replacement-backed verification of Phase 1's
+  existing provenance** — proof the replacement reproduces the
+  already-audited bytes — never new fixture provenance and never a
+  license to broaden the parser.
+* had verify exposed a new request shape from a tracked ClickHouse client,
+  Phase 3 would stop rather than silently broaden the parser or regenerate
+  the baseline to match. It did not (§11.5).
+
+This distinction is also recorded in
+`integration/clickhouse/README.md`'s own "Wire capture" section.
+
+<!-- phase3-release-gate-evidence:start -->
+### 11.5 Phase 3 replacement release-gate evidence
+
+This section is the populated Stage C evidence record for Phase 3's
+manual certification (Stage B), machine-checked for completeness,
+absence of placeholders, and internal consistency by
+`internal/securitytest/wire_profile_contract_test.go` — those checks
+prove this section's *shape and self-consistency*, never that the
+Docker/fuzz commands below were actually run. Only the coordinator can
+attest that; see the human-attested list this document's plan carries.
+
+**Certification identity**
+
+- **tested_behavior_head:** `e4deecdae41d5c192aa9578934d41a32c65acf6c`
+- **Selector:** `phase3profile`
+- **Integration Dockerfile:** `integration/clickhouse/Dockerfile` (sole
+  `-tags=phase3profile` build line, the `ch-oauth-ldap` helper)
+- **Normal production path:** ordinary `go build ./...`, the published
+  `Dockerfile.ch-oauth-ldap` image, `scripts/build-ch-oauth-ldap-image.sh`,
+  and `.github/workflows/build-ch-oauth-ldap.yml` all remain untagged and
+  select the legacy `internal/ldap` server — this evidence changes none of
+  that; production cutover stays Phase 4's.
+- **Certified-surface digest (SHA-256):** `90619015fcb4965888a0e090474f8ed11d7991a7bc24b67e71b7251147b52c48`
+  — computed at `tested_behavior_head` over the "Certified-surface
+  anti-drift digest" file set (this plan's own definition), reproduced 3×
+  identically over 173 tracked files.
+
+**Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+
+Both runs completed scenarios A–I including phase-5 scenario G' (Search-limit
+overflow); the two recorded ClickHouse upstream-bug expected failures
+(#78791/not-backported-to-24.8, and #116840's VIEW `external_roles` drop)
+reproduced exactly as expected — no expectation-table edit was needed or
+made.
+
+**HA** (`integration/clickhouse/run-ha.sh`, existing HAProxy + two-replica
+harness, existing persistent same-socket session probe — no new probe
+created)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+
+- **Session-probe result:** `PASS` on both images — both replicas
+  authenticate; no shared LDAP session store is required; authenticated
+  state is socket/connection-local; killing the replica owning a
+  connection kills that session rather than migrating it; fresh
+  authentication proceeds through the survivor; the recreated replica
+  rejoins. As documented at §"HA applicability", this proves none of
+  Kubernetes routing, EndpointSlice/CNI convergence, pod-eviction
+  semantics, or a failover SLA.
+
+**Wire-capture verification**
+
+- **Command:** `bash integration/clickhouse/capture-ldap-wire.sh --mode verify --fixtures internal/ldap/testdata/clickhouse-wire`
+- **generation: frozen**
+- **Result:** `PASS` for both tracked lines (`24.8`, `25.8`); every
+  committed session compared byte-for-byte equal; zero fixture drift; no
+  new request shape observed.
+
+**Fuzz smoke** (`go test ./internal/ldap/profile -run '^$' -fuzz=<Target> -fuzztime=20s`, one target at a time)
+
+| Fuzz target | Duration | Result |
+| ------------------------ | -------- | ------ |
+| `FuzzLDAPFrame` | `20s` | `PASS` |
+| `FuzzBindRequest` | `20s` | `PASS` |
+| `FuzzSearchRequest` | `20s` | `PASS` |
+| `FuzzRestrictedDN` | `20s` | `PASS` |
+| `FuzzMemberAssertionDN` | `20s` | `PASS` |
+
+No crasher was found for any of the five targets. (`FuzzRestrictedDN`'s
+first attempt hit an infrastructure timeout while racing a concurrent
+Docker rebuild on the same host — no failing input was ever written to a
+fuzz corpus — and was re-run in isolation to the clean `PASS` recorded
+above; this is a sandbox-contention artifact, not a discovered bug.)
+
+**LOC guardrail**
+
+- **Merged Phase 2 baseline:** `2682` (pinned to `e26e30f`; see §11.1 — not
+  recomputed against today's tree)
+- **Final Phase 3 LOC:** `2702`
+- **Phase 3 delta:** `+20`
+- 2,702 remains 798 lines below ADR #32's ~3,500 architecture-review
+  trigger; no architecture-review stop condition was reached.
+
+**§11.3 narrowing dispositions** (see §11.3 for full rationale/evidence
+per row; reproduced here as the compact recorded field)
+
+| ID | Disposition |
+| -- | ------------ |
+| 1  | `ACCEPT` |
+| 1a | `ACCEPT` |
+| 2  | `ACCEPT` |
+| 3  | `ACCEPT` |
+| 4  | `ACCEPT` |
+| 5  | `ACCEPT` |
+| 6  | `ACCEPT` |
+| 7  | `ACCEPT` |
+| 8  | `ACCEPT` |
+| 9  | `ACCEPT` |
+| 10 | `ACCEPT` |
+
+**Redaction / release gate**
+
+- **`phase5release` vet:** `PASS`
+- **`phase5release` test:** `PASS`
+- `internal/ldap/profile` remains in `scopeDirs`; `redaction-sites.tsv` is
+  reconciled for the `cmd-seam` sub-task's sink moves/additions.
+
+**TLS applicability:** N/A — issue #31 is a separate open unit and is out of scope for #33 Phase 3
+
+**Phase 4 handoff recap** (full list at §"Phase 4 mandatory handoff";
+restated here as this evidence section's own pointer, not a second
+authority):
+
+- delete the `phase3profile` selector everywhere it appears today
+  (`cmd/ch-oauth-ldap/ldap_backend_phase3profile.go`'s tag,
+  `ldap_backend_legacy.go`, `integration/clickhouse/Dockerfile`,
+  `internal/securitytest/phase3_selector_contract_test.go`'s own
+  selector-specific assertions);
+- invert `productionLDAPClosureStage` to `replacement` and
+  `ProfileImplementationIsNotProduction`'s polarity, and flip the
+  cryptobyte-presence contract from absence to presence in the ordinary
+  closure;
+- delete `TestDependencyContract_Phase3ReplacementCommandBuilds` once
+  ordinary `go build ./...` itself compiles the replacement;
+- delete the differential oracle (`internal/ldap/profile/differential_test.go`)
+  and replace remaining independent goldap fixture decoding with the
+  bounded test-only cursor (§11.4);
+- delete legacy non-test `internal/ldap`, the vendored `ldapserver`/`goldap`
+  forks, and their `replace` directives/dependencies;
+- reconcile now-stale redaction rows and rerun the full matrix/HA/security/
+  release gates on the untagged production path.
+
+<!-- phase3-release-gate-evidence:end -->

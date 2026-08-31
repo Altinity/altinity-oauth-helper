@@ -1905,3 +1905,658 @@ func TestWireProfileContract_WirecaptureUsesSharedFixtureSchema(t *testing.T) {
 		t.Errorf("wire_profile_contract: go list -deps ./%s does not include %s", wirecaptureDirRelPath, wirefixtureImportPath)
 	}
 }
+
+// ---------------------------------------------------------------------
+// Issue #33 Phase 3 — §11.5 replacement release-gate evidence contracts
+// ---------------------------------------------------------------------
+//
+// docs/clickhouse-ldap-wire-profile.md §11.5 is Stage C's populated
+// evidence record for Phase 3's Stage B manual certification (plan
+// "Evidence landing order"). The checks below prove that section's SHAPE
+// and INTERNAL/CROSS-FILE CONSISTENCY — exactly one marker pair, no
+// placeholder values, the recorded selector/Dockerfile/image-set/
+// fuzz-target facts match this repository's own other ground truth
+// (phase3_selector_contract_test.go's constants, auditedProvenanceMatrix
+// above), the recorded final LOC equals a *fresh* recount of the current
+// tree (never compared against §11.1's historical 2,682 baseline as
+// though that pinned figure were meant to track today's tree — plan "LOC
+// guardrail and documentation repair"), the eleven §11.3/§11.5 narrowing
+// dispositions use only the exact tokens ACCEPT/REJECT, and the recorded
+// certified-surface digest is independently reproduced by this test's own
+// Go implementation of the plan's "Certified-surface anti-drift digest"
+// algorithm.
+//
+// None of this is proof that a human actually ran the Docker ClickHouse
+// matrix, the HA harness, wire-capture verify, or any 20-second fuzz
+// smoke — that stays human-attested (plan "Machine-checked versus
+// human-attested evidence"): a parser accepting the literal word PASS is
+// never treated here as evidence Docker ran.
+//
+// If TestWireProfileContract_Phase3EvidenceCertifiedSurfaceDigestMatches
+// ever fails because the two sides genuinely disagree (as opposed to a
+// bug in this test's own algorithm), that means the certified surface
+// changed after Stage B's manual certification: per the plan, the
+// certification is INVALID. The fix is a new Stage B certification against
+// a new tested_behavior_head, never editing the recorded digest (or this
+// test's algorithm) to force agreement.
+
+// phase3EvidenceMarkerStart and phase3EvidenceMarkerEnd bound exactly one
+// occurrence of §11.5's evidence section, the same marker-pair pattern
+// TestWireProfileContract_EngineeringDocBoundary already uses for the
+// ldap-primitive-decision marker.
+const phase3EvidenceMarkerStart = "<!-- phase3-release-gate-evidence:start -->"
+const phase3EvidenceMarkerEnd = "<!-- phase3-release-gate-evidence:end -->"
+
+// phase3NarrowingIDs is the plan's exact, ordered eleven-row narrowing-ID
+// sequence ("§11.3 narrowing dispositions": "Record exactly eleven decision
+// rows: 1, 1a, then 2 through 10").
+var phase3NarrowingIDs = []string{"1", "1a", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
+
+// phase3HardeningNarrowingIDs are the three rows the plan requires an
+// explicit lifecycle/resource/config hardening label for, rather than a
+// wire-evidence reference (items 6, 9, 10 — "For 6, 9, and 10, explicitly
+// label the decision as lifecycle/resource/config hardening rather than
+// pretending a wire fixture proves it").
+var phase3HardeningNarrowingIDs = map[string]bool{"6": true, "9": true, "10": true}
+
+// phase3EvidenceSection returns the exact text strictly between one
+// well-formed §11.5 marker pair, failing the test if the pair is missing,
+// duplicated, or out of order.
+func phase3EvidenceSection(t *testing.T, doc string) string {
+	t.Helper()
+	startCount := strings.Count(doc, phase3EvidenceMarkerStart)
+	endCount := strings.Count(doc, phase3EvidenceMarkerEnd)
+	if startCount != 1 || endCount != 1 {
+		t.Fatalf("wire_profile_contract: %s: found %d %q and %d %q, want exactly one §11.5 marker pair", wireProfileDocRelPath, startCount, phase3EvidenceMarkerStart, endCount, phase3EvidenceMarkerEnd)
+	}
+	start := strings.Index(doc, phase3EvidenceMarkerStart)
+	end := strings.Index(doc, phase3EvidenceMarkerEnd)
+	if end < start {
+		t.Fatalf("wire_profile_contract: %s: §11.5 end marker appears before its start marker", wireProfileDocRelPath)
+	}
+	return doc[start+len(phase3EvidenceMarkerStart) : end]
+}
+
+// phase3EvidenceField extracts the value of a "- **Label:** `value`"
+// recorded field from an already-isolated §11.5 section, failing the test
+// if that exact label is not present in that exact form.
+func phase3EvidenceField(t *testing.T, section, label string) string {
+	t.Helper()
+	re := regexp.MustCompile(regexp.QuoteMeta("**"+label+":**") + "\\s*`([^`]+)`")
+	m := re.FindStringSubmatch(section)
+	if m == nil {
+		t.Fatalf("wire_profile_contract: %s: §11.5 has no %q field in the required `- **%s:** `value`` form", wireProfileDocRelPath, label, label)
+	}
+	return m[1]
+}
+
+// phase3EvidencePlaceholderRE matches the plan's named placeholder tokens
+// ("no placeholder values such as PENDING or TBD").
+var phase3EvidencePlaceholderRE = regexp.MustCompile(`\b(PENDING|TBD)\b`)
+
+// phase3WhitespaceRunRE collapses any run of whitespace (including the
+// doc's own hard-wrapped line breaks, which are cosmetic prose formatting,
+// not semantic content) to a single space, so a literal multi-word needle
+// search is insensitive to exactly where a paragraph happens to wrap.
+// Table extraction (wireProfileExtractTable) must never see flattened
+// text — only the freeform-prose substring checks below use this.
+var phase3WhitespaceRunRE = regexp.MustCompile(`\s+`)
+
+func phase3CollapseWhitespace(s string) string {
+	return phase3WhitespaceRunRE.ReplaceAllString(strings.TrimSpace(s), " ")
+}
+
+func TestWireProfileContract_Phase3EvidenceMarkerAndPlaceholders(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	if !strings.Contains(section, "11.5 Phase 3 replacement release-gate evidence") {
+		t.Fatalf("wire_profile_contract: %s: §11.5 marker pair does not bound the §11.5 heading text", wireProfileDocRelPath)
+	}
+	if matches := phase3EvidencePlaceholderRE.FindAllString(section, -1); len(matches) != 0 {
+		t.Fatalf("wire_profile_contract: %s: §11.5 contains placeholder value(s) %v — every recorded field must carry a real Stage B result", wireProfileDocRelPath, matches)
+	}
+}
+
+// TestWireProfileContract_Phase3EvidenceIdentityAndSelector cross-checks
+// §11.5's tested_behavior_head/selector/Dockerfile/production-remains-legacy
+// fields against this repository's own independent ground truth: a real
+// 40-hex commit-ish string, the exact phase3ReplacementTag constant
+// (dependency_contract_test.go), the exact integration Dockerfile path
+// (phase3_selector_contract_test.go), that Dockerfile actually carrying the
+// tag, and the three untagged/publication-path files actually staying
+// untagged.
+func TestWireProfileContract_Phase3EvidenceIdentityAndSelector(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	head := phase3EvidenceField(t, section, "tested_behavior_head")
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(head) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 tested_behavior_head %q is not exactly 40 lowercase hex characters", wireProfileDocRelPath, head)
+	}
+
+	selector := phase3EvidenceField(t, section, "Selector")
+	if selector != phase3ReplacementTag {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Selector is %q, want exactly %q", wireProfileDocRelPath, selector, phase3ReplacementTag)
+	}
+
+	dockerfilePath := phase3EvidenceField(t, section, "Integration Dockerfile")
+	if dockerfilePath != phase3IntegrationDockerfileRelPath {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Integration Dockerfile is %q, want exactly %q", wireProfileDocRelPath, dockerfilePath, phase3IntegrationDockerfileRelPath)
+	}
+	if !strings.Contains(readRepoFile(t, dockerfilePath), phase3TaggedBuildMarker) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 claims %s carries the %s selector, but the file does not contain %q", wireProfileDocRelPath, dockerfilePath, phase3ReplacementTag, phase3TaggedBuildMarker)
+	}
+
+	for _, untaggedPath := range []string{phase3ProductionDockerfileRelPath, phase3BuildScriptRelPath, phase3PublicationWorkflowRelPath} {
+		if strings.Contains(readRepoFile(t, untaggedPath), phase3ReplacementTag) {
+			t.Fatalf("wire_profile_contract: %s: §11.5 claims normal production/publication remains untagged, but %s mentions %q", wireProfileDocRelPath, untaggedPath, phase3ReplacementTag)
+		}
+	}
+
+	const productionRemainsLegacyNeedle = "select the legacy `internal/ldap` server"
+	if !strings.Contains(phase3CollapseWhitespace(section), productionRemainsLegacyNeedle) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 must explicitly state that normal production remains on the legacy server", wireProfileDocRelPath)
+	}
+}
+
+// TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA requires §11.5's
+// "Supported ClickHouse matrix" and "HA" tables to name exactly the audited
+// image set (auditedProvenanceMatrix above — the same set every other
+// wire-profile contract in this file derives its expectations from) each
+// with a PASS result, and requires a recorded session-probe result.
+func TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	wantImages := make([]string, 0, len(auditedProvenanceMatrix))
+	for _, p := range auditedProvenanceMatrix {
+		wantImages = append(wantImages, p.Image)
+	}
+	sort.Strings(wantImages)
+
+	assertImageResultTable := func(tableName string) {
+		_, rows, err := wireProfileExtractTable(section, tableName)
+		if err != nil {
+			t.Fatalf("wire_profile_contract: %s: §11.5 %s table: %v", wireProfileDocRelPath, tableName, err)
+		}
+		var gotImages []string
+		for _, row := range rows {
+			if len(row) != 2 {
+				t.Fatalf("wire_profile_contract: %s: §11.5 %s table row %v has %d cells, want 2", wireProfileDocRelPath, tableName, row, len(row))
+			}
+			image := wireProfileStripCell(row[0])
+			result := wireProfileStripCell(row[1])
+			if result != "PASS" {
+				t.Fatalf("wire_profile_contract: %s: §11.5 %s table: image %s has result %q, want exactly PASS", wireProfileDocRelPath, tableName, image, result)
+			}
+			gotImages = append(gotImages, image)
+		}
+		sort.Strings(gotImages)
+		if !stringSlicesEqual(gotImages, wantImages) {
+			t.Fatalf("wire_profile_contract: %s: §11.5 %s table names images %v, want exactly the audited set %v", wireProfileDocRelPath, tableName, gotImages, wantImages)
+		}
+	}
+
+	assertImageResultTable("Image")
+
+	const sessionProbeNeedle = "**Session-probe result:** `PASS`"
+	if !strings.Contains(phase3CollapseWhitespace(section), sessionProbeNeedle) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 must record a session-probe result", wireProfileDocRelPath)
+	}
+}
+
+// TestWireProfileContract_Phase3EvidenceWireVerify requires §11.5 to record
+// the wire-capture Phase 3 policy ("generation: frozen", never new
+// provenance) and a verify result, per the plan's "Wire-capture fixture
+// disposition" and "Recorded fields" sections.
+func TestWireProfileContract_Phase3EvidenceWireVerify(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	flat := phase3CollapseWhitespace(section)
+	if !strings.Contains(flat, "generation: frozen") {
+		t.Fatalf("wire_profile_contract: %s: §11.5 must explicitly record `generation: frozen`", wireProfileDocRelPath)
+	}
+	if !strings.Contains(flat, "capture-ldap-wire.sh") || !strings.Contains(flat, "--mode verify") {
+		t.Fatalf("wire_profile_contract: %s: §11.5 must record the --mode verify capture-ldap-wire.sh command", wireProfileDocRelPath)
+	}
+}
+
+// phase3FuzzTargetNames is the plan's exact five native fuzz-target names
+// (also named in §11.1's existing prose), used both to validate §11.5's
+// fuzz table and, as a bonus structural leg, to confirm each name is a real
+// exported Fuzz func in internal/ldap/profile's non-test-named fuzz files.
+var phase3FuzzTargetNames = []string{
+	"FuzzLDAPFrame",
+	"FuzzBindRequest",
+	"FuzzSearchRequest",
+	"FuzzRestrictedDN",
+	"FuzzMemberAssertionDN",
+}
+
+func TestWireProfileContract_Phase3EvidenceFuzzTable(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	_, rows, err := wireProfileExtractTable(section, "Fuzz target", "Duration")
+	if err != nil {
+		t.Fatalf("wire_profile_contract: %s: §11.5 fuzz table: %v", wireProfileDocRelPath, err)
+	}
+	if len(rows) != len(phase3FuzzTargetNames) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 fuzz table has %d rows, want exactly %d", wireProfileDocRelPath, len(rows), len(phase3FuzzTargetNames))
+	}
+	var gotTargets []string
+	for _, row := range rows {
+		if len(row) != 3 {
+			t.Fatalf("wire_profile_contract: %s: §11.5 fuzz table row %v has %d cells, want 3", wireProfileDocRelPath, row, len(row))
+		}
+		target := wireProfileStripCell(row[0])
+		duration := wireProfileStripCell(row[1])
+		result := wireProfileStripCell(row[2])
+		if duration != "20s" {
+			t.Fatalf("wire_profile_contract: %s: §11.5 fuzz table: target %s has duration %q, want exactly \"20s\"", wireProfileDocRelPath, target, duration)
+		}
+		if result != "PASS" {
+			t.Fatalf("wire_profile_contract: %s: §11.5 fuzz table: target %s has result %q, want exactly PASS", wireProfileDocRelPath, target, result)
+		}
+		gotTargets = append(gotTargets, target)
+	}
+	sort.Strings(gotTargets)
+	wantTargets := append([]string(nil), phase3FuzzTargetNames...)
+	sort.Strings(wantTargets)
+	if !stringSlicesEqual(gotTargets, wantTargets) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 fuzz table names targets %v, want exactly %v", wireProfileDocRelPath, gotTargets, wantTargets)
+	}
+
+	// Bonus structural leg: each named target is a real Fuzz func declared
+	// somewhere in internal/ldap/profile (never proof it was actually run
+	// for 20s — only that the name is not a typo/stale reference).
+	profileDir := filepath.Join(root, filepath.FromSlash("internal/ldap/profile"))
+	entries, err := os.ReadDir(profileDir)
+	if err != nil {
+		t.Fatalf("wire_profile_contract: read %s: %v", profileDir, err)
+	}
+	declared := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, filepath.Join(profileDir, e.Name()), nil, 0)
+		if err != nil {
+			t.Fatalf("wire_profile_contract: parse %s: %v", e.Name(), err)
+		}
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Recv != nil {
+				continue
+			}
+			declared[fd.Name.Name] = true
+		}
+	}
+	for _, name := range phase3FuzzTargetNames {
+		if !declared[name] {
+			t.Errorf("wire_profile_contract: §11.5 names fuzz target %s, but no such func is declared anywhere in internal/ldap/profile's test files", name)
+		}
+	}
+}
+
+// phase3AssertDispositionRows validates that rows contains exactly
+// phase3NarrowingIDs, in that exact order, at idCol, and that every value
+// at dispCol is the exact string ACCEPT or REJECT — never a variant such as
+// "ACCEPT AS DOCUMENTED" (plan "§11.3 narrowing dispositions": "Use exact
+// string equality. No prefix grammar and no variants"). Returns the
+// ID->disposition map for cross-table comparison.
+func phase3AssertDispositionRows(t *testing.T, tableName string, rows [][]string, idCol, dispCol int) map[string]string {
+	t.Helper()
+	if len(rows) != len(phase3NarrowingIDs) {
+		t.Fatalf("wire_profile_contract: %s: %s table has %d rows, want exactly %d (IDs %v)", wireProfileDocRelPath, tableName, len(rows), len(phase3NarrowingIDs), phase3NarrowingIDs)
+	}
+	out := make(map[string]string, len(rows))
+	for i, row := range rows {
+		wantID := phase3NarrowingIDs[i]
+		id := wireProfileStripCell(row[idCol])
+		if id != wantID {
+			t.Fatalf("wire_profile_contract: %s: %s table row %d has ID %q, want exactly %q in that position", wireProfileDocRelPath, tableName, i, id, wantID)
+		}
+		disp := wireProfileStripCell(row[dispCol])
+		if disp != "ACCEPT" && disp != "REJECT" {
+			t.Fatalf("wire_profile_contract: %s: %s table row ID %s has disposition %q, want exactly the string ACCEPT or REJECT (no prefix grammar, no variants)", wireProfileDocRelPath, tableName, id, disp)
+		}
+		out[id] = disp
+	}
+	return out
+}
+
+// TestWireProfileContract_Section113NarrowingDispositions validates §11.3's
+// full disposition table: exactly the eleven IDs in order, exact-token
+// dispositions, and — per the plan — a wire-evidence reference for items
+// 1-5/7/8 versus an explicit hardening label for items 6/9/10 in a
+// dedicated column separate from the rationale.
+func TestWireProfileContract_Section113NarrowingDispositions(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+
+	_, rows, err := wireProfileExtractTable(doc, "Evidence / hardening label")
+	if err != nil {
+		t.Fatalf("wire_profile_contract: %s: §11.3 disposition table: %v", wireProfileDocRelPath, err)
+	}
+	for _, row := range rows {
+		if len(row) != 4 {
+			t.Fatalf("wire_profile_contract: %s: §11.3 disposition table row %v has %d cells, want 4 (ID, Disposition, Evidence/hardening label, Rationale)", wireProfileDocRelPath, row, len(row))
+		}
+	}
+	phase3AssertDispositionRows(t, "§11.3", rows, 0, 1)
+
+	for _, row := range rows {
+		id := wireProfileStripCell(row[0])
+		label := wireProfileStripCell(row[2])
+		rationale := wireProfileStripCell(row[3])
+		if rationale == "" {
+			t.Fatalf("wire_profile_contract: %s: §11.3 disposition row %s has an empty rationale cell", wireProfileDocRelPath, id)
+		}
+		if phase3HardeningNarrowingIDs[id] {
+			if !strings.HasPrefix(label, "hardening:") {
+				t.Fatalf("wire_profile_contract: %s: §11.3 disposition row %s must carry an explicit hardening: label (lifecycle/resource/config), got %q", wireProfileDocRelPath, id, label)
+			}
+		} else {
+			if !strings.HasPrefix(label, "wire-evidence:") {
+				t.Fatalf("wire_profile_contract: %s: §11.3 disposition row %s must reference wire-evidence:, got %q", wireProfileDocRelPath, id, label)
+			}
+		}
+	}
+}
+
+// TestWireProfileContract_Phase3EvidenceDispositionsMatchSection113 requires
+// §11.5's compact ID/Disposition table to record exactly the same eleven
+// dispositions as §11.3's authoritative table — the plan lists "the eleven
+// narrowing dispositions" among §11.5's own recorded fields, and this cross-
+// check is what prevents that recorded copy from silently drifting away
+// from §11.3's adjudicated one.
+func TestWireProfileContract_Phase3EvidenceDispositionsMatchSection113(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	_, section113Rows, err := wireProfileExtractTable(doc, "Evidence / hardening label")
+	if err != nil {
+		t.Fatalf("wire_profile_contract: %s: §11.3 disposition table: %v", wireProfileDocRelPath, err)
+	}
+	section113 := phase3AssertDispositionRows(t, "§11.3", section113Rows, 0, 1)
+
+	_, section115Rows, err := wireProfileExtractTable(section, "ID", "Disposition")
+	if err != nil {
+		t.Fatalf("wire_profile_contract: %s: §11.5 disposition table: %v", wireProfileDocRelPath, err)
+	}
+	for _, row := range section115Rows {
+		if len(row) != 2 {
+			t.Fatalf("wire_profile_contract: %s: §11.5 disposition table row %v has %d cells, want 2 (ID, Disposition)", wireProfileDocRelPath, row, len(row))
+		}
+	}
+	section115 := phase3AssertDispositionRows(t, "§11.5", section115Rows, 0, 1)
+
+	for _, id := range phase3NarrowingIDs {
+		if section113[id] != section115[id] {
+			t.Fatalf("wire_profile_contract: %s: narrowing %s is %q in §11.3 but %q in §11.5 — the two recorded copies must agree exactly", wireProfileDocRelPath, id, section113[id], section115[id])
+		}
+	}
+}
+
+// TestWireProfileContract_Phase3EvidenceLOC requires §11.5's Merged Phase 2
+// baseline field to be exactly "2682" pinned to "e26e30f" (never recomputed
+// against today's tree — that pin is a historical fact about one commit,
+// plan "LOC guardrail and documentation repair"), and requires the recorded
+// final Phase 3 LOC/delta to equal a FRESH, independent recount of the
+// current source tree using the plan's own wc -l definition — never a
+// comparison against the pinned baseline as though the baseline were meant
+// to track today's tree.
+func TestWireProfileContract_Phase3EvidenceLOC(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	baseline := phase3EvidenceField(t, section, "Merged Phase 2 baseline")
+	if baseline != "2682" {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Merged Phase 2 baseline is %q, want exactly \"2682\"", wireProfileDocRelPath, baseline)
+	}
+	if !strings.Contains(section, "pinned to `e26e30f`") {
+		t.Fatalf("wire_profile_contract: %s: §11.5 must pin the merged Phase 2 baseline to commit `e26e30f`", wireProfileDocRelPath)
+	}
+
+	finalLOCStr := phase3EvidenceField(t, section, "Final Phase 3 LOC")
+	finalLOC, err := strconv.Atoi(finalLOCStr)
+	if err != nil {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Final Phase 3 LOC %q is not an integer: %v", wireProfileDocRelPath, finalLOCStr, err)
+	}
+
+	gotLOC := phase3FreshProfileLOC(t, root)
+	if gotLOC != finalLOC {
+		t.Fatalf("wire_profile_contract: %s: §11.5 records Final Phase 3 LOC %d, but a fresh recount of internal/ldap/profile's current non-test .go files (git ls-files | wc -l, same definition as the plan's Phase 3 final measurement) is %d — this compares the recorded figure only against the CURRENT tree, never against §11.1's pinned historical 2,682 baseline", wireProfileDocRelPath, finalLOC, gotLOC)
+	}
+
+	const baselineLOC = 2682
+	deltaStr := phase3EvidenceField(t, section, "Phase 3 delta")
+	wantDelta := finalLOC - baselineLOC
+	wantDeltaStr := strconv.Itoa(wantDelta)
+	if wantDelta >= 0 {
+		wantDeltaStr = "+" + wantDeltaStr
+	}
+	if deltaStr != wantDeltaStr {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Phase 3 delta is %q, want %q (Final Phase 3 LOC %d minus the pinned 2682 baseline)", wireProfileDocRelPath, deltaStr, wantDeltaStr, finalLOC)
+	}
+}
+
+// phase3FreshProfileLOC independently recomputes internal/ldap/profile's
+// current non-test physical LOC using exactly the plan's own definition:
+// `git ls-files 'internal/ldap/profile/*.go' | grep -v '_test.go$' | xargs
+// wc -l`, summed. It reads working-tree bytes (not git blobs) and counts
+// newline bytes, matching `wc -l` for gofmt'd Go source (which always ends
+// in a trailing newline).
+func phase3FreshProfileLOC(t *testing.T, root string) int {
+	t.Helper()
+	cmd := exec.Command("git", "ls-files", "--", "internal/ldap/profile/*.go") //nolint:gosec // fixed argv, no user input
+	cmd.Dir = root
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("wire_profile_contract: fresh LOC recount: git ls-files: %v\nstderr:\n%s", err, stderr.String())
+	}
+	total := 0
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasSuffix(line, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(line)))
+		if err != nil {
+			t.Fatalf("wire_profile_contract: fresh LOC recount: read %s: %v", line, err)
+		}
+		total += bytes.Count(data, []byte("\n"))
+	}
+	return total
+}
+
+// TestWireProfileContract_Phase3EvidenceTLSRow requires §11.5's TLS
+// applicability field to reference issue #31 and read exactly the plan's
+// literal N/A/out-of-scope sentence, never a bare "N/A" or "PASS".
+func TestWireProfileContract_Phase3EvidenceTLSRow(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	const want = "N/A — issue #31 is a separate open unit and is out of scope for #33 Phase 3"
+	if !strings.Contains(phase3CollapseWhitespace(section), want) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 TLS applicability must read exactly %q", wireProfileDocRelPath, want)
+	}
+}
+
+// TestWireProfileContract_Phase3EvidenceRedactionAndReleaseGate requires
+// §11.5 to record both the phase5release vet and test results as PASS.
+func TestWireProfileContract_Phase3EvidenceRedactionAndReleaseGate(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	flat := phase3CollapseWhitespace(section)
+	for _, needle := range []string{
+		"**`phase5release` vet:** `PASS`",
+		"**`phase5release` test:** `PASS`",
+	} {
+		if !strings.Contains(flat, needle) {
+			t.Fatalf("wire_profile_contract: %s: §11.5 must record %q", wireProfileDocRelPath, needle)
+		}
+	}
+}
+
+// certifiedSurfacePatterns is a literal transcription of the plan's
+// "Certified-surface anti-drift digest" file-selection list (git pathspec
+// patterns, non-recursive per named directory except where ** is used).
+// Changing this list is changing what the digest certifies — do so only in
+// lockstep with the plan section it implements.
+var certifiedSurfacePatterns = []string{
+	"go.mod",
+	"go.sum",
+	"cmd/ch-oauth-ldap/*.go",
+	"cmd/synthetic-idp/*.go",
+	"internal/identity/*.go",
+	"internal/roles/*.go",
+	"internal/verification/*.go",
+	"internal/ldap/profile/*.go",
+	"internal/wirefixture/*.go",
+	"integration/clickhouse/wirecapture/*.go",
+	"integration/clickhouse/ha/session-probe/*.go",
+	"third_party/**",
+	"internal/ldap/testdata/clickhouse-wire/**",
+	"integration/clickhouse/Dockerfile",
+	"integration/clickhouse/compose.yml",
+	"integration/clickhouse/compose-ha.yml",
+	"integration/clickhouse/compose-wirecapture.yml",
+	"integration/clickhouse/run.sh",
+	"integration/clickhouse/run-all-builds.sh",
+	"integration/clickhouse/run-ha.sh",
+	"integration/clickhouse/capture-ldap-wire.sh",
+	"integration/clickhouse/lib/**",
+	"integration/clickhouse/scenarios/**",
+	"integration/clickhouse/bootstrap/**",
+	"integration/clickhouse/helper/**",
+	"integration/clickhouse/clickhouse/**",
+	"integration/clickhouse/ha/haproxy.cfg",
+}
+
+// computeCertifiedSurfaceDigest independently reproduces the plan's
+// "Certified-surface anti-drift digest" algorithm in Go: for every tracked
+// path matching certifiedSurfacePatterns (deduplicated, non-test .go files
+// excluded), sorted byte-wise, stream "<path> NUL <file-bytes> NUL" into one
+// SHA-256. This must never itself compute the verdict a Docker/fuzz command
+// ran — it only proves the CURRENT certification-sensitive source still
+// hashes to what §11.5 recorded at tested_behavior_head.
+func computeCertifiedSurfaceDigest(t *testing.T, root string) (digestHex string, fileCount int) {
+	t.Helper()
+	seen := map[string]bool{}
+	var all []string
+	for _, pat := range certifiedSurfacePatterns {
+		cmd := exec.Command("git", "ls-files", "--", pat) //nolint:gosec // fixed argv, no user input
+		cmd.Dir = root
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("wire_profile_contract: certified-surface digest: git ls-files -- %q: %v\nstderr:\n%s", pat, err, stderr.String())
+		}
+		for _, line := range strings.Split(stdout.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if !seen[line] {
+				seen[line] = true
+				all = append(all, line)
+			}
+		}
+	}
+
+	var filtered []string
+	for _, p := range all {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	sort.Strings(filtered)
+
+	h := sha256.New()
+	for _, p := range filtered {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(p)))
+		if err != nil {
+			t.Fatalf("wire_profile_contract: certified-surface digest: read tracked file %s: %v", p, err)
+		}
+		h.Write(data)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), len(filtered)
+}
+
+// TestWireProfileContract_Phase3EvidenceCertifiedSurfaceDigestMatches
+// independently recomputes the certified-surface digest and requires it to
+// equal §11.5's recorded value. A mismatch here does not mean "fix the
+// doc" or "fix this test" — per the plan, it means the prior Stage B manual
+// certification is INVALID and a new one is required against a new
+// tested_behavior_head. This test only detects that condition; it never
+// resolves it by adjusting either side.
+func TestWireProfileContract_Phase3EvidenceCertifiedSurfaceDigestMatches(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase3EvidenceSection(t, doc)
+
+	recorded := phase3EvidenceField(t, section, "Certified-surface digest (SHA-256)")
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(recorded) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 certified-surface digest %q is not exactly 64 lowercase hex characters", wireProfileDocRelPath, recorded)
+	}
+
+	got, fileCount := computeCertifiedSurfaceDigest(t, root)
+	if got != recorded {
+		t.Fatalf("wire_profile_contract: %s: §11.5 records certified-surface digest %s, but recomputing the identical algorithm now over %d tracked files yields %s — if this is not a bug in this test's own algorithm, the prior Stage B manual certification is INVALID: stop and report, a new certification against a new tested_behavior_head is required, do not edit either side to force agreement", wireProfileDocRelPath, recorded, fileCount, got)
+	}
+}
