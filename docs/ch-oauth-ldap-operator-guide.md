@@ -434,3 +434,73 @@ the one Search filter `ch-oauth-ldap` ever authorizes
 (`(&(objectClass=groupOfNames)(member={bind_dn}))`) nests exactly one level
 deep. This is not an operator-configurable knob; it is a fixed hardening
 bound in the vendored dependency.
+
+## 10. Compatibility profile (issue #33 phase 2 — in development)
+
+**This section is a development-status note, not a cutover announcement.**
+Issue #33 is building a first-party, bounded ClickHouse compatibility profile
+at `internal/ldap/profile/` to eventually replace the vendored
+`third_party/goldap`/`third_party/ldapserver` LDAP stack described in §1–§9
+above. Today, `cmd/ch-oauth-ldap` still runs that legacy server in
+production — nothing production-reachable imports the profile package yet.
+It exists with its own real-TCP black-box tests, native fuzzing, real-TCP
+replay of every committed wire fixture, and dependency/architecture/redaction
+contracts; see `CLAUDE.md`'s `internal/ldap/profile/` repo-map row and
+[`docs/clickhouse-ldap-wire-profile.md`](clickhouse-ldap-wire-profile.md) §11
+for the complete engineering-evidence writeup this note summarizes.
+
+### Search values retained as variable
+
+Two operator/client-controlled Search values stay genuinely variable in the
+replacement, exactly as in current production:
+
+- `search_limit` remains a client/operator-controlled `N` — §1's fixture
+  default is `256`;
+- client `timeLimit` is honored as sent — the currently tracked ClickHouse
+  value is `20` seconds (§6).
+
+### Deliberate Search-shape narrowing
+
+After cutover the compatibility profile accepts only: subtree scope,
+`derefAliases=0`, `typesOnly=false`, exactly one requested attribute
+(case-insensitive `cn`), and the exact two-predicate membership filter — no
+empty attribute list, no `*`, no `1.1`, no arbitrary/multiple attributes.
+Current production is broader for `derefAliases`, `typesOnly`, and attribute
+projection, but those forms are outside documented ClickHouse traffic.
+
+### Deliberate LDAPv3 narrowing
+
+Only LDAPv3 simple Bind is accepted after cutover; current production's
+incidental Bind-version-2 acceptance is not retained (the replacement returns
+result 2 `protocolError` instead).
+
+### Deliberate DN narrowing
+
+The replacement's restricted DN grammar drops: multi-valued RDNs, `;` RDN
+separators, `#` BER-hexstring values, dotted-decimal/OID attribute types, and
+arbitrary escaped attribute-type names. Supported whitespace handling and
+`\XX` value escapes remain.
+
+### Deliberate control-plane narrowing
+
+After cutover: ordinary Abandon remains a no-response compatibility operation
+but no longer cancels an in-flight target; ordinary RFC 3909 Cancel becomes an
+unsupported Extended request (result 53) rather than today's vendored Cancel
+implementation; critical Cancel/Abandon retain their result-12/no-target-action
+behavior where applicable; a peer disconnect no longer asynchronously cancels
+an already-running verification call. These are real legacy-behavior removals,
+permitted by the replacement's bounded synchronous architecture, that Phase 3
+must explicitly accept before Phase 4.
+
+### New response-PDU cap and `UserRDNAttribute` validation
+
+Two further narrowings are new client-visible behavior, not parity, and are
+called out separately because neither is a removal of existing tolerance:
+
+- every outbound LDAPMessage is capped at 64 KiB; an oversized
+  `SearchResultEntry` is dropped in favor of `SearchResultDone` result 11
+  (`adminLimitExceeded`), already-emitted count preserved — current
+  production's write path has no outbound size bound at all;
+- the replacement requires the configured `UserRDNAttribute` to match
+  `[A-Za-z][A-Za-z0-9-]*` at startup; current production only rejects an
+  empty/whitespace value.

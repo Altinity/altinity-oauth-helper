@@ -610,3 +610,175 @@ A later phase that finds a captured shape this document does not account
 for should extend the fixture corpus and this document together, in the
 same change — not silently widen the replacement parser past what the
 evidence here actually supports.
+
+### 11.1 Phase 2 implementation status
+
+Phase 2 built the replacement at `internal/ldap/profile/` (package
+`profile`), following the primitive decision above: `cryptobyte` for every
+ASN.1 primitive, plus the same small set of fixed first-party checks named
+in §10 — including the Abandon `[APPLICATION 16]`-implicit-tagged target
+integer, whose content bytes are read directly under the application tag
+and then validated with the identical minimal-positive-INTEGER rule the
+LDAPMessage envelope's MessageID uses (the same shared rule the 127/128
+boundary and the differential oracle below both exercise for Abandon).
+
+This is implementation and test evidence only. `cmd/ch-oauth-ldap` still
+runs the legacy `internal/ldap` server in production; nothing
+production-reachable imports `internal/ldap/profile` yet — that import
+happens in Phase 4. Proof of the replacement's correctness comes from,
+entirely outside the Docker ClickHouse suite:
+
+* real-TCP black-box tests driving the profile server directly (ported from
+  the legacy `protocol_test.go`, plus adversarial/mid-Search/hostile-DN/
+  redaction-boundary/limits suites);
+* real-TCP replay of every committed session under
+  `internal/ldap/testdata/clickhouse-wire/**` through the profile server
+  (`internal/ldap/profile/replay_test.go`);
+* a profile-valid differential oracle against the vendored goldap decoder
+  (`internal/ldap/profile/differential_test.go`, `package profile`,
+  importing goldap only from `_test.go`);
+* five native fuzz targets (`FuzzLDAPFrame`, `FuzzBindRequest`,
+  `FuzzSearchRequest`, `FuzzRestrictedDN`, `FuzzMemberAssertionDN`) seeded
+  from this document's own fixture corpus plus hand-built boundary/malformed
+  vectors — every committed seed runs under ordinary `go test`; a short fuzz
+  smoke beyond seeds is
+  `go test ./internal/ldap/profile -run '^$' -fuzz=Fuzz<Name> -fuzztime=20s`,
+  one target at a time, never a real 20/30-second production deadline in an
+  ordinary unit test;
+* dependency contracts (`internal/securitytest/profile_dependency_contract_test.go`)
+  proving the profile is absent from `./cmd/ch-oauth-ldap`'s live closure and
+  that the profile's own closure requires `golang.org/x/crypto/cryptobyte`
+  while excluding the vendored/general LDAP stack;
+* an architecture contract in two files: the syntactic invariants
+  (`internal/securitytest/profile_architecture_contract_test.go` — exactly
+  one production goroutine spawn, a nonrecursive two-child
+  membership-filter decoder, diagnostic/reason bytes reachable only through
+  their closed enums, and the import bans) plus the type-semantic
+  invariants (`internal/securitytest/profile_types_contract_test.go` — no
+  request-indexed map/channel state beyond the allowlisted `Server` fields,
+  and `Verifier.Verify`/`RoleResolver.Roles` each referenced exactly once,
+  in `bind.go`), the latter enforced over the fully type-checked package
+  with go/types on gc export data, not AST shape enumeration;
+* redaction-inventory coverage (`internal/securitytest`'s `scopeDirs`, sink
+  kind `ldap-profile-diagnostic`) with marker-bearing proofs at default and
+  trace log levels.
+
+Measured physical LOC for the nine production files this replaces
+(`server.go`, `frame.go`, `protocol.go`, `session.go`, `bind.go`,
+`search.go`, `dn.go`, `encode.go`, `logging.go`) plus `config.go` (the public
+`Config`/`ValidateConfig` surface) and `doc.go` (package-status doc) — using
+Phase 1's physical-line definition, comments and blanks counted, i.e.
+`wc -l` summed over exactly those eleven files (equivalently: `wc -l
+$(ls internal/ldap/profile/*.go | grep -v _test.go)`) — is **2,659** as of
+the phase-2 compat-profile sub-task that hardened the write-stall/Search-
+deadline classification, the DN parse-error redaction, and the wire-facing
+descriptor comparisons (each of those touched `dn.go`, `config.go`, and/or
+`search.go`). It was previously measured at 2,608 (nine-file total 2,426 +
+`config.go` 148 + `doc.go` 34) before that sub-task. The plan's
+consolidation-review trigger is 2,500 physical LOC for this package; the
+coordinator's recorded disposition on the earlier 2,608 figure — accepted,
+since the overshoot is exactly the `config.go`/`doc.go` public-surface and
+package-status files the plan's own file table omitted, not undocumented
+growth — stands unchanged at 2,659: both figures are well below ADR #32's
+separate ~3,500-line architecture-review trigger, and consolidation review
+against that trigger still folds into Phase 4's legacy deletion, not this
+sub-task. That disposition is recorded in the issue #33 ship log; see it
+for the full accounting, not a restatement here.
+
+### 11.2 Restricted-profile acceptance: what the replacement accepts
+
+The replacement is a bounded ClickHouse compatibility profile, not a general
+LDAP server. It accepts exactly: LDAPv3 simple Bind; a same-connection Search
+against subtree scope, `derefAliases=0`, `typesOnly=false`, exactly one
+requested attribute (case-insensitive `cn`), and the fixed two-predicate
+`(&(objectClass=groupOfNames)(member=<bind DN>))` filter shape; client-
+declared `sizeLimit`/`timeLimit` honored as sent (not hard-coded to the
+captured `256`/`20`); Abandon recognized and dropped with no response;
+Unbind/close. Every mapped unsupported operation and every out-of-profile
+Search form returns a fixed result code — never a decode error that would
+suggest the input was malformed.
+
+### 11.3 The ten Phase-3 narrowings
+
+Cutover replaces several places where current production is more permissive
+than the documented ClickHouse traffic actually requires, or adds a bound
+current production does not have at all. Phase 3 must explicitly accept or
+reject each one before Phase 4 is authorized:
+
+1. Bind version `!= 3` on the recognizable **simple**-Bind path changes
+   from current incidental acceptance to result 2 `protocolError`
+   (LDAPv3-only). This narrowing's own result-2 path is reached only for a
+   version value that decodes successfully (minimally encoded, in range
+   `1..MaxInt32`), simply isn't 3, *and* the authentication CHOICE is
+   `simple` — the version field is decoded before the authentication
+   CHOICE is inspected, but the CHOICE switch itself checks SASL first and
+   returns result 7 `authMethodNotSupported` unconditionally, before the
+   version check further down the same function is ever reached. So a
+   version of 0, a negative version, or a non-minimally-encoded value is
+   malformed at decode time and closes the connection before the version
+   check ever runs — it never reaches result 2 — and, independently, a
+   *decodable* SASL Bind at any version (including one that isn't 3) never
+   reaches result 2 either: it always returns result 7 first, regardless of
+   version. Only a decodable **simple** Bind at a non-3 version reaches
+   result 2. **(new client-visible
+   behavior, not parity)** This does *not* match legacy: legacy goldap's own
+   Bind version decoder (`BindRequestVersionMin`/`BindRequestVersionMax` in
+   `third_party/goldap/message/struct.go`) only accepts `1..127` and returns
+   a decode error — closing the connection, no response written — for
+   anything outside that window. This profile's `1..MaxInt32` decode range
+   is wider than legacy's, not equivalent to it: a version `>=128` decodes
+   successfully here and receives a graceful result-2 `protocolError`
+   response, a case legacy never reaches because it never gets past decode.
+   Phase 3 must explicitly accept this widening or narrow the version decode
+   to legacy's `1..127`, the same way items 9-10 below are called out rather
+   than left implicit.
+2. Search `derefAliases != 0` changes from current tolerance to result 50.
+3. Search `typesOnly=true` changes from current supported generic rendering
+   to result 50.
+4. Search empty, `*`, `1.1`, non-`cn`, and multi-attribute selections change
+   from current generic projection to result 50.
+5. The restricted DN grammar drops legacy-`go-ldap` forms: multi-valued
+   RDNs with unescaped `+`, `;` RDN separators, `#` BER-hexstring values,
+   dotted-decimal/OID attribute types, arbitrary escaped attribute-type
+   names, schema-based normalization, and arbitrary RFC 4514 equivalence.
+6. A peer disconnect no longer asynchronously cancels an in-flight
+   verification call (the synchronous replacement does not concurrently
+   read EOF while blocked in `Verify`).
+7. Ordinary Abandon no longer cancels an in-flight operation (decoded and
+   dropped; no target lookup, no cancellation).
+8. Ordinary RFC 3909 Cancel no longer has the vendored RouteMux's
+   target/result semantics (protocolError/noSuchOperation/cannotCancel/
+   canceled); it returns result 53 `operation not supported` like any other
+   unsupported Extended request.
+9. **(new client-visible behavior, not parity)** The response-PDU 64 KiB
+   cap: a `SearchResultEntry` that would exceed it is dropped in favor of
+   `SearchResultDone` result 11 `adminLimitExceeded`, already-emitted count
+   preserved. Current production's write path
+   (`third_party/ldapserver/client.go`'s `writeMessage`) serializes whatever
+   the handler wrote with no outbound size bound at all.
+10. **(new client-visible behavior, not parity)** `UserRDNAttribute` gains a
+    startup-time descriptor-shape check (`[A-Za-z][A-Za-z0-9-]*`); current
+    production (`internal/ldap/dn.go`, `cmd/ch-oauth-ldap/config.go`) only
+    rejects an empty/whitespace value.
+
+### 11.4 Phase 4's bounded test-only cursor supersedes this document's oracle
+
+§10's `TestClickHouseWireCryptobyteDecision` characterizes each fixture with
+`cryptobyte` itself, but a cryptobyte characterization failure only counts
+as evidence (the local-ber-cursor justification) once it is corroborated by
+`independentlyWellFormedBER` — the vendored, patched goldap decoder — as a
+*second, structurally independent* decoder proving fixture well-formedness
+(see `internal/ldap/clickhouse_wire_cryptobyte_test.go`'s own doc comments).
+Phase 2's plan deliberately selects, for Phase 4, a **bounded test-only
+cursor** as *that independent goldap oracle's* replacement — not cryptobyte,
+and not the Phase 2 `profile` decoder — because using the eventual
+production decoder to prove fixture well-formedness for itself would be
+self-referential. Phase 4 must therefore: delete
+`internal/ldap/profile/differential_test.go`; replace this
+document's/`internal/ldap`'s independent goldap fixture decoder with a small,
+bounded, test-only definite-length structural cursor; preserve the
+well-formedness/filter-structure anti-drift assertions the current oracle
+provides; and never use the production `profile` package as that
+independent oracle. This explicitly supersedes the alternative the Phase 1
+ship log left open (replacing the oracle with the production decoder
+itself).

@@ -1395,6 +1395,19 @@ func cancelRequestValuePacket(messageID int) *ber.Packet {
 	return pkt
 }
 
+// Disposition (issue #33 Phase 2 plan, "Disposition of named legacy test
+// files"): this test is LEGACY-ONLY / current-behavior characterization. It
+// proves a property of the vendored vjeantet/ldapserver dependency's own
+// RFC 3909 Cancel handling (RouteMux intercepts Cancel before this
+// package's fail-closed catch-all ever sees it) — a control-plane surface
+// the replacement compatibility profile (internal/ldap/profile) does not
+// implement at all: ordinary, non-critical Cancel there is treated as an
+// unsupported Extended operation (fixed result 53), never given the
+// vendored dependency's real target/result semantics. This is one of the
+// plan's named deliberate narrowings requiring explicit Phase 3
+// acceptance, not a regression, and this test's body must not be ported or
+// used to imply parity for ordinary Cancel.
+//
 // TestAdversarial_CancelExtendedOperationCannotAffectBindOrLeak proves, over
 // the real production server and a real TCP connection, the benign-carve-out
 // claim documented on handleNotFound: the RFC 3909 Cancel
@@ -1827,6 +1840,18 @@ func saturateOrdinaryWorkSlots(t *testing.T, rawConn net.Conn, fv *fakeVerifier)
 	time.Sleep(200 * time.Millisecond)
 }
 
+// Disposition (issue #33 Phase 2 plan, "Disposition of named legacy test
+// files"): this test is LEGACY-ONLY / current-behavior characterization. It
+// proves that the vendored vjeantet/ldapserver dependency's own Abandon
+// scheduling ACTUALLY CANCELS an in-flight ordinary (non-critical) request
+// promptly, even under saturated pipelined load — real request-goroutine
+// scheduling machinery the replacement compatibility profile
+// (internal/ldap/profile) deliberately does not implement. There,
+// recognized Abandon is dropped with no lookup and no cancellation at all
+// (a named deliberate narrowing requiring explicit Phase 3 acceptance, not
+// a regression); this test's body and its promptness claim must not be
+// ported or used to imply parity for ordinary Abandon.
+//
 // TestAdversarial_AbandonRunsPromptlyDespiteSaturatedOrdinaryWork proves the
 // fix documented in third_party/ldapserver/PATCHES.md's fifth item: Abandon
 // dispatches against its own dedicated capacity

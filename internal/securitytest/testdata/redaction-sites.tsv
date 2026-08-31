@@ -9,14 +9,19 @@
 #                         internal/ldap, internal/verification,
 #                         internal/identity, internal/roles,
 #                         internal/wirefixture, integration/clickhouse/
-#                         wirecapture (AST-enumerated first-party packages,
+#                         wirecapture, internal/ldap/profile
+#                         (AST-enumerated first-party packages,
 #                         plan §5.1; internal/wirefixture and
 #                         integration/clickhouse/wirecapture were added by
-#                         issue #33 phase 1, plan §10/§35 — see doc.go's
-#                         scopeDirs and its own comment for why each of
-#                         those two directories must stay flat, non-
+#                         issue #33 phase 1, plan §10/§35, and
+#                         internal/ldap/profile by issue #33 phase 2 — see
+#                         doc.go's scopeDirs and its own comment for why
+#                         each of those directories must stay flat, non-
 #                         recursively enumerated, or be registered
-#                         explicitly),
+#                         explicitly; TestRedactionInventory_NestedLDAPPackagesAreRegistered
+#                         in redaction_inventory_test.go generalizes that
+#                         same flatness guard to every directory under
+#                         internal/ldap/**),
 #                         third_party/ldapserver (separately AST-enumerated
 #                         vendored Logger.Print* sites, plan §5.1), or
 #                         external-pinned (declarative rows describing a
@@ -46,7 +51,13 @@
 #                         fmt-errorf, fmt-fprint-response, errors-new,
 #                         errors-join, ldap-diagnostic, http-error,
 #                         vendored-logger-print, json-encode-response,
-#                         http-response-write.
+#                         http-response-write, ldap-profile-diagnostic
+#                         (internal/ldap/profile's own direct
+#                         addLDAPResultFields(builder, resultCode,
+#                         diagConstant) call, issue #33 phase 2 — see
+#                         doc.go's inspectCall; distinct from
+#                         ldap-diagnostic, which is the legacy package's
+#                         SetDiagnosticMessage method call).
 #   fingerprint           the normalized-AST fingerprint doc.go's
 #                         normalizeExpr/normalizeArgs (or, for a zerolog
 #                         terminal call, zerologFingerprint) computes —
@@ -319,6 +330,43 @@ integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/sanitize.g
 integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/sanitize.go	readCredentialFromStdin	fmt-errorf	lit:wirecapture: credential on stdin is empty	yes	raw-credential-stdin	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
 integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/sanitize.go	readCredentialFromStdin	fmt-errorf	lit:wirecapture: read credential from stdin: %w	yes	raw-credential-stdin	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
 integration/clickhouse/wirecapture	integration/clickhouse/wirecapture/sanitize.go	Sanitize	fmt-errorf	lit:wirecapture: sanitize: empty credential	yes	raw-credential-stdin	local	marker	TestWireRecorderRedaction_MarkerNeverLogged	safe	-
+internal/ldap/profile	internal/ldap/profile/config.go	<package-init>	errors-new	lit:profile: config: user base DN is empty or does not parse under the restricted DN grammar	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/config.go	<package-init>	errors-new	lit:profile: config: group base DN is empty or does not parse under the restricted DN grammar	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/config.go	<package-init>	errors-new	lit:profile: config: user RDN attribute is empty or is not a valid attribute-type descriptor	no	config-value	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseDN	fmt-errorf	lit:profile: dn: expected attribute-type descriptor at byte %d	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseDN	fmt-errorf	lit:profile: dn: expected '=' after attribute-type descriptor starting at byte %d	no	no-input-bytes	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseDN	errors-new	lit:profile: dn: '#' BER-hexstring values are not supported	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseDN	fmt-errorf	lit:profile: dn: value for the attribute type starting at byte %d decodes to a NUL byte	no	no-input-bytes	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseDN	fmt-errorf	lit:profile: dn: value for the attribute type starting at byte %d does not decode to valid UTF-8	no	no-input-bytes	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseDN	errors-new	lit:profile: dn: multi-valued RDNs (unescaped '+') are not supported	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseDN	errors-new	lit:profile: dn: ';' RDN separators are not supported	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseDN	fmt-errorf	lit:profile: dn: unexpected byte 0x%02x at byte %d	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	decodeValue	errors-new	lit:profile: dn: trailing '\' with no following escape	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	decodeValue	fmt-errorf	lit:profile: dn: malformed '\XX' escape at byte %d	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseBindDN	fmt-errorf	lit:profile: dn: malformed bind DN: %w	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseBindDN	errors-new	lit:profile: dn: bind DN is not exactly one RDN above the configured user base	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseBindDN	errors-new	lit:profile: dn: bind DN leading RDN attribute does not match configured user_rdn_attribute	no	no-input-bytes	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseBindDN	errors-new	lit:profile: dn: bind DN leading RDN value must not be empty	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/dn.go	ParseBindDN	errors-new	lit:profile: dn: bind DN does not structurally match the configured user base	no	attacker-influenced-discarded	local	structural-discarded-by-caller	n/a	unreachable	-
+internal/ldap/profile	internal/ldap/profile/encode.go	<package-init>	errors-new	lit:ldap/profile: encoded response body exceeds cap	no	none	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/encode.go	encodeBindResponse.closure	ldap-profile-diagnostic	constref:d	yes	closed-diagnostic-enum-text	local	marker	TestProfileRedaction_JWTShapedPassword,TestProfileRedaction_HostileBindDN,TestProfileRedaction_VerifierErrorMarker,TestProfileRedaction_ResolverErrorMarker,TestProfileRedaction_LegitimateMarkerRole,TestProfileRedaction_OversizedMarkerRole	safe	-
+internal/ldap/profile	internal/ldap/profile/encode.go	encodeSearchResultDone.closure	ldap-profile-diagnostic	constref:d	yes	closed-diagnostic-enum-text	local	marker	TestProfileRedaction_LegitimateMarkerRole,TestProfileRedaction_OversizedMarkerRole	safe	-
+internal/ldap/profile	internal/ldap/profile/encode.go	encodeUnsupportedResponse.closure	ldap-profile-diagnostic	constref:d	yes	closed-diagnostic-enum-text	local	marker	TestProfileRedaction_HostileBindDN,TestProfileRedaction_VerifierErrorMarker,TestProfileRedaction_ResolverErrorMarker	safe	-
+internal/ldap/profile	internal/ldap/profile/logging.go	logBindSucceeded	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|Str(username)|Str(correlation_id)|Int(roles)|lit:ldap bind succeeded	yes	verified-identity-metadata	local	marker	TestProfileRedaction_JWTShapedPassword,TestProfileRedaction_LegitimateMarkerRole,TestProfileRedaction_OversizedMarkerRole	safe	-
+internal/ldap/profile	internal/ldap/profile/logging.go	logBindFailed	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|Str(reason)|lit:ldap bind failed	yes	fixed-reason-literal	local	marker	TestProfileRedaction_HostileBindDN,TestProfileRedaction_VerifierErrorMarker,TestProfileRedaction_ResolverErrorMarker	safe	-
+internal/ldap/profile	internal/ldap/profile/logging.go	logBindUnsupportedAuthChoice	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|lit:ldap bind rejected: unsupported authentication choice	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/logging.go	logBindUnsupportedProtocolVersion	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|lit:ldap bind rejected: unsupported protocol version	no	protocol-constant	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/logging.go	logSearchTerminal	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|Str(username)|Int(size_limit)|Int(time_limit)|Bool(types_only)|Int(entrie...#5445131d	yes	search-telemetry-safe	local	marker	TestProfileRedaction_LegitimateMarkerRole,TestProfileRedaction_OversizedMarkerRole	safe	-
+internal/ldap/profile	internal/ldap/profile/logging.go	logSearchRejected	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|Str(reason)|lit:ldap search rejected	no	protocol-constant	local	structural	TestHandleSearch_UnauthenticatedReturns50,TestHandleSearch_FieldPolicyTable	safe	-
+internal/ldap/profile	internal/ldap/profile/logging.go	logOperationUnsupported	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|lit:ldap operation rejected: unsupported	no	protocol-constant	local	marker	TestProfileRedaction_HostileBindDN,TestProfileRedaction_VerifierErrorMarker,TestProfileRedaction_ResolverErrorMarker	safe	-
+internal/ldap/profile	internal/ldap/profile/logging.go	logCriticalControlRejected	zerolog-terminal	Info|Str(op)|Bool(success)|Int(result)|lit:ldap operation rejected: unsupported critical control	no	protocol-constant	local	structural	TestHandleBind_CriticalControlClearsAndReturns12,TestHandleSearch_CriticalControlPreservesAuthAndReturns12	safe	-
+internal/ldap/profile	internal/ldap/profile/protocol.go	<package-init>	errors-new	lit:ldap/profile: malformed message	no	none	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/server.go	<package-init>	errors-new	lit:ldap: rootCtx must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/server.go	<package-init>	errors-new	lit:ldap: verifier must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/server.go	<package-init>	errors-new	lit:ldap: roleResolver must not be nil	no	none	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/server.go	<package-init>	errors-new	lit:ldap/profile: Serve already called	no	none	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/server.go	<package-init>	errors-new	lit:ldap/profile: server already stopped	no	none	local	non-credential	n/a	safe	-
+internal/ldap/profile	internal/ldap/profile/server.go	<package-init>	errors-new	lit:ldap/profile: unbind requested	no	none	local	non-credential	n/a	safe	-
 third_party/ldapserver	third_party/ldapserver/client.go	client.callOnClose.closure	vendored-logger-print	lit:panic in OnClientClose for client [%d]: %v,sel:Numero,constref:r	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
 third_party/ldapserver	third_party/ldapserver/client.go	client.serve.closure	vendored-logger-print	lit:client %d write error, closing connection: %s,sel:Numero,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-
 third_party/ldapserver	third_party/ldapserver/client.go	client.serve	vendored-logger-print	lit:Erreur OnNewConnection: %s,constref:err	yes	raw-wire-traffic	local	marker	TestAdversarial_SentinelAbsentFromEveryCapturedOutputChannel	safe	-

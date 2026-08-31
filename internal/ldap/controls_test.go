@@ -345,6 +345,18 @@ func TestControls_NonCriticalSearchControlDelegates(t *testing.T) {
 
 // ---- 6. critical Cancel does not cancel target -----------------------------
 
+// Disposition (issue #33 Phase 2 plan, "Disposition of named legacy test
+// files"): this test remains relevant ONLY to the critical-control result-12
+// parity case (a critical Cancel/Extended request is rejected with 12 and
+// its target is never cancelled — the same fail-closed-before-any-target-
+// effect shape the replacement compatibility profile's critical-control
+// handling preserves for Bind/Search/every other recognized operation). It
+// must NOT be read as establishing — and must never be cited to imply —
+// ordinary (non-critical) RFC 3909 Cancel parity: the replacement removes
+// the vendored dependency's real Cancel target/result semantics entirely
+// and treats ordinary Cancel as an unsupported Extended operation (fixed
+// result 53), a named deliberate narrowing requiring explicit Phase 3
+// acceptance.
 func TestControls_CriticalCancelDoesNotCancelTarget(t *testing.T) {
 	acct := account("alice", "https://idp.test/", "sub-alice", "jwt-alice", []string{"ch_a"})
 	fv := newFakeVerifier(acct)

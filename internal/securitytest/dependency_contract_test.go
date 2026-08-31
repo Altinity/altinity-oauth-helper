@@ -36,6 +36,8 @@ package securitytest
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -200,9 +202,21 @@ func liveProductionNonstdlibDeps(t *testing.T, root string) []string {
 // to add one implicitly.
 func resolveGoBin(t *testing.T) string {
 	t.Helper()
+	bin, err := resolveGoBinPath()
+	if err != nil {
+		t.Fatalf("dependency_contract: %v", err)
+	}
+	return bin
+}
+
+// resolveGoBinPath is resolveGoBin's non-testing core, shared with
+// profile_types_contract_test.go's export-data loader (which resolves the
+// binary inside a sync.Once, where no *testing.T is available). Same
+// no-fallback rule, same failure modes — only the reporting differs.
+func resolveGoBinPath() (string, error) {
 	goroot := runtime.GOROOT()
 	if goroot == "" {
-		t.Fatal("dependency_contract: runtime.GOROOT() returned an empty string (deprecated since Go 1.24; also empty under -trimpath) and this test has no fallback by design (amendment 7) — see resolveGoBin's doc comment")
+		return "", errors.New("runtime.GOROOT() returned an empty string (deprecated since Go 1.24; also empty under -trimpath) and this check has no fallback by design (amendment 7) — see resolveGoBin's doc comment")
 	}
 	bin := filepath.Join(goroot, "bin", "go")
 	if runtime.GOOS == "windows" {
@@ -210,12 +224,12 @@ func resolveGoBin(t *testing.T) string {
 	}
 	info, err := os.Stat(bin)
 	if err != nil {
-		t.Fatalf("dependency_contract: go binary not found at %s (resolved from runtime.GOROOT()): %v", bin, err)
+		return "", fmt.Errorf("go binary not found at %s (resolved from runtime.GOROOT()): %w", bin, err)
 	}
 	if info.IsDir() {
-		t.Fatalf("dependency_contract: resolved go binary path %s is a directory, not an executable", bin)
+		return "", fmt.Errorf("resolved go binary path %s is a directory, not an executable", bin)
 	}
-	return bin
+	return bin, nil
 }
 
 // deterministicGoListEnv builds the environment for the `go list` invocation
