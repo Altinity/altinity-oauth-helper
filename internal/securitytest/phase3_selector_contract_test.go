@@ -19,21 +19,29 @@ package securitytest
 //     tagged count), that one line contains -tags=phase3profile, that line
 //     is the ONLY `go build` invocation in the file carrying the tag, AND
 //     (the fix for review pass 1's P1 finding, tightened further by review
-//     pass 3's P1 finding, and again by the architecture consultation that
-//     added the COPY/ADD check) it is the ONLY instruction in the whole
-//     Dockerfile — across both RUN shell sub-commands (commandWritesTo) and
-//     COPY/ADD instructions (copyOrAddWritesTo) — that writes to the build
-//     stage's /out/ch-oauth-ldap artifact path, AND that sole writer is
-//     exactly phase3ExpectedHelperBuildCommand — not merely a command
-//     containing "go build" and the tag substring — see
-//     dockerfileArtifactWriters', commandWritesTo's, and
-//     copyOrAddWritesTo's doc comments for why that is a distinct check from
-//     the `go build`-line classifier above it, not a redundant one; for how
-//     commandWritesTo also recognizes a `GOBIN=<dir> go install <pkg>`
-//     overwrite, which has no `-o` flag and so is invisible to every other
-//     RUN-based write-detection shape; and for how copyOrAddWritesTo closes
-//     the remaining gap of a first-class COPY/ADD instruction (not a RUN
-//     shell command at all) overwriting the artifact by destination alone.
+//     pass 3's P1 finding, again by the architecture consultation that
+//     added the COPY/ADD check, and again by review pass 2's finding on
+//     `commandWritesTo`/`goInstallWritesTo` themselves) it is the ONLY
+//     instruction in the whole Dockerfile — across both RUN shell
+//     sub-commands (commandWritesTo) and COPY/ADD instructions
+//     (copyOrAddWritesTo) — that writes to the build stage's
+//     /out/ch-oauth-ldap artifact path, AND that sole writer is exactly
+//     phase3ExpectedHelperBuildCommand — not merely a command containing
+//     "go build" and the tag substring — see dockerfileArtifactWriters',
+//     commandWritesTo's, and copyOrAddWritesTo's doc comments for why that
+//     is a distinct check from the `go build`-line classifier above it, not
+//     a redundant one; for how commandWritesTo also recognizes a
+//     `GOBIN=<dir> go install <pkg>` overwrite, which has no `-o` flag and
+//     so is invisible to every other RUN-based write-detection shape; for
+//     how commandWritesTo's cp/mv detection and goInstallWritesTo's GOBIN
+//     comparison both normalize a directory destination — `cp src /out/`
+//     (checked against the source argument's basename, not just the bare
+//     directory) and `GOBIN=/out/ go install <pkg>` respectively — so a
+//     trailing slash or a directory-shaped destination no longer bypasses
+//     either check the way it did before review pass 2's finding; and for
+//     how copyOrAddWritesTo closes the remaining gap of a first-class
+//     COPY/ADD instruction (not a RUN shell command at all) overwriting the
+//     artifact by destination alone.
 //     This is still a textual, non-path-resolving check, not a Dockerfile
 //     semantics interpreter: it recognizes a COPY/ADD destination of exactly
 //     /out/ch-oauth-ldap or exactly the bare directory /out/, in either
@@ -52,6 +60,7 @@ package securitytest
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCompoundRunOverwrite,
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesNonGoBuildOverwrite,
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesGoInstallOverwrite,
+//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesDirectoryDestinationOverwrite,
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCopyOverwrite,
 //     and
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesJSONArrayCopyOverwrite
@@ -344,11 +353,15 @@ func classifyDockerfileHelperBuildLines(content string) (allHelperBuildLines, ta
 // outputPath: an `-o outputPath` flag (as used by both `go build` and `go
 // install -o`), a `>`/`>>` shell redirect to outputPath, outputPath as the
 // command's own last positional argument (the destination shape of
-// `cp src dst`/`mv src dst`), or — review pass 3's P1 finding — a `go
-// install` invocation GOBIN-redirected to outputPath's directory for a
-// package whose import path's last element is outputPath's base name (see
-// goInstallWritesTo). It deliberately does not care what the command
-// otherwise is — that is exactly the point: it is the mechanism
+// `cp src dst`/`mv src dst`), a directory-destination form of that same
+// `cp`/`mv` shape whose source argument's basename is outputPath's basename
+// (review pass 2's finding: `cp /legacy/ch-oauth-ldap /out/` overwrites
+// outputPath just as effectively as the exact-file form, with or without a
+// trailing slash on the directory), or a `go install` invocation
+// GOBIN-redirected to outputPath's directory for a package whose import
+// path's last element is outputPath's base name (see goInstallWritesTo,
+// review pass 3's P1 finding). It deliberately does not care what the
+// command otherwise is — that is exactly the point: it is the mechanism
 // dockerfileArtifactWriters uses to catch an overwrite performed by
 // something other than a recognizable `go build` invocation.
 func commandWritesTo(command, outputPath string) bool {
@@ -359,8 +372,23 @@ func commandWritesTo(command, outputPath string) bool {
 		return true
 	}
 	fields := strings.Fields(command)
-	if len(fields) > 0 && fields[len(fields)-1] == outputPath {
-		return true
+	if len(fields) > 0 {
+		dest := fields[len(fields)-1]
+		if dest == outputPath {
+			return true
+		}
+		// Directory-destination form of cp/mv (`cp src /out` or
+		// `cp src /out/`): recognized only when the destination is exactly
+		// outputPath's parent directory (trailing slash normalized away)
+		// AND the command's source argument's basename is outputPath's
+		// basename — otherwise a `cp foo /out/` writing some unrelated file
+		// would false-positive as overwriting outputPath.
+		dir, base := path.Dir(outputPath), path.Base(outputPath)
+		if strings.TrimSuffix(dest, "/") == dir && len(fields) > 1 {
+			if src := fields[len(fields)-2]; path.Base(src) == base {
+				return true
+			}
+		}
 	}
 	return goInstallWritesTo(command, outputPath)
 }
@@ -379,7 +407,12 @@ func commandWritesTo(command, outputPath string) bool {
 // element) do, separately. Matching is done on whitespace-separated tokens,
 // not raw substring containment, so a GOBIN value that merely has
 // outputPath's directory as a prefix (e.g. GOBIN=/out2) does not
-// false-positive.
+// false-positive. The GOBIN value's own trailing slash is normalized away
+// before comparison (review pass 2's finding: `GOBIN=/out/ go install
+// ./cmd/ch-oauth-ldap` is the identical overwrite as `GOBIN=/out`, and Go
+// itself treats the two identically) — a normalization the surrounding
+// prefix check does not otherwise weaken, since it still compares the full
+// directory token, not a substring.
 func goInstallWritesTo(command, outputPath string) bool {
 	if !strings.Contains(command, "go install") {
 		return false
@@ -389,10 +422,13 @@ func goInstallWritesTo(command, outputPath string) bool {
 		return false
 	}
 	dir, base := path.Dir(outputPath), path.Base(outputPath)
-	gobinToken := "GOBIN=" + dir
 	sawGOBIN := false
 	for _, f := range fields {
-		if f == gobinToken {
+		val, ok := strings.CutPrefix(f, "GOBIN=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSuffix(val, "/") == dir {
 			sawGOBIN = true
 			break
 		}
@@ -666,6 +702,68 @@ func TestCommandWritesTo_GoInstallGOBIN(t *testing.T) {
 				t.Fatalf("commandWritesTo(%q, %q) = %v, want %v", tc.command, phase3HelperArtifactPath, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCommandWritesTo_DirectoryDestinationNormalization is review pass 2's
+// finding, reproduced directly against commandWritesTo/goInstallWritesTo:
+// both a `cp`/`mv` directory destination (with or without a trailing slash)
+// and a `GOBIN=` directory value with a trailing slash previously bypassed
+// detection because the checks compared tokens by exact string equality
+// against outputPath (or the untrimmed GOBIN token) rather than normalizing
+// the directory form. Includes the negative case a careless normalization
+// would get wrong: a directory-destination cp/mv whose source is unrelated
+// to outputPath's basename must NOT be treated as a writer merely because it
+// lands in the same directory.
+func TestCommandWritesTo_DirectoryDestinationNormalization(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"cp into directory destination with trailing slash matches", "cp /legacy/ch-oauth-ldap /out/", true},
+		{"cp into directory destination without trailing slash matches", "cp /legacy/ch-oauth-ldap /out", true},
+		{"mv into directory destination with trailing slash matches", "mv /legacy/ch-oauth-ldap /out/", true},
+		{"cp into directory destination with an unrelated source does not match", "cp /legacy/other-binary /out/", false},
+		{"GOBIN with trailing slash still matches", "GOBIN=/out/ go install ./cmd/ch-oauth-ldap", true},
+		{"GOBIN with trailing slash and different package does not match", "GOBIN=/out/ go install ./cmd/synthetic-idp", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := commandWritesTo(tc.command, phase3HelperArtifactPath); got != tc.want {
+				t.Fatalf("commandWritesTo(%q, %q) = %v, want %v", tc.command, phase3HelperArtifactPath, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPhase3SelectorContract_ArtifactWriterDetectionCatchesDirectoryDestinationOverwrite
+// reproduces review pass 2's finding at the dockerfileArtifactWriters level,
+// using the finding's own compound example: a tagged `go build` in one RUN,
+// followed by a second RUN chaining an untagged `GOBIN=/legacy go install`
+// (which writes /legacy/ch-oauth-ldap, NOT outputPath — it must not be
+// counted) into a `cp /legacy/ch-oauth-ldap /out/` directory-destination
+// overwrite of outputPath (which must be counted). Before this fix,
+// dockerfileArtifactWriters reported only the tagged build as a writer
+// (writers=1), silently missing the trailing `cp` overwrite entirely.
+func TestPhase3SelectorContract_ArtifactWriterDetectionCatchesDirectoryDestinationOverwrite(t *testing.T) {
+	const sabotaged = "RUN CGO_ENABLED=0 go build -tags=phase3profile -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap\n" +
+		"RUN CGO_ENABLED=0 GOBIN=/legacy go install ./cmd/ch-oauth-ldap && cp /legacy/ch-oauth-ldap /out/\n"
+	writers := dockerfileArtifactWriters(sabotaged, phase3HelperArtifactPath)
+	if len(writers) != 2 {
+		t.Fatalf("dockerfileArtifactWriters: expected both the tagged go build and the trailing directory-destination `cp` overwrite of %s to be detected, got %d: %v", phase3HelperArtifactPath, len(writers), writers)
+	}
+	sawGoBuild, sawCopy := false, false
+	for _, w := range writers {
+		switch {
+		case strings.Contains(w, "go build"):
+			sawGoBuild = true
+		case strings.HasPrefix(w, "cp "):
+			sawCopy = true
+		}
+	}
+	if !sawGoBuild || !sawCopy {
+		t.Fatalf("dockerfileArtifactWriters: expected one go-build writer and one directory-destination cp writer, got: %v", writers)
 	}
 }
 
