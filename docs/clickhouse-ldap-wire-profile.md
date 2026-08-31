@@ -1160,7 +1160,7 @@ document's plan carries.
 
 **Certification identity**
 
-- **tested_behavior_head:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
+- **tested_behavior_head:** `16d16142e39c2282594d2134625c86e46bfa7909`
 - **manual_verification_head:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the
   commit the Docker/fuzz/wire-capture suites below (Supported ClickHouse
   matrix, HA, Wire-capture verification, Fuzz smoke) were actually executed
@@ -1189,7 +1189,7 @@ document's plan carries.
   `scripts/build-ch-oauth-ldap-image.sh`,
   `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
   constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
-- **Certified-surface digest (SHA-256):** `b252de7ddcdfa920590697c7bfc0cf7099643880c215f91a63e81258cb3db8de`
+- **Certified-surface digest (SHA-256):** `f50f43c0a4d443c5c34c16c8bc701df437c4a8a1d2e1ce853960913bd0b365ab`
   — computed over the same "Certified-surface anti-drift digest" file set
   §11.5 used (`certifiedSurfacePatterns`, unchanged, `third_party/**` kept
   even though the directory is now empty), reproduced 3× identically over
@@ -1211,10 +1211,23 @@ document's plan carries.
   by prose: it is resolved by re-running the manual suites against the new
   head and advancing both fields to the commit that actually contains the
   change, so the digest genuinely is the digest at the recorded head. That
-  re-run happened — every image in the tables below was re-certified at this
-  head, not carried forward from the previous one — which is why
-  `manual_verification_head` equals `tested_behavior_head` here rather than
-  trailing it.
+  re-run happened — every image in the tables below was re-certified against
+  `manual_verification_head`, not carried forward from the head before it.
+
+  `tested_behavior_head` has since advanced one commit past
+  `manual_verification_head`, to `16d16142e39c2282594d2134625c86e46bfa7909`.
+  That commit corrects `26.8`'s recorded `clickhouse_commit` from the
+  annotated tag object `v26.8.1.2041-lts` resolves to, to the commit it
+  peels to (§2.1), touching two certified-surface files: the provenance
+  table in `capture-ldap-wire.sh` and the `clickhouse_commit` metadata field
+  in `26.8`'s `profile.json`. No captured byte, no code, and no suite
+  outcome changes — the tracked-file count stays 109, and the corrected
+  value denotes the same tree the tag always peeled to. This is the
+  behavior-preserving case these two fields exist to distinguish: the head
+  advances so the digest is genuinely the digest at the recorded head, while
+  the coordinator attestation keeps citing the commit the Docker/fuzz suites
+  were actually executed against. `--mode verify` was nonetheless re-run
+  after the correction and passed on all four lines.
 
 **Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
 
@@ -1459,7 +1472,41 @@ more misleading artifact.
 - **26.3 → 26.8 is LDAP-behaviorally identical** — value-initialization
   hygiene only (§2.2).
 
-**Two defects this expansion surfaced**
+**Two defects review found in this expansion's own first cut**
+
+3. **`26.8`'s `clickhouse_commit` recorded an annotated tag object, not a
+   commit.** `v26.8.1.2041-lts` is the only annotated tag among the four
+   tracked lines; its ref reports object type `tag` and SHA `be4175ff…`,
+   which was recorded as the commit in all four places provenance lives.
+   The peeled commit is `537693a9…`. Nothing else moved — the GitHub
+   contents API peels refs, so §2.2's blob SHAs and the OpenLDAP pin were
+   already correct and were re-verified directly against the peeled commit.
+   The cause was method drift: three lines were resolved with
+   `git/ref/tags/<tag>` printing `.object.type` (all `commit`), while `26.8`
+   used `git/matching-refs` printing only `.object.sha`, so the `tag` type
+   was never seen. §2.1 and both provenance tables now state the peeling
+   requirement.
+
+   Worth recording precisely because of what could NOT have caught it:
+   `--mode verify` compares the committed `profile.json` against a fresh one
+   derived from `capture-ldap-wire.sh`'s own table, so it agrees whenever
+   those two agree. It validates consistency, not correctness, and passed
+   with the wrong SHA on both sides. No offline contract can check a commit
+   SHA against a remote repository either, so this remains a documented
+   manual step, not a new mechanical guard — an honest gap rather than a
+   check that would only appear to close it.
+
+4. **The §5 TLS-block citations were left at 24.8/25.8 line numbers.** The
+   non-TLS rows were given per-pair numbers when 26.x was added, but the TLS
+   blocks — which the new `LDAP_OPT_REFERRALS` block pushes down by eight
+   lines — were not, and neither were the §4 call-chain, §6 source-of-value
+   and §8 citations. Every `LDAPClient.cpp` citation in this document is now
+   given as `24.8/25.8 → 26.3/26.8`. `LDAPClient.h` is the documented
+   exception (§2.2): its blob differs between pairs, but every cited line is
+   at an unchanged number, verified rather than assumed. Behavior-neutral,
+   but this document's whole purpose is exact source auditing.
+
+**Two defects this expansion surfaced upstream and in the suite**
 
 1. **ClickHouse 26.8 maps `ACCESS_DENIED` to HTTP 403**, where
    24.8/25.8/26.3 map it to 500. Scenario H's negative control asserted 500
