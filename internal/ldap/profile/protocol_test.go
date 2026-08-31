@@ -2,13 +2,11 @@ package profile
 
 // This file is the sub-task p2-09-tcp-protocol-port real-TCP black-box
 // test suite: it drives the real profile.Server, over an actual loopback
-// TCP listener, using BOTH the go-ldap v3 client
-// (github.com/go-ldap/ldap/v3, a test-only import that never reaches this
-// package's production dependency closure -- see
-// internal/securitytest/profile_dependency_contract_test.go) and raw
-// hand-built PDUs where exact bytes are the subject. It ports every row
-// the plan's "Disposition of named legacy test files" table marks
-// port/adapt for internal/ldap/protocol_test.go.
+// TCP listener, using BOTH this package's own local fixed-profile raw-PDU
+// client (rawclient_test.go) and raw hand-built PDUs where exact bytes
+// are the subject. It ports every row the plan's "Disposition of named
+// legacy test files" table marks port/adapt for
+// internal/ldap/protocol_test.go.
 //
 // This complements, rather than duplicates, two other real-TCP suites
 // already in this package:
@@ -21,13 +19,24 @@ package profile
 //     handleBind/handleSearch directly over net.Pipe for the exhaustive
 //     field/state/filter tables.
 //
-// What only this file adds is the go-ldap client layer (proving a real
-// LDAPv3 client library, not just this repository's own hand-rolled BER,
-// interoperates correctly) plus two black-box proofs the plan names
-// explicitly for this sub-task: TestProfile_OperationsAreSerial (serial,
-// per-connection, synchronous processing observed from outside the
-// process) and TestProfile_SearchFixedFieldPolicy (the full Search-shape
-// narrowing table exercised end to end, not just at handler level).
+// What only this file adds is the client-role black-box layer (proving a
+// real LDAPv3 client -- not this package's own handler functions -- can
+// drive the real server end to end over real TCP) plus two black-box
+// proofs the plan names explicitly for this sub-task:
+// TestProfile_OperationsAreSerial (serial, per-connection, synchronous
+// processing observed from outside the process) and
+// TestProfile_SearchFixedFieldPolicy (the full Search-shape narrowing
+// table exercised end to end, not just at handler level).
+//
+// Historical note on the client library: earlier revisions of this file
+// drove the server with github.com/go-ldap/ldap/v3, a general
+// third-party LDAPv3 client, as a test-only import that never reached
+// this package's production dependency closure (see
+// internal/securitytest/profile_dependency_contract_test.go). Issue #33
+// Phase 4 removes github.com/go-ldap/ldap/v3 from the entire repository,
+// so this suite now drives the server through rawclient_test.go's local
+// fixed-profile client instead -- the real-TCP boundary this file exists
+// to prove is unchanged; only the client-side library is.
 //
 // # Legacy-only cases deliberately NOT ported (per the disposition table)
 //
@@ -49,8 +58,6 @@ package profile
 
 import (
 	"bytes"
-	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -59,129 +66,7 @@ import (
 
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/cryptobyte/asn1"
-
-	goldapclient "github.com/go-ldap/ldap/v3"
 )
-
-// ---- go-ldap v3 client test helpers ---------------------------------------
-//
-// These mirror the shape of the legacy internal/ldap/protocol_test.go
-// helpers of the same purpose (dialTest/bindAs/requireSuccess/
-// requireInvalidCredentials/requireUnwillingToPerform/membershipSearch),
-// rebuilt fresh here since fakes_test.go's Amendment-7 canonical fakes
-// (fakeVerifier/fakeResolver/fakeClock/marker constants/newTestConfig) are
-// this package's only mandated single source of truth -- there is no
-// equivalent mandate over these go-ldap-client-shaped helpers, which exist
-// nowhere else in this package.
-
-func dialGoLDAP(t *testing.T, addr string) *goldapclient.Conn {
-	t.Helper()
-	conn, err := goldapclient.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial %s: %v", addr, err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	return conn
-}
-
-func asLDAPError(err error) *goldapclient.Error {
-	if err == nil {
-		return nil
-	}
-	var ldapErr *goldapclient.Error
-	if errors.As(err, &ldapErr) {
-		return ldapErr
-	}
-	return &goldapclient.Error{Err: err}
-}
-
-// bindAs performs a simple Bind and returns the resulting *ldap.Error (nil
-// on success).
-func bindAs(conn *goldapclient.Conn, dn, password string) *goldapclient.Error {
-	return bindAsWithControls(conn, dn, password, nil)
-}
-
-func bindAsWithControls(conn *goldapclient.Conn, dn, password string, controls []goldapclient.Control) *goldapclient.Error {
-	req := goldapclient.NewSimpleBindRequest(dn, password, controls)
-	req.AllowEmptyPassword = true
-	_, err := conn.SimpleBind(req)
-	return asLDAPError(err)
-}
-
-func requireSuccess(t *testing.T, label string, err *goldapclient.Error) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("%s: got LDAP error %+v, want success", label, err)
-	}
-}
-
-// requireInvalidCredentials fails the test unless err is exactly the fixed
-// Bind non-disclosure boundary: result 49, empty matched DN, the fixed
-// "invalid credentials" diagnostic.
-func requireInvalidCredentials(t *testing.T, label string, err *goldapclient.Error) {
-	t.Helper()
-	if err == nil {
-		t.Fatalf("%s: got success, want invalidCredentials", label)
-	}
-	if int32(err.ResultCode) != resultInvalidCredentials {
-		t.Fatalf("%s: ResultCode = %d, want %d", label, err.ResultCode, resultInvalidCredentials)
-	}
-	if err.MatchedDN != "" {
-		t.Fatalf("%s: MatchedDN = %q, want empty", label, err.MatchedDN)
-	}
-	if err.Err == nil || err.Err.Error() != diagInvalidCredentials.text() {
-		t.Fatalf("%s: diagnostic = %v, want %q", label, err.Err, diagInvalidCredentials.text())
-	}
-}
-
-// requireUnwillingToPerform fails the test unless err is result 53 with the
-// empty diagnostic -- the fixed mapped response for Add/Modify/Delete/
-// Compare/ModifyDN.
-func requireUnwillingToPerform(t *testing.T, err error) {
-	t.Helper()
-	ldapErr := asLDAPError(err)
-	if ldapErr == nil {
-		t.Fatal("got success, want unwillingToPerform (53)")
-	}
-	if int32(ldapErr.ResultCode) != resultUnwillingToPerform {
-		t.Fatalf("ResultCode = %d, want %d (unwillingToPerform)", ldapErr.ResultCode, resultUnwillingToPerform)
-	}
-	if ldapErr.Err == nil || ldapErr.Err.Error() != diagEmpty.text() {
-		t.Fatalf("diagnostic = %v, want empty", ldapErr.Err)
-	}
-}
-
-// requireOperationNotSupported fails the test unless err is result 53 with
-// the "operation not supported" diagnostic -- the fixed mapped response
-// for Extended requests specifically.
-func requireOperationNotSupported(t *testing.T, err error) {
-	t.Helper()
-	ldapErr := asLDAPError(err)
-	if ldapErr == nil {
-		t.Fatal("got success, want operation-not-supported (53)")
-	}
-	if int32(ldapErr.ResultCode) != resultUnwillingToPerform {
-		t.Fatalf("ResultCode = %d, want %d", ldapErr.ResultCode, resultUnwillingToPerform)
-	}
-	if ldapErr.Err == nil || ldapErr.Err.Error() != diagOperationUnsupported.text() {
-		t.Fatalf("diagnostic = %v, want %q", ldapErr.Err, diagOperationUnsupported.text())
-	}
-}
-
-// membershipSearch builds the fixed membership SearchRequest, escaping
-// boundDN with ldap.EscapeFilter before interpolating it into filter text
-// -- required by the plan's "{bind_dn} filter pipeline" section for every
-// test-only go-ldap textual filter.
-func membershipSearch(baseDN, boundDN string, attrs []string) *goldapclient.SearchRequest {
-	filter := fmt.Sprintf("(&(objectClass=groupOfNames)(member=%s))", goldapclient.EscapeFilter(boundDN))
-	return goldapclient.NewSearchRequest(baseDN, goldapclient.ScopeWholeSubtree, goldapclient.NeverDerefAliases, 0, 0, false, filter, attrs, nil)
-}
-
-func membershipSearchWithControls(baseDN, boundDN string, attrs []string, controls []goldapclient.Control) *goldapclient.SearchRequest {
-	req := membershipSearch(baseDN, boundDN, attrs)
-	req.Controls = controls
-	return req
-}
 
 // ---- raw-BER helpers specific to this file --------------------------------
 //
@@ -288,10 +173,10 @@ func TestProfile_SimpleBindV3(t *testing.T) {
 		h := newRunningServer(t, v, r, nil)
 		defer h.stopAndWait(t, 5*time.Second)
 
-		conn := dialGoLDAP(t, h.addr)
-		requireSuccess(t, "bind", bindAs(conn, testAliceDN, "s3cr3t"))
+		conn := rawDial(t, h.addr)
+		requireSuccess(t, "bind", conn.simpleBind(testAliceDN, "s3cr3t"))
 
-		res, err := conn.Search(membershipSearch(groupBase, testAliceDN, []string{"cn"}))
+		res, err := conn.search(groupBase, testAliceDN, []string{"cn"})
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}
@@ -350,8 +235,8 @@ func TestProfile_SimpleBindV3(t *testing.T) {
 		h := newRunningServer(t, fv, r, nil)
 		defer h.stopAndWait(t, 5*time.Second)
 
-		conn := dialGoLDAP(t, h.addr)
-		requireInvalidCredentials(t, "wrong token", bindAs(conn, testAliceDN, "not-the-right-jwt"))
+		conn := rawDial(t, h.addr)
+		requireInvalidCredentials(t, "wrong token", conn.simpleBind(testAliceDN, "not-the-right-jwt"))
 		if got := fv.callCount(); got != 1 {
 			t.Fatalf("verifier calls = %d, want 1", got)
 		}
@@ -368,19 +253,19 @@ func TestProfile_SimpleBindV3(t *testing.T) {
 			"empty_dn_valid_shaped_pass": {"", "s3cr3t"},
 			"valid_dn_empty_password":    {testAliceDN, ""},
 		}
-		var errs []*goldapclient.Error
+		var errs []*rawLDAPError
 		for name, c := range cases {
-			err := bindAs(dialGoLDAP(t, h.addr), c.dn, c.password)
+			err := rawDial(t, h.addr).simpleBind(c.dn, c.password)
 			requireInvalidCredentials(t, name, err)
 			errs = append(errs, err)
 		}
 		// Nondisclosure: every failure class above must be byte-for-byte
 		// identical to an unrelated failure class's client-visible view
 		// (wrong token on a valid-looking DN).
-		wrongToken := bindAs(dialGoLDAP(t, h.addr), testAliceDN, "garbage")
+		wrongToken := rawDial(t, h.addr).simpleBind(testAliceDN, "garbage")
 		requireInvalidCredentials(t, "wrong token (for equality check)", wrongToken)
 		for _, e := range errs {
-			if e.ResultCode != wrongToken.ResultCode || e.MatchedDN != wrongToken.MatchedDN || e.Err.Error() != wrongToken.Err.Error() {
+			if e.ResultCode != wrongToken.ResultCode || e.MatchedDN != wrongToken.MatchedDN || e.Diagnostic != wrongToken.Diagnostic {
 				t.Fatalf("failure classes are distinguishable: %+v vs %+v", e, wrongToken)
 			}
 		}
@@ -402,8 +287,8 @@ func TestProfile_SimpleBindV3(t *testing.T) {
 		}
 		for name, dn := range cases {
 			t.Run(name, func(t *testing.T) {
-				conn := dialGoLDAP(t, h.addr)
-				requireInvalidCredentials(t, name, bindAs(conn, dn, "s3cr3t"))
+				conn := rawDial(t, h.addr)
+				requireInvalidCredentials(t, name, conn.simpleBind(dn, "s3cr3t"))
 			})
 		}
 		if got := fv.callCount(); got != 0 {
@@ -424,8 +309,8 @@ func TestProfile_BindVersion2ProtocolError(t *testing.T) {
 	conn := dial(t, h.addr)
 	defer conn.Close()
 
-	// go-ldap's own SimpleBindRequest always sends version 3 on the wire
-	// (see bind.go's appendTo), so a v2 Bind must be hand-built -- exactly
+	// rawConn.simpleBind (rawclient_test.go) always sends version 3 on
+	// the wire, so a v2 Bind must be hand-built here directly -- exactly
 	// the raw-BER case this sub-task calls out.
 	raw := fullMessage(1, byte(tagBindRequest), bindOp(2, testAliceDN, authTagSimple, []byte("s3cr3t")), false)
 	env := sendAndReadEnvelope(t, conn, raw)
@@ -468,18 +353,18 @@ func TestProfile_ReBindReplaceAndClear(t *testing.T) {
 		h := newRunningServer(t, v, r, nil)
 		defer h.stopAndWait(t, 5*time.Second)
 
-		conn := dialGoLDAP(t, h.addr)
-		requireSuccess(t, "bind alice", bindAs(conn, testAliceDN, "alice-pw"))
-		requireSuccess(t, "rebind bob", bindAs(conn, testBobDN, "bob-pw"))
+		conn := rawDial(t, h.addr)
+		requireSuccess(t, "bind alice", conn.simpleBind(testAliceDN, "alice-pw"))
+		requireSuccess(t, "rebind bob", conn.simpleBind(testBobDN, "bob-pw"))
 
-		res, err := conn.Search(membershipSearch(groupBase, testBobDN, []string{"cn"}))
+		res, err := conn.search(groupBase, testBobDN, []string{"cn"})
 		if err != nil || len(res.Entries) != 1 || res.Entries[0].GetAttributeValue("cn") != "clickhouse_ch_b" {
 			t.Fatalf("search after re-bind = %+v, err=%v, want only bob's role", res, err)
 		}
 
 		// Alice's own membership query must no longer succeed on this
 		// connection: re-Bind fully replaced, not merged.
-		resAlice, err := conn.Search(membershipSearch(groupBase, testAliceDN, []string{"cn"}))
+		resAlice, err := conn.search(groupBase, testAliceDN, []string{"cn"})
 		if err == nil && len(resAlice.Entries) > 0 {
 			t.Fatalf("search for alice's membership after re-bind as bob succeeded: %+v", resAlice)
 		}
@@ -491,11 +376,11 @@ func TestProfile_ReBindReplaceAndClear(t *testing.T) {
 		h := newRunningServer(t, v, r, nil)
 		defer h.stopAndWait(t, 5*time.Second)
 
-		conn := dialGoLDAP(t, h.addr)
-		requireSuccess(t, "bind alice", bindAs(conn, testAliceDN, "alice-pw"))
-		requireInvalidCredentials(t, "failed rebind", bindAs(conn, testAliceDN, "wrong-token"))
+		conn := rawDial(t, h.addr)
+		requireSuccess(t, "bind alice", conn.simpleBind(testAliceDN, "alice-pw"))
+		requireInvalidCredentials(t, "failed rebind", conn.simpleBind(testAliceDN, "wrong-token"))
 
-		res, err := conn.Search(membershipSearch(groupBase, testAliceDN, []string{"cn"}))
+		res, err := conn.search(groupBase, testAliceDN, []string{"cn"})
 		if err == nil && res != nil && len(res.Entries) > 0 {
 			t.Fatalf("search after failed re-bind = %+v, want unauthenticated failure", res)
 		}
@@ -509,14 +394,13 @@ func TestProfile_SearchBeforeBindRejected(t *testing.T) {
 	h := newRunningServer(t, v, r, nil)
 	defer h.stopAndWait(t, 5*time.Second)
 
-	conn := dialGoLDAP(t, h.addr)
-	res, err := conn.Search(membershipSearch(newTestConfig().GroupBaseDN, testAliceDN, []string{"cn"}))
+	conn := rawDial(t, h.addr)
+	res, err := conn.search(newTestConfig().GroupBaseDN, testAliceDN, []string{"cn"})
 	if err == nil {
 		t.Fatalf("search before bind: got success with %d entries, want failure", len(res.Entries))
 	}
-	ldapErr := asLDAPError(err)
-	if int32(ldapErr.ResultCode) != resultInsufficientAccessRights {
-		t.Fatalf("search before bind: ResultCode = %d, want %d", ldapErr.ResultCode, resultInsufficientAccessRights)
+	if err.ResultCode != resultInsufficientAccessRights {
+		t.Fatalf("search before bind: ResultCode = %d, want %d", err.ResultCode, resultInsufficientAccessRights)
 	}
 }
 
@@ -530,25 +414,25 @@ func TestProfile_ConnectionStateIsolated(t *testing.T) {
 
 	groupBase := newTestConfig().GroupBaseDN
 
-	connA := dialGoLDAP(t, h.addr)
-	requireSuccess(t, "bind alice", bindAs(connA, testAliceDN, "alice-pw"))
+	connA := rawDial(t, h.addr)
+	requireSuccess(t, "bind alice", connA.simpleBind(testAliceDN, "alice-pw"))
 
-	connB := dialGoLDAP(t, h.addr)
-	requireSuccess(t, "bind bob", bindAs(connB, testBobDN, "bob-pw"))
+	connB := rawDial(t, h.addr)
+	requireSuccess(t, "bind bob", connB.simpleBind(testBobDN, "bob-pw"))
 
-	resA, err := connA.Search(membershipSearch(groupBase, testAliceDN, []string{"cn"}))
+	resA, err := connA.search(groupBase, testAliceDN, []string{"cn"})
 	if err != nil || len(resA.Entries) != 1 || resA.Entries[0].GetAttributeValue("cn") != "clickhouse_ch_alice_role" {
 		t.Fatalf("connA search = %+v, err=%v, want alice's role only", resA, err)
 	}
 
-	resB, err := connB.Search(membershipSearch(groupBase, testBobDN, []string{"cn"}))
+	resB, err := connB.search(groupBase, testBobDN, []string{"cn"})
 	if err != nil || len(resB.Entries) != 1 || resB.Entries[0].GetAttributeValue("cn") != "clickhouse_ch_bob_role" {
 		t.Fatalf("connB search = %+v, err=%v, want bob's role only", resB, err)
 	}
 
 	// Bob's connection cannot see alice's snapshot, even though connB is
 	// itself validly authenticated (as bob).
-	resCross, err := connB.Search(membershipSearch(groupBase, testAliceDN, []string{"cn"}))
+	resCross, err := connB.search(groupBase, testAliceDN, []string{"cn"})
 	if err == nil && resCross != nil && len(resCross.Entries) > 0 {
 		t.Fatalf("connB observed alice's membership: %+v", resCross)
 	}
@@ -561,10 +445,10 @@ func TestProfile_ZeroRoleBindGetsSuccessfulEmptySearch(t *testing.T) {
 	h := newRunningServer(t, v, r, nil)
 	defer h.stopAndWait(t, 5*time.Second)
 
-	conn := dialGoLDAP(t, h.addr)
-	requireSuccess(t, "bind", bindAs(conn, testAliceDN, "s3cr3t"))
+	conn := rawDial(t, h.addr)
+	requireSuccess(t, "bind", conn.simpleBind(testAliceDN, "s3cr3t"))
 
-	res, err := conn.Search(membershipSearch(newTestConfig().GroupBaseDN, testAliceDN, []string{"cn"}))
+	res, err := conn.search(newTestConfig().GroupBaseDN, testAliceDN, []string{"cn"})
 	if err != nil {
 		t.Fatalf("search: %v, want success", err)
 	}
@@ -582,11 +466,11 @@ func TestProfile_MembershipAuthorization(t *testing.T) {
 	h := newRunningServer(t, v, r, nil)
 	defer h.stopAndWait(t, 5*time.Second)
 
-	conn := dialGoLDAP(t, h.addr)
-	requireSuccess(t, "bind alice", bindAs(conn, testAliceDN, "alice-pw"))
+	conn := rawDial(t, h.addr)
+	requireSuccess(t, "bind alice", conn.simpleBind(testAliceDN, "alice-pw"))
 
 	t.Run("other_member_dn_rejected", func(t *testing.T) {
-		res, err := conn.Search(membershipSearch(groupBase, testBobDN, []string{"cn"}))
+		res, err := conn.search(groupBase, testBobDN, []string{"cn"})
 		if err == nil && res != nil && len(res.Entries) > 0 {
 			t.Fatalf("search for bob's membership on alice's connection succeeded: %+v", res)
 		}
@@ -594,7 +478,7 @@ func TestProfile_MembershipAuthorization(t *testing.T) {
 
 	t.Run("case_variant_attribute_type_accepted", func(t *testing.T) {
 		variant := "UID=alice,OU=users,DC=profile,DC=test"
-		res, err := conn.Search(membershipSearch(groupBase, variant, []string{"cn"}))
+		res, err := conn.search(groupBase, variant, []string{"cn"})
 		if err != nil {
 			t.Fatalf("case-variant member search: %v", err)
 		}
@@ -609,7 +493,7 @@ func TestProfile_MembershipAuthorization(t *testing.T) {
 		// spelling, proving DN.Equal compares decoded bytes, never raw
 		// escaped text.
 		escaped := `uid=\61lice,ou=users,dc=profile,dc=test`
-		res, err := conn.Search(membershipSearch(groupBase, escaped, []string{"cn"}))
+		res, err := conn.search(groupBase, escaped, []string{"cn"})
 		if err != nil {
 			t.Fatalf("escaped-spelling member search: %v", err)
 		}
@@ -625,12 +509,12 @@ func TestProfile_MembershipAuthorization(t *testing.T) {
 		// filter-text unescaping of its own: it authorizes Search using
 		// raw BER assertion-value bytes, decoded exactly once via the
 		// restricted DN grammar (ParseDN), matching the plan's
-		// "{bind_dn} filter pipeline" section. ldap.EscapeFilter (via
-		// membershipSearch) only ever escapes filter metacharacters
-		// (here, the DN's own '\' bytes); it never touches ',' or '+',
-		// and go-ldap's own filter compiler only ever decodes '\XX'
-		// sequences back to raw bytes -- so the BER assertion value that
-		// reaches the server is exactly hostileDN's raw text.
+		// "{bind_dn} filter pipeline" section. rawConn.search builds the
+		// membership filter's assertion value directly as a BER OCTET
+		// STRING (validMembershipFilter, in search_test.go) -- there is
+		// no textual filter-string encode/decode step on the client side
+		// at all, so the BER assertion value that reaches the server is
+		// exactly hostileDN's raw text, unmodified.
 		hostileDN := `uid=alice\,x\+y,ou=users,dc=profile,dc=test`
 		hostileAcct := newVerificationResult("alice-hostile", "https://idp.example/", "sub-alice-hostile", time.Now().Add(time.Hour).Unix())
 		hv := newFakeVerifier().withSuccess("hostile-pw", hostileAcct)
@@ -638,10 +522,10 @@ func TestProfile_MembershipAuthorization(t *testing.T) {
 		hh := newRunningServer(t, hv, hr, nil)
 		defer hh.stopAndWait(t, 5*time.Second)
 
-		hconn := dialGoLDAP(t, hh.addr)
-		requireSuccess(t, "bind hostile-shaped DN", bindAs(hconn, hostileDN, "hostile-pw"))
+		hconn := rawDial(t, hh.addr)
+		requireSuccess(t, "bind hostile-shaped DN", hconn.simpleBind(hostileDN, "hostile-pw"))
 
-		res, err := hconn.Search(membershipSearch(groupBase, hostileDN, []string{"cn"}))
+		res, err := hconn.search(groupBase, hostileDN, []string{"cn"})
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}
@@ -653,48 +537,49 @@ func TestProfile_MembershipAuthorization(t *testing.T) {
 
 // ---- unsupported operations, controls -------------------------------------
 
-func TestProfile_UnsupportedOperationsViaGoLDAPClient(t *testing.T) {
-	groupBase := newTestConfig().GroupBaseDN
+func TestProfile_UnsupportedOperationsRawClient(t *testing.T) {
 	v := newFakeVerifier()
 	r := newFakeResolver()
 	h := newRunningServer(t, v, r, nil)
 	defer h.stopAndWait(t, 5*time.Second)
 
+	// dispatchOperation (server.go) routes each of these purely on the
+	// LDAPMessage's application tag and never decodes their payload (see
+	// opaqueRequestBytes and rawConn.unsupportedOp), so no
+	// operation-specific request shape (target DN, modify changes,
+	// compare attribute/value, ...) needs to be built here at all -- the
+	// bare tag is the entire input dispatchOperation ever looks at.
 	t.Run("Add", func(t *testing.T) {
-		conn := dialGoLDAP(t, h.addr)
-		requireUnwillingToPerform(t, conn.Add(goldapclient.NewAddRequest("cn=x,"+groupBase, nil)))
+		conn := rawDial(t, h.addr)
+		requireUnwillingToPerform(t, conn.unsupportedOp(byte(tagAddRequest)))
 	})
 	t.Run("Modify", func(t *testing.T) {
-		conn := dialGoLDAP(t, h.addr)
-		mr := goldapclient.NewModifyRequest("cn=x,"+groupBase, nil)
-		mr.Replace("cn", []string{"y"})
-		requireUnwillingToPerform(t, conn.Modify(mr))
+		conn := rawDial(t, h.addr)
+		requireUnwillingToPerform(t, conn.unsupportedOp(byte(tagModifyRequest)))
 	})
 	t.Run("Delete", func(t *testing.T) {
-		conn := dialGoLDAP(t, h.addr)
-		requireUnwillingToPerform(t, conn.Del(goldapclient.NewDelRequest("cn=x,"+groupBase, nil)))
+		conn := rawDial(t, h.addr)
+		requireUnwillingToPerform(t, conn.unsupportedOp(byte(tagDelRequest)))
 	})
 	t.Run("Compare", func(t *testing.T) {
-		conn := dialGoLDAP(t, h.addr)
-		_, err := conn.Compare("cn=x,"+groupBase, "cn", "x")
-		requireUnwillingToPerform(t, err)
+		conn := rawDial(t, h.addr)
+		requireUnwillingToPerform(t, conn.unsupportedOp(byte(tagCompareRequest)))
 	})
 	t.Run("ModifyDN", func(t *testing.T) {
-		conn := dialGoLDAP(t, h.addr)
-		conn.SetTimeout(5 * time.Second)
-		err := conn.ModifyDN(goldapclient.NewModifyDNRequest("cn=x,"+groupBase, "cn=y", true, ""))
-		requireUnwillingToPerform(t, err)
+		conn := rawDial(t, h.addr)
+		requireUnwillingToPerform(t, conn.unsupportedOp(byte(tagModifyDNRequest)))
 	})
 	t.Run("Extended_WhoAmI", func(t *testing.T) {
-		conn := dialGoLDAP(t, h.addr)
-		_, err := conn.WhoAmI(nil)
-		requireOperationNotSupported(t, err)
+		conn := rawDial(t, h.addr)
+		requireOperationNotSupported(t, conn.unsupportedOp(byte(tagExtendedRequest)))
 	})
 	t.Run("Extended_Cancel", func(t *testing.T) {
-		// go-ldap has no native Cancel client method, so this is built by
-		// hand with the real Cancel OID (see cancelExtendedRequestBytes)
-		// -- dispatchOperation routes it exactly like any other Extended
-		// request, per server.go's "Deliberate Cancel narrowing".
+		// Unlike the opaque-content ops above, this one is built with
+		// the real Cancel OID (see cancelExtendedRequestBytes) precisely
+		// to prove a realistic, well-formed Extended request collapses
+		// to the same fixed outcome as an opaque one -- dispatchOperation
+		// routes it exactly like any other Extended request, per
+		// server.go's "Deliberate Cancel narrowing".
 		conn := dial(t, h.addr)
 		defer conn.Close()
 		env := sendAndReadEnvelope(t, conn, cancelExtendedRequestBytes(1, 1))
@@ -725,12 +610,12 @@ func TestProfile_UnknownNonCriticalControlIgnored(t *testing.T) {
 	h := newRunningServer(t, v, r, nil)
 	defer h.stopAndWait(t, 5*time.Second)
 
-	unknown := []goldapclient.Control{goldapclient.NewControlString("1.2.3.4.5.6.7.8.9", false, "")}
+	unknown := unknownNonCriticalControl()
 
-	conn := dialGoLDAP(t, h.addr)
-	requireSuccess(t, "bind with unknown non-critical control", bindAsWithControls(conn, testAliceDN, "s3cr3t", unknown))
+	conn := rawDial(t, h.addr)
+	requireSuccess(t, "bind with unknown non-critical control", conn.bindWithControls(testAliceDN, "s3cr3t", unknown))
 
-	res, err := conn.Search(membershipSearchWithControls(newTestConfig().GroupBaseDN, testAliceDN, []string{"cn"}, unknown))
+	res, err := conn.searchWithControls(newTestConfig().GroupBaseDN, testAliceDN, []string{"cn"}, unknown)
 	if err != nil {
 		t.Fatalf("search with unknown non-critical control: %v", err)
 	}
@@ -740,22 +625,27 @@ func TestProfile_UnknownNonCriticalControlIgnored(t *testing.T) {
 }
 
 // TestProfile_CriticalControlOnBindClearsAuth and
-// TestProfile_CriticalControlOnSearchPreservesAuth deliberately build their
-// critical control by hand (via bindRequestBytes/rawSearchRequestBytes'
-// own critical parameter, which routes through frame_test.go's canonical
-// buildControl/trueVal) rather than through go-ldap's own Control API:
-// github.com/go-ldap/ldap/v3's ControlString.Encode uses
-// github.com/go-asn1-ber/asn1-ber's NewBoolean, which encodes a TRUE
-// criticality as content byte 0x01 rather than DER-canonical 0xff. This
-// package's Controls scanner (frame.go's scanControls) deliberately uses
-// cryptobyte's strict 0x00/0xff-only BOOLEAN rule (see frame.go's own
-// comment on that choice), so a go-ldap-encoded critical control is
-// itself malformed input from this server's point of view and simply
-// closes the connection -- not the "recognized critical control" case
-// these two tests exist to exercise. A non-critical go-ldap control (see
-// TestProfile_UnknownNonCriticalControlIgnored above) never hits this at
-// all: ControlString.Encode only ever writes the Boolean child when
-// Criticality is true, so DEFAULT FALSE applies cleanly either way.
+// TestProfile_CriticalControlOnSearchPreservesAuth deliberately build
+// their critical control by hand (via bindRequestBytes/
+// rawSearchRequestBytes' own critical parameter, which routes through
+// frame_test.go's canonical buildControl/trueVal) rather than through
+// rawConn's own bindWithControls/searchWithControls.
+//
+// Historical rationale (kept because it explains why this distinction
+// matters at all, not because it still describes this suite's client):
+// when this suite's client was github.com/go-ldap/ldap/v3, that
+// library's ControlString.Encode used github.com/go-asn1-ber/asn1-ber's
+// NewBoolean, which encoded a TRUE criticality as content byte 0x01
+// rather than DER-canonical 0xff. This package's Controls scanner
+// (frame.go's scanControls) deliberately uses cryptobyte's strict
+// 0x00/0xff-only BOOLEAN rule (see frame.go's own comment on that
+// choice), so a go-ldap-encoded critical control was itself malformed
+// input from this server's point of view and would have simply closed
+// the connection -- not the "recognized critical control" case these two
+// tests exist to exercise. buildControl always emits DER-canonical
+// 0x00/0xff (see frame_test.go), so the hand-built path below remains
+// the correct -- and, with go-ldap gone, now the only -- way this suite
+// constructs a *recognized* critical control.
 func TestProfile_CriticalControlOnBindClearsAuth(t *testing.T) {
 	acct := newVerificationResult("alice", "https://idp.example/", "sub-alice", time.Now().Add(time.Hour).Unix())
 	v := newFakeVerifier().withSuccess("s3cr3t", acct)
@@ -848,10 +738,10 @@ func TestProfile_SupportedProfileLogLinesExact(t *testing.T) {
 	defer h.stopAndWait(t, 5*time.Second)
 
 	groupBase := newTestConfig().GroupBaseDN
-	conn := dialGoLDAP(t, h.addr)
+	conn := rawDial(t, h.addr)
 
 	bindFields := captureLog(t, zerolog.InfoLevel, func() {
-		requireSuccess(t, "bind", bindAs(conn, testAliceDN, "s3cr3t"))
+		requireSuccess(t, "bind", conn.simpleBind(testAliceDN, "s3cr3t"))
 	})
 	if bindFields["message"] != "ldap bind succeeded" {
 		t.Fatalf("bind log message = %v, want %q", bindFields["message"], "ldap bind succeeded")
@@ -870,7 +760,7 @@ func TestProfile_SupportedProfileLogLinesExact(t *testing.T) {
 	}
 
 	searchFields := captureLog(t, zerolog.InfoLevel, func() {
-		res, err := conn.Search(membershipSearch(groupBase, testAliceDN, []string{"cn"}))
+		res, err := conn.search(groupBase, testAliceDN, []string{"cn"})
 		if err != nil || len(res.Entries) != 1 {
 			t.Fatalf("search: res=%+v err=%v", res, err)
 		}
@@ -901,8 +791,8 @@ func TestProfile_BindTimeSnapshotIgnoresLaterResolverChange(t *testing.T) {
 	h := newRunningServer(t, v, r, nil)
 	defer h.stopAndWait(t, 5*time.Second)
 
-	conn := dialGoLDAP(t, h.addr)
-	requireSuccess(t, "bind", bindAs(conn, testAliceDN, "s3cr3t"))
+	conn := rawDial(t, h.addr)
+	requireSuccess(t, "bind", conn.simpleBind(testAliceDN, "s3cr3t"))
 
 	// Change the resolver's registered roles AFTER Bind: Search must
 	// never re-invoke RoleResolver.Roles (Bind-time role snapshots, no
@@ -912,7 +802,7 @@ func TestProfile_BindTimeSnapshotIgnoresLaterResolverChange(t *testing.T) {
 
 	groupBase := newTestConfig().GroupBaseDN
 	for i := 0; i < 5; i++ {
-		res, err := conn.Search(membershipSearch(groupBase, testAliceDN, []string{"cn"}))
+		res, err := conn.search(groupBase, testAliceDN, []string{"cn"})
 		if err != nil {
 			t.Fatalf("search #%d: %v", i, err)
 		}
@@ -1120,8 +1010,8 @@ func TestProfile_MalformedBERSurvival(t *testing.T) {
 	}
 	raw.Close()
 
-	conn := dialGoLDAP(t, h.addr)
-	requireSuccess(t, "bind after malformed input", bindAs(conn, testAliceDN, "s3cr3t"))
+	conn := rawDial(t, h.addr)
+	requireSuccess(t, "bind after malformed input", conn.simpleBind(testAliceDN, "s3cr3t"))
 }
 
 func TestProfile_DisconnectRemovesState(t *testing.T) {
@@ -1131,12 +1021,12 @@ func TestProfile_DisconnectRemovesState(t *testing.T) {
 	h := newRunningServer(t, v, r, nil)
 	defer h.stopAndWait(t, 5*time.Second)
 
-	conn := dialGoLDAP(t, h.addr)
-	requireSuccess(t, "bind", bindAs(conn, testAliceDN, "s3cr3t"))
+	conn := rawDial(t, h.addr)
+	requireSuccess(t, "bind", conn.simpleBind(testAliceDN, "s3cr3t"))
 	conn.Close()
 
-	fresh := dialGoLDAP(t, h.addr)
-	res, err := fresh.Search(membershipSearch(newTestConfig().GroupBaseDN, testAliceDN, []string{"cn"}))
+	fresh := rawDial(t, h.addr)
+	res, err := fresh.search(newTestConfig().GroupBaseDN, testAliceDN, []string{"cn"})
 	if err == nil && res != nil && len(res.Entries) > 0 {
 		t.Fatalf("fresh connection search succeeded without binding: %+v", res)
 	}
