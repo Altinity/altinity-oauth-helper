@@ -48,10 +48,13 @@ package securitytest
 //     site. "Carries" recurses through pointers, slices, arrays, structs,
 //     tuples, function signatures, and interface method sets; a named type
 //     is flagged when its own underlying type is a map/channel (so an
-//     http.Header-alike from any package is caught) and is otherwise
-//     opaque — an in-package named composite's components are flagged at
-//     their own declaration idents, and an external named type's internals
-//     are the other package's state, not this package's. The allowlist is
+//     http.Header-alike from any package is caught) or when it is a
+//     generic instantiation whose TypeArgs() themselves carry a matched
+//     type (so Box[map[int]int] is caught even though Box's own underlying
+//     type is a struct, not a map) and is otherwise opaque — an in-package
+//     named composite's components are flagged at their own declaration
+//     idents, and an external named type's internals are the other
+//     package's state, not this package's. The allowlist is
 //     exactly the three Server fields, direct references to them, and the
 //     initializer expressions assigned into them (composite-literal
 //     key/value or assignment whose LHS resolves to an allowed field).
@@ -667,6 +670,49 @@ func lookupInterface(t *testing.T, tp *typedPackage, name string) *types.Interfa
 	return iface
 }
 
+// methodSelectionSite is one types.Info.Selections entry matching the
+// target interface method: its rendered "file:line" position, and whether
+// it appears as a direct call expression (recv.Method(args), with the
+// selection itself as that call's Fun) rather than a stored method value
+// (verify := c.verifier.Verify) or a bare method-expression reference
+// (Verifier.Verify) — see methodSelectionSites' doc for why the distinction
+// matters.
+type methodSelectionSite struct {
+	pos        string
+	directCall bool
+}
+
+// sitePositions extracts the "file:line" positions from sites, in the
+// order methodSelectionSites already sorted them — the shape every
+// pre-existing count/prefix check below wants.
+func sitePositions(sites []methodSelectionSite) []string {
+	positions := make([]string, len(sites))
+	for i, s := range sites {
+		positions[i] = s.pos
+	}
+	return positions
+}
+
+// directlyCalledSelectors returns the set of *ast.SelectorExpr nodes,
+// across every file in tp, that are the Fun of an *ast.CallExpr — i.e.
+// `recv.Method(args)` forms where the method reference and the call are
+// the same syntactic spot, as opposed to a selector extracted into a value
+// first (`f := recv.Method`) and invoked, if ever, somewhere else entirely.
+func directlyCalledSelectors(tp *typedPackage) map[*ast.SelectorExpr]bool {
+	direct := map[*ast.SelectorExpr]bool{}
+	for _, f := range tp.files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if ce, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := ce.Fun.(*ast.SelectorExpr); ok {
+					direct[sel] = true
+				}
+			}
+			return true
+		})
+	}
+	return direct
+}
+
 // methodSelectionSites is the invariant-12/13 checker: every method
 // selection (types.Info.Selections — method calls, method values, and
 // method expressions alike, whatever the receiver expression) whose
@@ -674,15 +720,35 @@ func lookupInterface(t *testing.T, tp *typedPackage, name string) *types.Interfa
 // implements iface (or whose selected object IS iface's own method, which
 // also covers generic type-parameter receivers constrained by iface).
 // types.FieldVal selections are excluded by kind: a struct FIELD with the
-// same name is a data access, not a method reference. Returns sorted
-// file:line positions.
-func methodSelectionSites(tp *typedPackage, iface *types.Interface, methodName string) []string {
+// same name is a data access, not a method reference. Returns sites sorted
+// by position.
+//
+// Each site also records whether it is a direct call
+// (types.MethodVal, and the selector is the Fun of an immediately enclosing
+// CallExpr) as opposed to a stored method value or a method-expression
+// reference. This distinction exists because "referenced exactly once, in
+// bind.go" is meant to prove Verify/Roles is reachable from exactly one
+// place — but a method VALUE extracted in bind.go (`c.verify =
+// c.verifier.Verify`) records its selection at that extraction point, not
+// at wherever the stored closure is later invoked; a call from any other
+// file through that stored value (itself an ordinary types.FieldVal
+// selection on a func-typed field, invisible to this checker) would then
+// satisfy "exactly one selection, in bind.go" while the actual reachable
+// invocation sits entirely outside the tracked call graph. Requiring the
+// sole legitimate site to be a direct call closes that gap: the recorded
+// location and the invocation location are then, by construction, the same
+// place. Method-expression forms (Verifier.Verify) are never treated as
+// direct calls even when immediately invoked (Verifier.Verify(v, args)) —
+// they're rejected outright as the legitimate singleton, per the same
+// requirement.
+func methodSelectionSites(tp *typedPackage, iface *types.Interface, methodName string) []methodSelectionSite {
 	ifaceMethods := map[*types.Func]bool{}
 	for i := 0; i < iface.NumMethods(); i++ {
 		ifaceMethods[iface.Method(i)] = true
 	}
+	direct := directlyCalledSelectors(tp)
 
-	var sites []string
+	var sites []methodSelectionSite
 	for expr, sel := range tp.info.Selections {
 		if sel.Kind() == types.FieldVal {
 			continue
@@ -694,25 +760,48 @@ func methodSelectionSites(tp *typedPackage, iface *types.Interface, methodName s
 		recv := sel.Recv()
 		if ifaceMethods[fn] || ifaceMethods[fn.Origin()] ||
 			types.Implements(recv, iface) || types.Implements(types.NewPointer(recv), iface) {
-			sites = append(sites, tp.pos(expr.Pos()))
+			sites = append(sites, methodSelectionSite{
+				pos:        tp.pos(expr.Pos()),
+				directCall: sel.Kind() == types.MethodVal && direct[expr],
+			})
 		}
 	}
-	sort.Strings(sites)
+	sort.Slice(sites, func(i, j int) bool { return sites[i].pos < sites[j].pos })
 	return sites
+}
+
+// verifyOnlyOnceInBindErr runs the invariant-12/13 check for one
+// interface/method pair against tp and returns a descriptive error when it
+// fails, or nil when it holds. Factored out of
+// TestProfileArchitecture_VerifyAndRolesOnlyOnceInBind so the synthetic
+// bypass-regression test below (a stored method value invoked from an
+// unrelated file) can assert this check correctly REJECTS a scenario whose
+// naive site COUNT alone would not catch it.
+func verifyOnlyOnceInBindErr(t *testing.T, tp *typedPackage, ifaceName, methodName string) error {
+	t.Helper()
+	iface := lookupInterface(t, tp, ifaceName)
+	sites := methodSelectionSites(tp, iface, methodName)
+	if len(sites) != 1 {
+		return fmt.Errorf("expected exactly one %s.%s method selection, found %d: %s",
+			ifaceName, methodName, len(sites), strings.Join(sitePositions(sites), ", "))
+	}
+	site := sites[0]
+	if !strings.HasPrefix(site.pos, "bind.go:") {
+		return fmt.Errorf("%s.%s's one method selection must be inside bind.go, found: %s", ifaceName, methodName, site.pos)
+	}
+	if !site.directCall {
+		return fmt.Errorf("%s.%s's one method selection must be a direct call expression (recv.%s(args)), not a stored method value or method-expression reference — found at %s",
+			ifaceName, methodName, methodName, site.pos)
+	}
+	return nil
 }
 
 func TestProfileArchitecture_VerifyAndRolesOnlyOnceInBind(t *testing.T) {
 	tp := typecheckProfilePackage(t)
 
 	check := func(ifaceName, methodName string) {
-		iface := lookupInterface(t, tp, ifaceName)
-		sites := methodSelectionSites(tp, iface, methodName)
-		if len(sites) != 1 {
-			t.Fatalf("expected exactly one %s.%s method selection in %s, found %d: %s",
-				ifaceName, methodName, profileRelDir, len(sites), strings.Join(sites, ", "))
-		}
-		if !strings.HasPrefix(sites[0], "bind.go:") {
-			t.Fatalf("%s.%s's one method selection must be inside bind.go, found: %s", ifaceName, methodName, sites[0])
+		if err := verifyOnlyOnceInBindErr(t, tp, ifaceName, methodName); err != nil {
+			t.Fatalf("profile_types: %v (%s)", err, profileRelDir)
 		}
 	}
 
@@ -1223,7 +1312,7 @@ func syntheticVerifySites(t *testing.T, extraFiles map[string]string) []string {
 	}
 	tp := typecheckSynthetic(t, files)
 	iface := lookupInterface(t, tp, "Verifier")
-	return methodSelectionSites(tp, iface, "Verify")
+	return sitePositions(methodSelectionSites(tp, iface, "Verify"))
 }
 
 // requireLegitPlusSneak asserts the legit-only package has exactly one
@@ -1356,6 +1445,69 @@ func (o *other) sneak() error {
 `, "the method-expression site (f := Verifier.Verify)")
 }
 
+// TestProfileArchitecture_RejectsStoredVerifyMethodValueCalledElsewhere is
+// review pass 3's finding: methodSelectionSites (before this pass) treated
+// a stored method value the same as a direct call for COUNTING purposes.
+// That let a counterexample slip past invariant 12's bare "exactly one
+// selection, in bind.go" check: replace bind.go's direct call
+// (c.verifier.Verify(...)) with a method-value store into a func-typed
+// field (c.verify = c.verifier.Verify), then invoke that stored closure
+// from a wholly unrelated file (mirroring unsupported.go's
+// handleUnsupported) via o.c.verify("attacker") — itself an ordinary
+// types.FieldVal selection on the "verify" field, excluded by kind and so
+// invisible to this checker. That yields exactly one recorded selection,
+// positioned in bind.go, which used to satisfy the invariant outright —
+// while the actual reachable Verify invocation happens entirely outside
+// the tracked call graph, contradicting the "exclusive call site" claim.
+// This test proves both halves: the raw site count/position still comes
+// out as if nothing were wrong (count 1, in bind.go), AND the
+// directCall-aware verifyOnlyOnceInBindErr check now rejects it anyway.
+func TestProfileArchitecture_RejectsStoredVerifyMethodValueCalledElsewhere(t *testing.T) {
+	tp := typecheckSynthetic(t, map[string]string{
+		"bind.go": `package synthetic
+
+type Verifier interface {
+	Verify(x string) error
+}
+
+type connection struct {
+	verifier Verifier
+	verify   func(string) error
+}
+
+func (c *connection) handleBind() {
+	c.verify = c.verifier.Verify
+}
+`,
+		"unsupported.go": `package synthetic
+
+type other struct {
+	c *connection
+}
+
+func (o *other) handleUnsupported() error {
+	return o.c.verify("attacker")
+}
+`,
+	})
+
+	iface := lookupInterface(t, tp, "Verifier")
+	sites := methodSelectionSites(tp, iface, "Verify")
+	if len(sites) != 1 || !strings.HasPrefix(sites[0].pos, "bind.go:") {
+		t.Fatalf("expected the naive count/position check to still look clean (exactly one site, in bind.go) — "+
+			"that's the whole point of this counterexample — found %d: %v", len(sites), sitePositions(sites))
+	}
+	if sites[0].directCall {
+		t.Fatalf("expected the stored method value (c.verify = c.verifier.Verify) to be recorded as NOT a direct call, but directCall=true at %s", sites[0].pos)
+	}
+
+	if err := verifyOnlyOnceInBindErr(t, tp, "Verifier", "Verify"); err == nil {
+		t.Fatal("expected the invariant-12 check to reject a sole site that is a stored method value rather than a direct call, but it passed")
+	} else if !strings.Contains(err.Error(), "direct call") {
+		t.Fatalf("expected the rejection reason to name the direct-call requirement, got: %v", err)
+	}
+}
+
 // TestProfileArchitecture_TypeCheckerIgnoresUnrelatedRolesFieldAccess is
 // the negative control for invariants 12/13: struct FIELD accesses named
 // Roles — the package's own legitimate c.auth.Roles reads and
@@ -1394,8 +1546,11 @@ func assignField(newState *authState, roles []string) {
 `})
 	iface := lookupInterface(t, tp, "RoleResolver")
 	sites := methodSelectionSites(tp, iface, "Roles")
-	if len(sites) != 1 || !strings.HasPrefix(sites[0], "bind.go:") {
+	if len(sites) != 1 || !strings.HasPrefix(sites[0].pos, "bind.go:") {
 		t.Fatalf("expected exactly one Roles METHOD site (c.roles.Roles) and zero for the c.auth.Roles/newState.Roles field accesses, found %d: %v",
-			len(sites), sites)
+			len(sites), sitePositions(sites))
+	}
+	if !sites[0].directCall {
+		t.Fatalf("expected the c.roles.Roles call to be recorded as a direct call, found directCall=false at %s", sites[0].pos)
 	}
 }
