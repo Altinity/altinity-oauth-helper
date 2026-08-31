@@ -9,17 +9,32 @@ package securitytest
 // appears nowhere else that could either accidentally fall back the Docker
 // gates to legacy or accidentally cut production over early.
 //
-// Four assertions, each guarding a distinct invariant-map row:
+// Six assertions, each guarding a distinct invariant-map row:
 //
 //   - TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild:
 //     "integration helper always uses profile" — integration/clickhouse/
 //     Dockerfile contains EXACTLY ONE `./cmd/ch-oauth-ldap` `go build` line
 //     overall (tagged or not — see classifyDockerfileHelperBuildLines'
 //     doc comment for why the total count is checked separately from the
-//     tagged count), that one line contains -tags=phase3profile, and that
-//     line is the ONLY `go build` invocation in the file carrying the tag.
-//     TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild
-//     is this check's sabotage case, against synthetic content.
+//     tagged count), that one line contains -tags=phase3profile, that line
+//     is the ONLY `go build` invocation in the file carrying the tag, AND
+//     (the fix for review pass 1's P1 finding) it is the ONLY command in
+//     the whole Dockerfile that writes to the build stage's
+//     /out/ch-oauth-ldap artifact path — see dockerfileArtifactWriters'
+//     doc comment for why that is a distinct check from the `go build`-line
+//     classifier above it, not a redundant one.
+//     TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild,
+//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCompoundRunOverwrite,
+//     and
+//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesNonGoBuildOverwrite
+//     are this check's sabotage cases, against synthetic content.
+//   - TestPhase3SelectorContract_IntegrationDockerfileRuntimeCopyIsSole:
+//     the runtime-stage half of the same invariant — exactly one COPY
+//     instruction writes the final image's /bin/ch-oauth-ldap, and it
+//     sources that from /out/ch-oauth-ldap (the artifact the check above
+//     just proved has exactly one, tagged writer).
+//     TestPhase3SelectorContract_RuntimeCopyDetectionCatchesDuplicate is
+//     this check's sabotage case.
 //   - TestPhase3SelectorContract_ProductionDockerfileRemainsUntagged:
 //     "publication image remains legacy" — Dockerfile.ch-oauth-ldap never
 //     mentions phase3profile.
@@ -31,16 +46,18 @@ package securitytest
 //     automated push-to-main publication path.
 //
 // None of these run Docker, `docker build`, or any external process — they
-// are plain string/line assertions over the checked-in files, in the same
-// spirit as docs_contract_test.go's and pr_gate_contract_test.go's own
+// are plain string/instruction assertions over the checked-in files, in the
+// same spirit as docs_contract_test.go's and pr_gate_contract_test.go's own
 // workflow/Dockerfile text checks elsewhere in this package. The tagged
 // dependency-closure proof (profile present, legacy/general-LDAP absent
-// under -tags=phase3profile) and the tagged real-compile proof both live in
-// dependency_contract_test.go (TestDependencyContract_
-// Phase3ReplacementClosureHasNoGeneralLDAP and TestDependencyContract_
-// Phase3ReplacementCommandBuilds respectively) — this file only proves
-// where the tag textually does, and does not, appear across the
-// integration/publication surface.
+// under -tags=phase3profile) and the tagged real-compile/real-test proofs
+// both live in dependency_contract_test.go (TestDependencyContract_
+// Phase3ReplacementClosureHasNoGeneralLDAP,
+// TestDependencyContract_Phase3ReplacementCommandBuilds, and
+// TestDependencyContract_Phase3ReplacementCommandTests respectively) — this
+// file only proves where the tag textually does, and does not, appear
+// across the integration/publication surface, and that the artifact it
+// selects is the one that actually reaches the shipped image.
 
 import (
 	"os"
@@ -73,6 +90,15 @@ const phase3PublicationWorkflowRelPath = ".github/workflows/build-ch-oauth-ldap.
 // nowhere in any of the three untagged/publication-path files checked below.
 const phase3TaggedBuildMarker = "-tags=" + phase3ReplacementTag
 
+// phase3HelperArtifactPath is the build-stage output path
+// integration/clickhouse/Dockerfile's tagged `go build` writes
+// ch-oauth-ldap to. It must have exactly one writer in the whole Dockerfile.
+const phase3HelperArtifactPath = "/out/ch-oauth-ldap"
+
+// phase3HelperRuntimePath is the final runtime-stage path the build-stage
+// artifact above is COPYed to in the shipped image.
+const phase3HelperRuntimePath = "/bin/ch-oauth-ldap"
+
 // readRepoFile reads relPath relative to the module root, failing the test
 // on any error — shared by every check in this file.
 func readRepoFile(t *testing.T, relPath string) string {
@@ -99,96 +125,230 @@ func assertFileNeverMentionsPhase3Tag(t *testing.T, relPath string) {
 	}
 }
 
+// dockerfileInstructions parses raw Dockerfile content into its logical
+// instructions: blank and comment-only lines are dropped, backslash
+// line-continuations are joined into the one instruction they belong to,
+// and each instruction is returned as a single string beginning with its
+// keyword (RUN, COPY, FROM, ...). Every check in this file builds on this
+// shared parsing step so a compound instruction — this Dockerfile's actual
+// style is `&&`-chaining several shell commands on one physical RUN line —
+// is analyzed as the ONE instruction Docker itself executes it as, rather
+// than as an opaque substring match against a raw "\n"-split physical line.
+func dockerfileInstructions(content string) []string {
+	var instructions []string
+	var current strings.Builder
+	continuing := false
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimRight(raw, " \t\r")
+		if !continuing {
+			if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			current.Reset()
+		}
+		if strings.HasSuffix(line, "\\") {
+			current.WriteString(strings.TrimSuffix(line, "\\"))
+			current.WriteString(" ")
+			continuing = true
+			continue
+		}
+		current.WriteString(strings.TrimSpace(line))
+		instructions = append(instructions, current.String())
+		continuing = false
+	}
+	return instructions
+}
+
+// dockerfileRunShellCommands returns every RUN instruction's shell body,
+// split into its constituent sub-commands on &&, ||, ;, and | — the shell
+// operators that let one Dockerfile RUN instruction execute more than one
+// command. This is what lets the checks below see through a line like
+// `go build -tags=phase3profile -o /out/x ./cmd/x && go build -o /out/x
+// ./cmd/x` as the two separate commands Docker's shell actually runs in
+// sequence, rather than as one opaque line that happens to contain the
+// substrings being matched for (the exact bypass review pass 1's P1
+// finding described).
+func dockerfileRunShellCommands(instructions []string) []string {
+	replacer := strings.NewReplacer("&&", "\x00", "||", "\x00", ";", "\x00", "|", "\x00")
+	var commands []string
+	for _, instr := range instructions {
+		if !strings.HasPrefix(instr, "RUN ") {
+			continue
+		}
+		body := strings.TrimPrefix(instr, "RUN ")
+		for _, part := range strings.Split(replacer.Replace(body), "\x00") {
+			if part = strings.TrimSpace(part); part != "" {
+				commands = append(commands, part)
+			}
+		}
+	}
+	return commands
+}
+
 // TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild
 // requires integration/clickhouse/Dockerfile to contain EXACTLY ONE
-// `./cmd/ch-oauth-ldap` `go build` invocation overall, and requires that one
-// line to carry -tags=phase3profile, and requires that line to be the ONLY
-// `go build` invocation in the file carrying that tag (plan "Integration
-// selection contract": "the integration Dockerfile's ch-oauth-ldap build to
-// contain -tags=phase3profile; exactly that binary's build to receive the
-// tag"). synthetic-idp, ldap-session-probe, and ldap-wire-recorder must stay
-// untagged.
+// `./cmd/ch-oauth-ldap` `go build` command overall, and requires that one
+// command to carry -tags=phase3profile, and requires that command to be the
+// ONLY `go build` invocation in the file carrying that tag (plan
+// "Integration selection contract": "the integration Dockerfile's
+// ch-oauth-ldap build to contain -tags=phase3profile; exactly that binary's
+// build to receive the tag"). synthetic-idp, ldap-session-probe, and
+// ldap-wire-recorder must stay untagged.
 //
 // The total-count check on allHelperBuildLines is deliberate, not
 // redundant with the tagged-count check below: a bucketing scheme that only
 // classifies "helper AND tagged" versus "not-helper AND tagged" silently
 // drops a THIRD, unbucketed case — an untagged `./cmd/ch-oauth-ldap` build
-// line appended anywhere in the file. Docker executes RUN instructions in
-// file order and each writes to the same /out/ch-oauth-ldap path, so a
-// second, untagged helper build placed after the tagged one would silently
-// overwrite the profile binary with the legacy one before the final COPY —
-// while a bucketing scheme with no default case would stay green throughout,
-// since that line is neither "helper && tagged" nor "!helper && tagged".
-// Asserting len(allHelperBuildLines) == 1 up front closes that hole: it
-// forces every `./cmd/ch-oauth-ldap` build line, tagged or not, to be
-// counted, so a second build of any kind fails this test immediately.
+// command appearing anywhere in the file. Docker executes RUN instructions
+// (and, within one RUN, `&&`-chained commands) in order, and each writes to
+// the same /out/ch-oauth-ldap path, so a second, untagged helper build
+// placed anywhere after the tagged one — on its own line OR chained into
+// the same RUN — would silently overwrite the profile binary with the
+// legacy one before the final COPY, while a bucketing scheme with no
+// default case would stay green throughout, since that command is neither
+// "helper && tagged" nor "!helper && tagged". Asserting
+// len(allHelperBuildLines) == 1 up front closes that hole: it forces every
+// `./cmd/ch-oauth-ldap` build command, tagged or not, to be counted, so a
+// second build of any kind fails this test immediately.
+//
+// That said, the `go build`-line classifier is structurally blind to any
+// overwrite mechanism that is not itself a `go build` invocation — a
+// chained `go install`, `cp`, or `mv` targeting the same output path would
+// satisfy every bucket above with zero matches. The artifact-writer check
+// below closes that remaining gap by inspecting what actually writes to
+// /out/ch-oauth-ldap, independent of how.
 func TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild(t *testing.T) {
 	content := readRepoFile(t, phase3IntegrationDockerfileRelPath)
 	allHelperBuildLines, taggedHelperBuildLines, otherTaggedBuildLines := classifyDockerfileHelperBuildLines(content)
 
 	if len(allHelperBuildLines) != 1 {
-		t.Fatalf("phase3_selector_contract: expected exactly one `./cmd/ch-oauth-ldap` `go build` line in %s (tagged or not — a second, untagged build would silently overwrite the tagged binary), found %d: %v",
+		t.Fatalf("phase3_selector_contract: expected exactly one `./cmd/ch-oauth-ldap` `go build` command in %s (tagged or not — a second, untagged build would silently overwrite the tagged binary), found %d: %v",
 			phase3IntegrationDockerfileRelPath, len(allHelperBuildLines), allHelperBuildLines)
 	}
 	if len(taggedHelperBuildLines) != 1 {
-		t.Fatalf("phase3_selector_contract: expected the one ch-oauth-ldap `go build` line in %s to carry %s, found %d matching line(s): %v",
+		t.Fatalf("phase3_selector_contract: expected the one ch-oauth-ldap `go build` command in %s to carry %s, found %d matching command(s): %v",
 			phase3IntegrationDockerfileRelPath, phase3TaggedBuildMarker, len(taggedHelperBuildLines), taggedHelperBuildLines)
 	}
 	if len(otherTaggedBuildLines) != 0 {
-		t.Fatalf("phase3_selector_contract: %s must be the ONLY build in %s carrying %s, but it also appears on non-ch-oauth-ldap build line(s): %v",
+		t.Fatalf("phase3_selector_contract: %s must be the ONLY build in %s carrying %s, but it also appears on non-ch-oauth-ldap build command(s): %v",
 			phase3TaggedBuildMarker, phase3IntegrationDockerfileRelPath, phase3TaggedBuildMarker, otherTaggedBuildLines)
+	}
+
+	// Bound the actual artifact writer, not just `go build` occurrences
+	// (review pass 1 P1): exactly one command in the whole Dockerfile may
+	// write to /out/ch-oauth-ldap, by ANY mechanism — go build, go install,
+	// cp, mv, or a shell redirect — and that command must be the tagged go
+	// build proved above.
+	writers := dockerfileArtifactWriters(content, phase3HelperArtifactPath)
+	if len(writers) != 1 {
+		t.Fatalf("phase3_selector_contract: expected exactly one command writing to %s in %s (a second writer — another `go build`, a `go install`, `cp`, `mv`, or a shell redirect — would silently overwrite the tagged binary before the runtime-stage COPY), found %d: %v",
+			phase3HelperArtifactPath, phase3IntegrationDockerfileRelPath, len(writers), writers)
+	}
+	if sole := writers[0]; !strings.Contains(sole, "go build") || !strings.Contains(sole, phase3TaggedBuildMarker) {
+		t.Fatalf("phase3_selector_contract: the sole writer of %s in %s must be a `go build` invocation carrying %s, got: %q",
+			phase3HelperArtifactPath, phase3IntegrationDockerfileRelPath, phase3TaggedBuildMarker, sole)
 	}
 }
 
-// classifyDockerfileHelperBuildLines scans every `go build` line in a
-// Dockerfile's content and buckets it three ways: allHelperBuildLines is
-// EVERY `./cmd/ch-oauth-ldap` build line regardless of tag (the total-count
-// proof), taggedHelperBuildLines is the subset of those that also carry
-// -tags=phase3profile, and otherTaggedBuildLines is every tagged build line
-// for a DIFFERENT binary. Extracted from
+// classifyDockerfileHelperBuildLines scans every `go build` command in a
+// Dockerfile's content — after dockerfileRunShellCommands has split each RUN
+// instruction on its shell operators, so a `&&`-chained compound RUN line is
+// seen as its constituent commands rather than one opaque line — and buckets
+// each one three ways: allHelperBuildLines is EVERY `./cmd/ch-oauth-ldap`
+// build command regardless of tag (the total-count proof),
+// taggedHelperBuildLines is the subset of those that also carry
+// -tags=phase3profile, and otherTaggedBuildLines is every tagged build
+// command for a DIFFERENT binary. Extracted from
 // TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild so
 // TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild can
 // exercise it directly against synthetic content, without needing a second
 // checked-in Dockerfile fixture.
 func classifyDockerfileHelperBuildLines(content string) (allHelperBuildLines, taggedHelperBuildLines, otherTaggedBuildLines []string) {
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		// Skip comment lines: this Dockerfile's own prose explicitly quotes
-		// "`go build ./cmd/ch-oauth-ldap`" inside a `#`-comment explaining
-		// why the tag exists, which would otherwise false-positive-match
-		// both the "go build" and "./cmd/ch-oauth-ldap" substrings below and
-		// be miscounted as a second, untagged build line.
-		if strings.HasPrefix(trimmed, "#") {
+	for _, command := range dockerfileRunShellCommands(dockerfileInstructions(content)) {
+		if !strings.Contains(command, "go build") {
 			continue
 		}
-		if !strings.Contains(line, "go build") {
-			continue
-		}
-		tagged := strings.Contains(line, phase3TaggedBuildMarker)
-		isHelperBuild := strings.Contains(line, "./cmd/ch-oauth-ldap")
+		tagged := strings.Contains(command, phase3TaggedBuildMarker)
+		isHelperBuild := strings.Contains(command, "./cmd/ch-oauth-ldap")
 		if isHelperBuild {
-			allHelperBuildLines = append(allHelperBuildLines, line)
+			allHelperBuildLines = append(allHelperBuildLines, command)
 		}
 		switch {
 		case isHelperBuild && tagged:
-			taggedHelperBuildLines = append(taggedHelperBuildLines, line)
+			taggedHelperBuildLines = append(taggedHelperBuildLines, command)
 		case !isHelperBuild && tagged:
-			otherTaggedBuildLines = append(otherTaggedBuildLines, line)
+			otherTaggedBuildLines = append(otherTaggedBuildLines, command)
 		}
 	}
 	return allHelperBuildLines, taggedHelperBuildLines, otherTaggedBuildLines
+}
+
+// commandWritesTo reports whether a single shell command's output target is
+// outputPath: an `-o outputPath` flag (as used by both `go build` and `go
+// install -o`), a `>`/`>>` shell redirect to outputPath, or outputPath as
+// the command's own last positional argument (the destination shape of
+// `cp src dst`/`mv src dst`). It deliberately does not care what the
+// command otherwise is — that is exactly the point: it is the mechanism
+// dockerfileArtifactWriters uses to catch an overwrite performed by
+// something other than a recognizable `go build` invocation.
+func commandWritesTo(command, outputPath string) bool {
+	if strings.Contains(command, "-o "+outputPath) {
+		return true
+	}
+	if strings.Contains(command, ">"+outputPath) || strings.Contains(command, "> "+outputPath) {
+		return true
+	}
+	fields := strings.Fields(command)
+	return len(fields) > 0 && fields[len(fields)-1] == outputPath
+}
+
+// dockerfileArtifactWriters returns every RUN sub-command in content that
+// writes to outputPath, by any mechanism commandWritesTo recognizes. Unlike
+// classifyDockerfileHelperBuildLines, which only ever recognizes `go build`
+// commands, this function is blind to what kind of command it is — it
+// exists specifically to close the gap review pass 1's P1 finding
+// identified: a single Dockerfile RUN could perform the required tagged
+// `go build` and then silently overwrite the binary via a NON-`go build`
+// command (`go install`, `cp`, `mv`, a shell redirect) chained into the
+// same RUN, which every `go build`-line classifier — however carefully it
+// splits compound lines — can never see, because it never stops filtering
+// on the substring "go build" in the first place.
+func dockerfileArtifactWriters(content, outputPath string) []string {
+	var writers []string
+	for _, command := range dockerfileRunShellCommands(dockerfileInstructions(content)) {
+		if commandWritesTo(command, outputPath) {
+			writers = append(writers, command)
+		}
+	}
+	return writers
+}
+
+// dockerfileCopyInstructionsInto returns every COPY instruction in content
+// whose destination (its last field) is exactly destPath.
+func dockerfileCopyInstructionsInto(content, destPath string) []string {
+	var matches []string
+	for _, instr := range dockerfileInstructions(content) {
+		if !strings.HasPrefix(instr, "COPY ") {
+			continue
+		}
+		fields := strings.Fields(instr)
+		if len(fields) > 0 && fields[len(fields)-1] == destPath {
+			matches = append(matches, instr)
+		}
+	}
+	return matches
 }
 
 // TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild is
 // the sabotage case for the total-count check added above: it reproduces,
 // against synthetic Dockerfile content, the exact regression the prior
 // two-bucket classifier missed — a second, untagged `./cmd/ch-oauth-ldap`
-// build line appended after the tagged one (e.g. Docker overwriting
-// /out/ch-oauth-ldap with the legacy binary before the final COPY). Under
-// the old classifier (only "helper && tagged" vs "!helper && tagged"
-// buckets, no default case) that second line was silently dropped and both
-// buckets stayed exactly as they were with a single build — this test fails
-// if that regression is ever reintroduced.
+// build line appended after the tagged one, on its own separate RUN
+// instruction (e.g. Docker overwriting /out/ch-oauth-ldap with the legacy
+// binary before the final COPY). Under the old classifier (only "helper &&
+// tagged" vs "!helper && tagged" buckets, no default case) that second line
+// was silently dropped and both buckets stayed exactly as they were with a
+// single build — this test fails if that regression is ever reintroduced.
 func TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild(t *testing.T) {
 	const sabotaged = `RUN CGO_ENABLED=0 go build -tags=phase3profile -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap
 RUN CGO_ENABLED=0 go build -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap
@@ -210,6 +370,94 @@ RUN CGO_ENABLED=0 go build -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap
 	// both look clean on their own.
 	if len(all) == 1 {
 		t.Fatalf("classifyDockerfileHelperBuildLines: sabotage case must produce more than one helper build line, got exactly one — the sabotage failed to reproduce the regression")
+	}
+}
+
+// TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCompoundRunOverwrite
+// reproduces, against synthetic content, the exact bypass review pass 1's
+// P1 finding described: a single Dockerfile RUN instruction that performs
+// the required tagged `go build` and then, `&&`-chained on the SAME
+// physical line, silently overwrites /out/ch-oauth-ldap with a second,
+// untagged `go build`. Split on "\n" this is one line containing both "go
+// build" and the tag — exactly the shape the finding showed sails through a
+// line-based classifier. dockerfileArtifactWriters, built on
+// dockerfileRunShellCommands' `&&`-aware split, must see it as two separate
+// writers of the same path instead of one clean tagged build.
+func TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCompoundRunOverwrite(t *testing.T) {
+	const sabotaged = "RUN CGO_ENABLED=0 go build -tags=phase3profile -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap && CGO_ENABLED=0 go build -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap\n"
+	writers := dockerfileArtifactWriters(sabotaged, phase3HelperArtifactPath)
+	if len(writers) != 2 {
+		t.Fatalf("dockerfileArtifactWriters: expected the compound RUN's two writers of %s to both be detected, got %d: %v", phase3HelperArtifactPath, len(writers), writers)
+	}
+}
+
+// TestPhase3SelectorContract_ArtifactWriterDetectionCatchesNonGoBuildOverwrite
+// covers the review finding's other named bypass vector: a non-`go build`
+// overwrite (a bare `cp`, standing in for `go install` + copy, or `mv`)
+// chained after the tagged build in the same RUN instruction.
+// classifyDockerfileHelperBuildLines is structurally blind to this — it
+// only ever recognizes commands containing the substring "go build", by
+// design (see its doc comment) — so this is exactly the gap
+// dockerfileArtifactWriters exists to close, since commandWritesTo does not
+// filter on command shape at all, only on output target.
+func TestPhase3SelectorContract_ArtifactWriterDetectionCatchesNonGoBuildOverwrite(t *testing.T) {
+	const sabotaged = "RUN CGO_ENABLED=0 go build -tags=phase3profile -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap && cp /legacy/ch-oauth-ldap /out/ch-oauth-ldap\n"
+	writers := dockerfileArtifactWriters(sabotaged, phase3HelperArtifactPath)
+	if len(writers) != 2 {
+		t.Fatalf("dockerfileArtifactWriters: expected both the tagged go build and the trailing `cp` overwrite of %s to be detected, got %d: %v", phase3HelperArtifactPath, len(writers), writers)
+	}
+	sawGoBuild, sawCopy := false, false
+	for _, w := range writers {
+		switch {
+		case strings.Contains(w, "go build"):
+			sawGoBuild = true
+		case strings.HasPrefix(w, "cp "):
+			sawCopy = true
+		}
+	}
+	if !sawGoBuild || !sawCopy {
+		t.Fatalf("dockerfileArtifactWriters: expected one go-build writer and one cp writer, got: %v", writers)
+	}
+}
+
+// TestPhase3SelectorContract_IntegrationDockerfileRuntimeCopyIsSole requires
+// integration/clickhouse/Dockerfile's runtime stage to contain EXACTLY ONE
+// COPY instruction writing to /bin/ch-oauth-ldap, and requires that COPY to
+// source it from /out/ch-oauth-ldap — the same build-stage path
+// TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild
+// just proved has exactly one, tagged writer. Together the two tests bound
+// both halves of the pipeline review pass 1's P1 finding identified as
+// unbounded: what writes the tagged artifact, and what promotes it into
+// the shipped image. The artifact-writer check alone cannot prove this half
+// — it never inspects COPY instructions at all — and a Dockerfile could in
+// principle build the one correct tagged binary yet still ship the wrong
+// bits via a second COPY, or one sourcing a different build-stage path.
+func TestPhase3SelectorContract_IntegrationDockerfileRuntimeCopyIsSole(t *testing.T) {
+	content := readRepoFile(t, phase3IntegrationDockerfileRelPath)
+	copies := dockerfileCopyInstructionsInto(content, phase3HelperRuntimePath)
+	if len(copies) != 1 {
+		t.Fatalf("phase3_selector_contract: expected exactly one COPY instruction writing to %s in %s (a second COPY, or a later one from a different source, would silently ship the wrong binary), found %d: %v",
+			phase3HelperRuntimePath, phase3IntegrationDockerfileRelPath, len(copies), copies)
+	}
+	if sole := copies[0]; !strings.Contains(sole, phase3HelperArtifactPath) {
+		t.Fatalf("phase3_selector_contract: the sole COPY writing to %s in %s must source it from %s (the tagged build's own output), got: %q",
+			phase3HelperRuntimePath, phase3IntegrationDockerfileRelPath, phase3HelperArtifactPath, sole)
+	}
+}
+
+// TestPhase3SelectorContract_RuntimeCopyDetectionCatchesDuplicate reproduces
+// the runtime-stage half of the same bypass class: two COPY instructions
+// both targeting /bin/ch-oauth-ldap — the second sourcing, say, a stray
+// legacy artifact left in the build stage — would ship whichever COPY
+// Docker executes last, and Dockerfile COPY has no failure mode for
+// "destination already exists" that would otherwise catch this.
+// dockerfileCopyInstructionsInto must report both matches, not silently
+// stop at the first.
+func TestPhase3SelectorContract_RuntimeCopyDetectionCatchesDuplicate(t *testing.T) {
+	const sabotaged = "COPY --from=build /out/ch-oauth-ldap /bin/ch-oauth-ldap\nCOPY --from=build /out/ch-oauth-ldap-legacy /bin/ch-oauth-ldap\n"
+	copies := dockerfileCopyInstructionsInto(sabotaged, phase3HelperRuntimePath)
+	if len(copies) != 2 {
+		t.Fatalf("dockerfileCopyInstructionsInto: expected both duplicate COPY instructions into %s to be detected, got %d: %v", phase3HelperRuntimePath, len(copies), copies)
 	}
 }
 

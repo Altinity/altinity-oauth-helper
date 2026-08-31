@@ -231,7 +231,11 @@ must, in one coordinated change:
    *historical* snapshot at `internal/ldap/testdata/phase1-baseline/` stays
    untouched);
 6. delete `TestDependencyContract_Phase3ReplacementCommandBuilds` once
-   ordinary `go build ./...` itself compiles the replacement;
+   ordinary `go build ./...` itself compiles the replacement, and delete
+   `TestDependencyContract_Phase3ReplacementCommandTests` once ordinary
+   `go test ./...` itself runs the replacement's tests (both backstops exist
+   only because the Required PR gate's untagged `go build ./...`/`go test
+   -race ./...` steps don't add `-tags=phase3profile` on their own);
 7. make the `phase3profile`-tagged command tests
    (`config_phase3profile_test.go`, `main_phase3profile_test.go`) ordinary,
    untagged test files;

@@ -1012,7 +1012,9 @@ authority):
   cryptobyte-presence contract from absence to presence in the ordinary
   closure;
 - delete `TestDependencyContract_Phase3ReplacementCommandBuilds` once
-  ordinary `go build ./...` itself compiles the replacement;
+  ordinary `go build ./...` itself compiles the replacement, and delete
+  `TestDependencyContract_Phase3ReplacementCommandTests` once ordinary
+  `go test ./...` itself runs the replacement's tests;
 - delete the differential oracle (`internal/ldap/profile/differential_test.go`)
   and replace remaining independent goldap fixture decoding with the
   bounded test-only cursor (§11.4);
