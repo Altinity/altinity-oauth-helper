@@ -11,6 +11,7 @@ coverage.txt
 .idea/
 .vscode/
 *.swp
+.DS_Store
 
 # Local secrets (mirrors examples/superset-otel/superset-secrets.yaml.example)
 examples/*/superset-secrets.yaml
