@@ -412,6 +412,28 @@ own `GITHUB_TOKEN`. Trigger a one-off build with a custom tag prefix (default
 `ldap`, still emitted as `<prefix>-<short-sha>`) via **Actions → Run
 workflow**'s `tag_prefix` input.
 
+A moving **`:latest`** alias is also published, so you can pull the newest
+image without first looking up a SHA:
+
+```bash
+docker pull ghcr.io/altinity/ch-oauth-ldap:latest
+```
+
+`:latest` is a **pointer, never a build**. The workflow repoints it at the
+immutable `ldap-<short-sha>` manifest the same run just published, so it can
+only ever name a manifest that already passed the per-arch build guards and
+the tag-republication recheck. It moves only on a push to `main` with the
+default `ldap` prefix — a `workflow_dispatch` with a custom `tag_prefix` is
+an out-of-band build and deliberately leaves the alias alone.
+
+**Use `:latest` for trying the image, not for deploying it.** The immutable
+`ldap-<short-sha>` tag remains the artifact of record: it is what the
+republication guard protects, what the image is version-stamped with, and
+what a rollback can name. A Kubernetes rollout pinned to a moving alias is
+not reproducible and cannot be rolled back to a known build, so
+`helm/ch-oauth-ldap` still expects a pinned immutable tag in its values and
+its own gate still enforces that.
+
 **Manual / local:**
 
 ```bash
