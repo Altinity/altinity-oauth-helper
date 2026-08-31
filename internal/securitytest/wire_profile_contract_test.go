@@ -1128,17 +1128,26 @@ func TestWireProfileContract_JWTScannerDetectsBoundaryBearerToken(t *testing.T) 
 	if err != nil {
 		t.Fatalf("wire_profile_contract: locate module root: %v", err)
 	}
-	const redactionBoundaryTestRelPath = "internal/ldap/redaction_boundary_test.go"
-	value, err := wireProfileExtractStringConst(filepath.Join(root, filepath.FromSlash(redactionBoundaryTestRelPath)), "ldapBoundaryBearer")
+	// The issue #33 phase 4 cutover deleted internal/ldap/redaction_boundary_
+	// test.go (this test's original source of a real, committed, JWT-shaped
+	// fixture constant, ldapBoundaryBearer) along with the rest of the
+	// legacy internal/ldap implementation and its tests. Its permanent
+	// successor, internal/ldap/profile/redaction_boundary_test.go, proves
+	// the same redaction boundary but never needed its own "Bearer "-
+	// prefixed constant; internal/ldap/profile/fakes_test.go's
+	// markerJWTPassword is the still-real, still-committed, JWT-shaped
+	// (three dot-separated segments) fixture this test now reads instead —
+	// only the "Bearer " prefix below is test-local, added here because no
+	// remaining committed constant carries it verbatim.
+	const fakesTestRelPath = "internal/ldap/profile/fakes_test.go"
+	jwtShapedValue, err := wireProfileExtractStringConst(filepath.Join(root, filepath.FromSlash(fakesTestRelPath)), "markerJWTPassword")
 	if err != nil {
 		t.Fatalf("wire_profile_contract: %v", err)
 	}
 
 	const bearerPrefix = "Bearer "
-	if !strings.HasPrefix(value, bearerPrefix) {
-		t.Fatalf("wire_profile_contract: %s's ldapBoundaryBearer (%d bytes) no longer starts with %q — update this test's expectations alongside that fixture", redactionBoundaryTestRelPath, len(value), bearerPrefix)
-	}
-	wantToken := strings.TrimPrefix(value, bearerPrefix)
+	wantToken := jwtShapedValue
+	value := bearerPrefix + jwtShapedValue
 
 	candidates := wireProfileFindJWTShapedCandidates([]byte(value))
 	if len(candidates) != 1 {

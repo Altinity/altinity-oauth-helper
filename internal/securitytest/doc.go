@@ -20,8 +20,7 @@
 //     tooling gave them non-test sinks of their own; issue #33 phase 2
 //     added internal/ldap/profile once its Bind/Search/dispatch handlers
 //     gave the replacement wire package non-test log/diagnostic sinks of
-//     its own) — plus every vendored Logger.Print*/Printf/Println call in
-//     the local third_party/ldapserver fork, and cross-checks the result
+//     its own), and cross-checks the result
 //     against the checked-in manifest at testdata/redaction-sites.tsv. It
 //     fails on an unmapped (newly discovered, unregistered) sink, a stale
 //     manifest row no longer backed by real source, a duplicate
@@ -279,11 +278,6 @@ var scopeDirs = []string{
 	"internal/ldap/profile",
 }
 
-// vendoredScope is the separate third_party/ldapserver enumeration (plan
-// §5.1's "Separately enumerate all Logger.Print* sites in the local
-// third_party/ldapserver fork").
-const vendoredScope = "third_party/ldapserver"
-
 // externalScope tags manifest rows describing an externally-owned,
 // non-AST-discoverable sink (the pinned SDK) — see plan §4.3.
 const externalScope = "external-pinned"
@@ -299,7 +293,6 @@ const (
 	sinkErrorsJoin            = "errors-join"             // errors.Join
 	sinkLDAPDiagnostic        = "ldap-diagnostic"         // SetDiagnosticMessage
 	sinkHTTPError             = "http-error"              // http.Error
-	sinkVendoredLoggerPrint   = "vendored-logger-print"   // third_party/ldapserver Logger.Print*
 	sinkJSONEncodeResponse    = "json-encode-response"    // json.NewEncoder(w).Encode
 	sinkHTTPResponseWrite     = "http-response-write"     // http.ResponseWriter.Write (cmd/ch-jwt-verify only — see inspectCall)
 	sinkLDAPProfileDiagnostic = "ldap-profile-diagnostic" // internal/ldap/profile's addLDAPResultFields(...) — see inspectCall
@@ -343,35 +336,6 @@ func discoverSites(root string) ([]DiscoveredSite, error) {
 	return out, nil
 }
 
-// discoverVendoredLoggerSites separately enumerates every Logger.Print /
-// Logger.Printf / Logger.Println call in third_party/ldapserver's non-test
-// Go files (Logger.Panic*/Fatal* are deliberately excluded — see plan §5.1
-// and this sub-task's exact target line list, which likewise excludes
-// server.go's Logger.Panicln).
-func discoverVendoredLoggerSites(root string) ([]DiscoveredSite, error) {
-	dir := filepath.Join(root, filepath.FromSlash(vendoredScope))
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("securitytest: read vendored dir: %w", err)
-	}
-	var out []DiscoveredSite
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		relPath := vendoredScope + "/" + e.Name()
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, 0)
-		if err != nil {
-			return nil, fmt.Errorf("securitytest: parse %s: %w", relPath, err)
-		}
-		c := &siteCollector{scope: vendoredScope, path: relPath, vendoredLogger: true}
-		c.walkFile(file)
-		out = append(out, c.sites...)
-	}
-	return out, nil
-}
-
 func discoverFileSites(absPath, scope, relPath string) ([]DiscoveredSite, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, absPath, nil, 0)
@@ -409,9 +373,7 @@ func importAliases(file *ast.File) map[string]string {
 type siteCollector struct {
 	scope   string
 	path    string
-	aliases map[string]string // nil for vendoredLogger mode
-
-	vendoredLogger bool // true only for the third_party/ldapserver enumeration
+	aliases map[string]string
 
 	sites []DiscoveredSite
 }
@@ -476,11 +438,6 @@ func (v *funcVisitor) Visit(n ast.Node) ast.Visitor {
 }
 
 func (c *siteCollector) inspectCall(call *ast.CallExpr, funcName string) {
-	if c.vendoredLogger {
-		c.inspectVendoredLoggerCall(call, funcName)
-		return
-	}
-
 	// internal/ldap/profile writes its diagnosticMessage field through a
 	// direct package-level function call, addLDAPResultFields(builder,
 	// resultCode, diagConstant) — not a method/selector call, so it can
@@ -573,21 +530,6 @@ func (c *siteCollector) inspectCall(call *ast.CallExpr, funcName string) {
 			msgArg = call.Args[1:2]
 		}
 		c.record(funcName, sinkHTTPError, normalizeArgs(msgArg), "http.Error")
-	}
-}
-
-func (c *siteCollector) inspectVendoredLoggerCall(call *ast.CallExpr, funcName string) {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return
-	}
-	recvName, isIdent := receiverIdentName(sel.X)
-	if !isIdent || recvName != "Logger" {
-		return
-	}
-	switch sel.Sel.Name {
-	case "Print", "Printf", "Println":
-		c.record(funcName, sinkVendoredLoggerPrint, normalizeArgs(call.Args), "Logger."+sel.Sel.Name)
 	}
 }
 

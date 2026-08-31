@@ -1,5 +1,3 @@
-//go:build phase3profile
-
 package main
 
 import (
@@ -18,23 +16,20 @@ import (
 	"github.com/altinity/altinity-oauth-helper/internal/verification"
 )
 
-// This file is main_test.go's phase3profile analog. main_test.go's own
+// This file adds LDAP-backend-specific proof beyond main_test.go's own
 // TestRunComposesRealVerifierPipelineAndLDAPServer /
-// TestRunFailsFastOnInvalidConfig are already backend-neutral (they never
-// name a backend type), so they run unchanged under -tags=phase3profile —
-// that is the whole point of the "one shared run()" design (see main.go's
-// package doc comment). What only a tagged test can add is proof that the
-// backend run() actually composed IS the replacement, not merely that
-// something implementing ldapServer served and stopped cleanly.
+// TestRunFailsFastOnInvalidConfig, which are already backend-neutral (they
+// never name a concrete backend type). What only this file adds is proof
+// that the backend run() actually composes IS internal/ldap/profile.Server —
+// the only production LDAP implementation this command ships.
 
-// TestNewLDAPServerSelectsProfileBackend proves newLDAPServer, under
-// -tags=phase3profile, constructs a real internal/ldap/profile.Server (via
-// a type assertion on the concrete type the ldapServer interface hides) —
-// wired to the REAL verification.Verifier and roles.Pipeline, not test
-// fakes — and that the command still owns creating the net.Listener:
-// newLDAPServer/profile.New never call net.Listen themselves, so this test
-// creates its own listener exactly as run() does before ever calling
-// Serve.
+// TestNewLDAPServerSelectsProfileBackend proves newLDAPServer constructs a
+// real internal/ldap/profile.Server (via a type assertion on the concrete
+// type the ldapServer interface hides) — wired to the REAL
+// verification.Verifier and roles.Pipeline, not test fakes — and that the
+// command still owns creating the net.Listener: newLDAPServer/profile.New
+// never call net.Listen themselves, so this test creates its own listener
+// exactly as run() does before ever calling Serve.
 func TestNewLDAPServerSelectsProfileBackend(t *testing.T) {
 	t.Parallel()
 
@@ -48,7 +43,7 @@ func TestNewLDAPServerSelectsProfileBackend(t *testing.T) {
 	require.NoError(t, err)
 
 	_, ok := srv.(*profile.Server)
-	require.True(t, ok, "newLDAPServer must select internal/ldap/profile.Server under -tags=phase3profile, got %T", srv)
+	require.True(t, ok, "newLDAPServer must select internal/ldap/profile.Server, got %T", srv)
 
 	// The command, not newLDAPServer/profile.New, owns net.Listen — prove
 	// it by creating the listener here ourselves and confirming Serve
@@ -75,15 +70,12 @@ func TestNewLDAPServerSelectsProfileBackend(t *testing.T) {
 	}
 }
 
-// TestRunComposesRealProfileBackend is the phase3profile-tagged real run()
-// composition test the plan calls for: it exercises exactly the same
-// process lifecycle as main_test.go's
-// TestRunComposesRealVerifierPipelineAndLDAPServer (real config load, real
-// verifier/role pipeline, command-owned listener, clean shutdown on context
-// cancellation), but under -tags=phase3profile so the backend run()
-// actually drives is internal/ldap/profile's replacement — never the
-// legacy internal/ldap server, since ldap_backend_legacy.go is not part of
-// this build at all.
+// TestRunComposesRealProfileBackend is main_test.go's
+// TestRunComposesRealVerifierPipelineAndLDAPServer with an added type
+// assertion: it exercises exactly the same process lifecycle (real config
+// load, real verifier/role pipeline, command-owned listener, clean shutdown
+// on context cancellation), and additionally confirms the backend run()
+// actually drives is internal/ldap/profile's server.
 func TestRunComposesRealProfileBackend(t *testing.T) {
 	t.Parallel()
 
@@ -137,7 +129,7 @@ ldap:
 
 	select {
 	case err := <-done:
-		require.NoError(t, err, "run() must shut down cleanly on context cancellation with the profile backend selected")
+		require.NoError(t, err, "run() must shut down cleanly on context cancellation with the profile backend")
 	case <-time.After(5 * time.Second):
 		t.Fatal("run() did not shut down within timeout after context cancellation")
 	}

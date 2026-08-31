@@ -8,23 +8,18 @@
 // roles derived once at Bind time.
 //
 // This is phase 2 of issue #19: a standalone protocol-correct LDAP server.
-// Real ClickHouse 24.8 configuration/interoperability is phase 3 and is not
-// claimed here. See the phase-2 plan for the full design and rationale.
+// Real ClickHouse interoperability was certified in phases 3 and 4; see
+// docs/clickhouse-ldap-wire-profile.md for the wire-compatibility evidence.
 //
-// # Temporary phase3profile backend seam (issue #33 phase 3)
+// # LDAP backend (issue #33 phase 4 production cutover)
 //
-// This command imports neither LDAP backend directly. Instead it declares
-// the minimal ldapServer interface below and calls the build-selected
-// newLDAPServer(...): the ordinary (untagged) build compiles
-// ldap_backend_legacy.go, which imports internal/ldap and is what
-// production actually ships; a build with -tags=phase3profile compiles
-// ldap_backend_phase3profile.go instead, which imports only
-// internal/ldap/profile — issue #33's compatibility-profile replacement
-// under certification. Exactly one of those two files is ever part of a
-// given build; there is no YAML option, CLI flag, environment variable, or
-// other runtime selector. This is temporary Phase 3 certification
-// scaffolding: Phase 4 deletes the selector and the legacy adapter, making
-// the profile backend the only, ordinary production code.
+// This command does not import internal/ldap/profile directly from this
+// file. Instead it declares the minimal ldapServer interface (see
+// ldap_backend.go) and calls newLDAPServer(...), which ldap_backend.go
+// implements against internal/ldap/profile.Server — the only production LDAP
+// implementation this command ships. There is no build tag, no YAML option,
+// CLI flag, environment variable, or other runtime selector: every ordinary
+// build and every ordinary test constructs the same backend.
 package main
 
 import (
@@ -43,16 +38,6 @@ import (
 	"github.com/altinity/altinity-oauth-helper/internal/roles"
 	"github.com/altinity/altinity-oauth-helper/internal/verification"
 )
-
-// ldapServer is the minimal backend surface run() depends on: whichever
-// concrete LDAP server type the active build tag selects (internal/ldap's
-// legacy *Server by default, internal/ldap/profile's *Server under
-// -tags=phase3profile) must implement it. Neither backend's package is
-// imported from this file.
-type ldapServer interface {
-	Serve(net.Listener) error
-	Stop()
-}
 
 var version = "dev"
 
@@ -97,8 +82,8 @@ func main() {
 //     plan);
 //  4. construct the concrete verification.Verifier;
 //  5. construct the concrete roles.Pipeline;
-//  6. construct the build-selected LDAP backend (newLDAPServer, see
-//     ldapServer above) with the signal context;
+//  6. construct the LDAP backend (newLDAPServer, see ldapServer in
+//     ldap_backend.go) with the signal context;
 //  7. start the verifier's cache reaper from the same root signal context;
 //  8. net.Listen on the configured LDAP address;
 //  9. Serve in a goroutine, reporting its error through a buffered
@@ -118,10 +103,10 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	// The signal-aware context must exist before the LDAP server is
-	// constructed: it is threaded into the build-selected backend's New
-	// (newLDAPServer, see ldapServer above) as the root lifecycle context
-	// every per-connection handler derives its per-request context from,
-	// and it also governs the verifier's background cache reaper below.
+	// constructed: it is threaded into the backend's New (newLDAPServer, see
+	// ldap_backend.go) as the root lifecycle context every per-connection
+	// handler derives its per-request context from, and it also governs the
+	// verifier's background cache reaper below.
 	signalCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -161,20 +146,10 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		log.Info().Msg("ch-oauth-ldap shutting down")
 
 		// Close OUR OWN reference to the listener directly, instead of
-		// calling srv.Stop() first. This ordering is preserved unchanged
-		// across both LDAP backends the phase3profile build tag selects
-		// (see ldapServer above):
-		//
-		//   - the ordinary (legacy internal/ldap) backend's vendored
-		//     vjeantet/ldapserver dependency stores the listener in a
-		//     plain, unsynchronized struct field (Server.Listener): Serve
-		//     writes it (background goroutine, above) and Stop reads it
-		//     with no lock between them — calling Stop() concurrently
-		//     with the still-running Serve goroutine is a genuine data
-		//     race in that dependency itself (confirmed with -race);
-		//   - the internal/ldap/profile replacement backend's Stop is
-		//     already safe to call concurrently with Serve, so this same
-		//     ordering costs it nothing.
+		// calling srv.Stop() first. internal/ldap/profile.Server's Stop is
+		// safe to call concurrently with Serve, so this ordering costs it
+		// nothing — it is kept anyway for the happens-before argument
+		// below, which does not depend on that safety.
 		//
 		// Closing our own listener reference unblocks the background
 		// goroutine's blocked Accept() call, which returns an error that

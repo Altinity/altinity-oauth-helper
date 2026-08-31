@@ -453,25 +453,18 @@ func TestDocsContract_ForbiddenPhrasesAbsent(t *testing.T) {
 	}
 }
 
-// TestDocsContract_ServerGoCapCommentDoesNotClaimOneMebibyte fails if
-// internal/ldap/server.go ever again describes the current LDAP message
-// body cap as 1 MiB (plan §21.13/§21.14's capacity-wording-stays-current
-// guard) — the real, current cap is 64 KiB
-// (third_party/ldapserver/packet.go's maxMessageBodyLength); 1 MiB was only
-// ever the FIRST fix's value, before later hardening reduced it.
-func TestDocsContract_ServerGoCapCommentDoesNotClaimOneMebibyte(t *testing.T) {
-	root, err := moduleRoot()
-	if err != nil {
-		t.Fatalf("securitytest: locate module root: %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(root, "internal", "ldap", "server.go"))
-	if err != nil {
-		t.Fatalf("securitytest: read internal/ldap/server.go: %v", err)
-	}
-	if strings.Contains(string(data), "1 MiB") {
-		t.Fatalf("internal/ldap/server.go mentions \"1 MiB\" — the current LDAP message body cap is 64 KiB; restore/update the comment rather than reintroducing the stale figure")
-	}
-}
+// TestDocsContract_ServerGoCapCommentDoesNotClaimOneMebibyte formerly
+// guarded internal/ldap/server.go (the legacy LDAP server's own comment
+// about its message body cap) against reverting to a stale "1 MiB" figure
+// after a fix reduced the real cap to 64 KiB. The issue #33 phase 4 cutover
+// deleted internal/ldap/server.go along with the rest of the legacy
+// implementation, so there is no longer a file this guard could protect —
+// the permanent successor, internal/ldap/profile, was never described with
+// the stale "1 MiB" figure in the first place, and its own body-cap
+// invariant (64 KiB) is covered by its own frame/adversarial/fuzz tests, not
+// a docs-contract wording guard. This test is deliberately not replaced with
+// an internal/ldap/profile analog: there is no stale-comment history to
+// protect against there.
 
 // TestDocsContract_ReleaseGateWordingStaysGeneric fails if
 // release_gate_test.go's blocked_external release-gate doc comment or

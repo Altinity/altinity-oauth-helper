@@ -1,5 +1,3 @@
-//go:build phase3profile
-
 package main
 
 import (
@@ -8,20 +6,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file is config_legacy_test.go's phase3profile analog: assertions
-// that either name internal/ldap/profile.Config directly or depend on the
-// replacement backend's own validateLDAPBackendConfig error wrapping (see
-// ldap_backend_phase3profile.go), plus the narrowing pairs proving the
-// replacement's restricted DN/attribute grammar actually rejects forms the
-// legacy backend accepts (config_legacy_test.go's "Accepts...Legacy..."
-// tests are this file's other half of each pair).
+// This file holds assertions that name internal/ldap/profile.Config
+// directly or depend on the LDAP backend's own validateLDAPBackendConfig
+// error wrapping (see ldap_backend.go), plus the deliberate DN/attribute
+// grammar narrowing rows the phase-3 plan accepted (values the legacy
+// internal/ldap backend used to accept but the profile's restricted grammar
+// rejects).
 
 // TestToProfileConfigExactMapping asserts the plan's ldap.* ->
-// internal/ldap/profile.Config mapping. Unlike TestToLDAPConfigExactMapping
-// (config_legacy_test.go), there is no Listen field to assert on: this
-// package deliberately never maps cfg.LDAP.Listen into profile.Config (see
-// internal/ldap/profile/doc.go and ldap_backend_phase3profile.go) —
-// ldap.listen stays command-owned regardless of which backend is selected.
+// internal/ldap/profile.Config mapping. There is no Listen field to assert
+// on: this package deliberately never maps cfg.LDAP.Listen into
+// profile.Config (see internal/ldap/profile/doc.go and ldap_backend.go) —
+// ldap.listen stays command-owned.
 func TestToProfileConfigExactMapping(t *testing.T) {
 	t.Parallel()
 	cfg := validConfig()
@@ -43,11 +39,10 @@ func TestToProfileConfigExactMapping(t *testing.T) {
 
 // TestOperatorGuideYAML_LDAPBackendMapping is
 // TestOperatorGuideYAML_LoadsThroughProductionLoadConfig's (config_test.go)
-// phase3profile-backend addendum: it loads the same operator-guide.yaml
-// through the exact production LoadConfig entry point and asserts the
-// replacement toProfileConfig mapping. There is no Listen assertion here —
-// profile.Config has no Listen field (see config_legacy_test.go's analog
-// for the legacy side, which does assert Listen).
+// LDAP-backend addendum: it loads the same operator-guide.yaml through the
+// exact production LoadConfig entry point and asserts the toProfileConfig
+// mapping. There is no Listen assertion here — profile.Config has no Listen
+// field.
 func TestOperatorGuideYAML_LDAPBackendMapping(t *testing.T) {
 	t.Parallel()
 
@@ -61,13 +56,10 @@ func TestOperatorGuideYAML_LDAPBackendMapping(t *testing.T) {
 	require.Equal(t, "clickhouse_", pc.RoleCNPrefix)
 }
 
-// TestValidateConfigRejectsUnparseableUserBaseDN pins the replacement
-// backend's own validateLDAPBackendConfig wrapping around
-// profile.ValidateConfig's fixed, non-credential sentinel error (see
-// ldap_backend_phase3profile.go and internal/ldap/profile/config.go's
-// errUserBaseDNInvalid) — note the exact wording differs from the legacy
-// backend's ("user base DN" vs. "user_base_dn"), which is why this
-// assertion cannot live in the shared, untagged config_test.go.
+// TestValidateConfigRejectsUnparseableUserBaseDN pins the LDAP backend's own
+// validateLDAPBackendConfig wrapping around profile.ValidateConfig's fixed,
+// non-credential sentinel error (see ldap_backend.go and
+// internal/ldap/profile/config.go's errUserBaseDNInvalid).
 func TestValidateConfigRejectsUnparseableUserBaseDN(t *testing.T) {
 	t.Parallel()
 	cfg := validConfig()
@@ -87,13 +79,10 @@ func TestValidateConfigRejectsUnparseableGroupBaseDN(t *testing.T) {
 }
 
 // TestValidateConfigRejectsMultiValuedRDNGroupBase proves the command's own
-// validateConfig, under -tags=phase3profile, actually enforces
-// internal/ldap/profile's restricted DN grammar rather than merely calling
-// into it vacuously: a base DN using an unescaped '+' (multi-valued RDN) —
-// which config_legacy_test.go's
-// TestValidateConfigAcceptsLegacyPermissiveMultiValuedRDNBase proves the
-// legacy backend accepts — is rejected here (narrowing row 5, phase-3
-// plan).
+// validateConfig actually enforces internal/ldap/profile's restricted DN
+// grammar rather than merely calling into it vacuously: a base DN using an
+// unescaped '+' (multi-valued RDN) — a value the deleted legacy internal/ldap
+// backend used to accept — is rejected here (narrowing row 5, phase-3 plan).
 func TestValidateConfigRejectsMultiValuedRDNGroupBase(t *testing.T) {
 	t.Parallel()
 	cfg := validConfig()
@@ -104,13 +93,11 @@ func TestValidateConfigRejectsMultiValuedRDNGroupBase(t *testing.T) {
 }
 
 // TestValidateConfigRejectsNonDescriptorUserRDNAttribute proves the
-// command's own validateConfig, under -tags=phase3profile, enforces
-// internal/ldap/profile's UserRDNAttribute descriptor-grammar check
-// (ValidAttributeDescriptor: ^[A-Za-z][A-Za-z0-9-]*$) — a leading-digit
-// value config_legacy_test.go's
-// TestValidateConfigAcceptsLegacyPermissiveUserRDNAttribute proves the
-// legacy backend accepts is rejected here (narrowing row 10, phase-3
-// plan).
+// command's own validateConfig enforces internal/ldap/profile's
+// UserRDNAttribute descriptor-grammar check (ValidAttributeDescriptor:
+// ^[A-Za-z][A-Za-z0-9-]*$) — a leading-digit value the deleted legacy
+// internal/ldap backend used to accept is rejected here (narrowing row 10,
+// phase-3 plan).
 func TestValidateConfigRejectsNonDescriptorUserRDNAttribute(t *testing.T) {
 	t.Parallel()
 	cfg := validConfig()
