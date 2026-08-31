@@ -1069,3 +1069,168 @@ authority):
   release gates on the untagged production path.
 
 <!-- phase3-release-gate-evidence:end -->
+
+<!-- phase4-release-gate-evidence:start -->
+### 11.6 Phase 4 production-cutover release-gate evidence
+
+This section is the populated evidence record for Phase 4's production
+cutover — replacing the legacy `internal/ldap` server with the ordinary,
+untagged `internal/ldap/profile`-backed production composition — manually
+certified against `tested_behavior_head` below and machine-checked for
+completeness, absence of placeholders, internal consistency, and (unlike
+§11.5) live equality with the current certified-surface source tree by
+`internal/securitytest/phase4_evidence_contract_test.go`. Those checks
+prove this section's shape, self-consistency, and that the recorded
+certified-surface digest still matches the tree they run against — never
+that the Docker/fuzz commands below were actually run. Only the coordinator
+can attest that; see the human-attested list this document's plan carries.
+
+**Certification identity**
+
+- **tested_behavior_head:** `3c12ab752ba6e00516ea28a7bf24e7085290baac`
+- **Selector/composition:** ordinary, untagged production — `cmd/ch-oauth-ldap`
+  builds without any build tag and its `newLDAPServer` constructs
+  `internal/ldap/profile.Server` unconditionally; there is no
+  `phase3profile` tag, no legacy `internal/ldap` server, no YAML/CLI/
+  environment parser selector, and no fallback adapter anywhere in the
+  production, test, or integration build paths.
+- **Integration Dockerfile:** `integration/clickhouse/Dockerfile` builds
+  `./cmd/ch-oauth-ldap` untagged (no `-tags=phase3profile`), copies no
+  `third_party` tree, and installs the resulting binary at
+  `/out/ch-oauth-ldap` / `/bin/ch-oauth-ldap`, exactly as
+  `internal/securitytest/ch_oauth_ldap_build_contract_test.go` requires.
+- **Phase 3 selector absence:** confirmed absent from
+  `integration/clickhouse/Dockerfile`, `Dockerfile.ch-oauth-ldap`,
+  `scripts/build-ch-oauth-ldap-image.sh`,
+  `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
+  constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
+- **Certified-surface digest (SHA-256):** `e5265b85999bdbcdfda04989bc7623a5f5093386a3a6ba56a6bbc38a4da8210d`
+  — computed at `tested_behavior_head` over the same "Certified-surface
+  anti-drift digest" file set §11.5 used (`certifiedSurfacePatterns`,
+  unchanged, `third_party/**` kept even though the directory is now empty),
+  reproduced 3× identically over 89 tracked files.
+
+**Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+
+Both runs completed scenarios A–I including phase-5 scenario G' (Search-limit
+overflow); the two recorded ClickHouse upstream-bug expected failures
+(#78791/not-backported-to-24.8, and #116840's VIEW `external_roles` drop)
+reproduced exactly as expected against the untagged production build — no
+expectation-table edit was needed or made.
+
+**HA** (`integration/clickhouse/run-ha.sh`, run once per tracked image via
+`PHASE3_CH_IMAGE`, existing HAProxy + two-replica harness, existing
+persistent same-socket session probe — no new probe created)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+
+- **Session-probe result:** `PASS` on both images — both replicas
+  authenticate; no shared LDAP session store is required; authenticated
+  state is socket/connection-local; killing the replica owning a
+  connection kills that session rather than migrating it (confirmed on
+  both runs: the A-bound probe failed within the bound and helper B's Bind
+  count was unchanged by killing A); fresh authentication proceeds through
+  the survivor; the recreated replica rejoins and independently serves a
+  fresh Bind. As §"HA applicability" documents, this proves none of
+  Kubernetes routing, EndpointSlice/CNI convergence, pod-eviction
+  semantics, or a failover SLA.
+
+**Wire-capture verification**
+
+- **Command:** `bash integration/clickhouse/capture-ldap-wire.sh --mode verify --fixtures internal/ldap/testdata/clickhouse-wire`
+- **generation: frozen** — zero fixtures were regenerated or promoted;
+  `--mode verify` only.
+- **Result:** `PASS` for both tracked lines (`24.8`, `25.8`); every
+  committed session compared byte-for-byte equal against the untagged
+  production build; zero fixture drift; no new request shape observed.
+- **Search-before-Abandon:** confirmed for both tracked lines' recorded
+  timeout-abandon session (`wirecapture: diagnostic — Search precedes
+  Abandon as expected`).
+
+**Fuzz smoke** (`go test ./internal/ldap/profile -run '^$' -fuzz=<Target> -fuzztime=20s`, one target at a time)
+
+| Fuzz target | Duration | Result |
+| ------------------------ | -------- | ------ |
+| `FuzzLDAPFrame` | `20s` | `PASS` |
+| `FuzzBindRequest` | `20s` | `PASS` |
+| `FuzzSearchRequest` | `20s` | `PASS` |
+| `FuzzRestrictedDN` | `20s` | `PASS` |
+| `FuzzMemberAssertionDN` | `20s` | `PASS` |
+
+No crasher was found for any of the five targets.
+
+**LOC guardrail**
+
+- **Phase 3 profile-only historical LOC:** `2702` (pinned to §11.5's
+  `tested_behavior_head`; not recomputed against today's tree)
+- **Phase 4 profile-only LOC:** `2693` — `internal/ldap/profile/*.go`
+  non-test files at `tested_behavior_head`, using the identical
+  profile-only counting rule (`phase3FreshProfileLOC`, reused unmodified
+  for this component per the plan's "Final LOC accounting")
+- **Profile-only delta:** `-9`
+- **cmd/ch-oauth-ldap/ldap_backend.go LDAP-wiring LOC:** `64`
+- **Final Phase 4 production LDAP LOC:** `2757` (`2693 + 64`) — 743 lines
+  below ADR #32's ~3,500 architecture-review trigger; no architecture-review
+  stop condition was reached.
+
+**§11.3 narrowing dispositions** (unchanged from §11.5; Phase 4 revisited
+none of them)
+
+| ID | Disposition |
+| -- | ------------ |
+| 1  | `ACCEPT` |
+| 1a | `ACCEPT` |
+| 2  | `ACCEPT` |
+| 3  | `ACCEPT` |
+| 4  | `ACCEPT` |
+| 5  | `ACCEPT` |
+| 6  | `ACCEPT` |
+| 7  | `ACCEPT` |
+| 8  | `ACCEPT` |
+| 9  | `ACCEPT` |
+| 10 | `ACCEPT` |
+
+**Dependency closure and module graph**
+
+- **Production dependency closure:** `PASS` — `TestDependencyContract_ProductionClosureHasNoGeneralLDAP`
+  (unconditional; the `legacyUntilPhase4`/`replacement` staging mechanism no
+  longer exists), `TestDependencyContract_ProfileIsProductionImplementation`,
+  and `TestDependencyContract_NoNonStandardCryptobyte` (now requiring
+  cryptobyte's presence) all pass against the ordinary `./cmd/ch-oauth-ldap`
+  closure.
+- **Root test/module graph:** `PASS` — `TestModuleDenylistContract_RootTestGraphHasNoGeneralLDAP`
+  (deterministic `go list -deps -test` over `./...`) and
+  `TestModuleDenylistContract_RootModuleMetadataHasNoGeneralLDAP`
+  (`go mod edit -json`) both confirm none of the five denylisted module
+  paths appears anywhere in the root test-inclusive dependency graph or in
+  `go.mod`'s `Require`/`Replace`.
+
+**Redaction / release gate**
+
+- **`phase5release` vet:** `PASS`
+- **`phase5release` test:** `PASS`
+
+**TLS applicability:** N/A — issue #31 is a separate open unit and is out of scope for #33 Phase 4
+
+**Rollback:** no dual parser is retained. Rollback is a source-level revert
+of the complete Phase 4 migration, or redeploying the immediately previous
+known-good `ghcr.io/altinity/ch-oauth-ldap:ldap-<short-sha>` image; a source
+revert must restore the command adapter pair, the legacy `internal/ldap`
+package, the module requirements, and the vendored forks coherently, never
+partially.
+
+**Coordinator attestation:** Boris Tyshkevich (`@BorisTyshkevich`) certifies
+that every command and script named in this section was run to completion
+against `tested_behavior_head`, that `git status --porcelain` was unchanged
+by verification, and that `docker ps -a` showed no suite leftovers after
+verification.
+
+<!-- phase4-release-gate-evidence:end -->
