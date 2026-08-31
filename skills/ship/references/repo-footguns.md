@@ -70,7 +70,7 @@ exercising the relevant recipe under `examples/`:
   `build-ch-jwt-verify.yml` (path-filtered to
   `cmd/ch-jwt-verify/**`/`go.mod`/`go.sum`/`Dockerfile`) and
   `build-ch-oauth-ldap.yml` (path-filtered to `cmd/ch-oauth-ldap/**`/`internal/**`/
-  `third_party/**`/`go.mod`/`go.sum`/`Dockerfile.ch-oauth-ldap`) only build+publish an
+  `go.mod`/`go.sum`/`Dockerfile.ch-oauth-ldap`) only build+publish an
   image on push to `main` (plus manual `workflow_dispatch`). They verify nothing
   and are never a substitute for `Required PR gate` — a green publish is not a
   green gate, and a *skipped* publish (path filters) is not a failure. The

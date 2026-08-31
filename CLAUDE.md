@@ -79,7 +79,7 @@ fork that logic — extend the SDK instead when the need is generic (not
   workflows — `.github/workflows/build-ch-jwt-verify.yml` (path-filtered to
   `cmd/ch-jwt-verify/**`, `go.mod`/`go.sum`, `Dockerfile`) and
   `.github/workflows/build-ch-oauth-ldap.yml` (path-filtered to
-  `cmd/ch-oauth-ldap/**`, `internal/**`, `third_party/**`, `go.mod`/`go.sum`,
+  `cmd/ch-oauth-ldap/**`, `internal/**`, `go.mod`/`go.sum`,
   `Dockerfile.ch-oauth-ldap`) — those two only build+push an image on push to
   `main` (plus manual `workflow_dispatch`) and are **not** verification gates;
   do not treat a green publish as a substitute for `Required PR gate`. Because

@@ -60,7 +60,6 @@ on:
     paths:
       - "cmd/ch-oauth-ldap/**"
       - "internal/**"
-      - "third_party/**"
       - "go.mod"
       - "go.sum"
       - "Dockerfile.ch-oauth-ldap"
