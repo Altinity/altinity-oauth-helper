@@ -19,21 +19,37 @@ package securitytest
 //     tagged count), that one line contains -tags=phase3profile, that line
 //     is the ONLY `go build` invocation in the file carrying the tag, AND
 //     (the fix for review pass 1's P1 finding, tightened further by review
-//     pass 3's P1 finding) it is the ONLY command in the whole Dockerfile
-//     that writes to the build stage's /out/ch-oauth-ldap artifact path, AND
-//     that sole writer is exactly phase3ExpectedHelperBuildCommand — not
-//     merely a command containing "go build" and the tag substring — see
-//     dockerfileArtifactWriters' and commandWritesTo's doc comments for why
-//     that is a distinct check from the `go build`-line classifier above it,
-//     not a redundant one, and for how commandWritesTo now also recognizes
-//     a `GOBIN=<dir> go install <pkg>` overwrite, which has no `-o` flag and
-//     so is invisible to every other write-detection shape.
+//     pass 3's P1 finding, and again by the architecture consultation that
+//     added the COPY/ADD check) it is the ONLY instruction in the whole
+//     Dockerfile — across both RUN shell sub-commands (commandWritesTo) and
+//     COPY/ADD instructions (copyOrAddWritesTo) — that writes to the build
+//     stage's /out/ch-oauth-ldap artifact path, AND that sole writer is
+//     exactly phase3ExpectedHelperBuildCommand — not merely a command
+//     containing "go build" and the tag substring — see
+//     dockerfileArtifactWriters', commandWritesTo's, and
+//     copyOrAddWritesTo's doc comments for why that is a distinct check from
+//     the `go build`-line classifier above it, not a redundant one; for how
+//     commandWritesTo also recognizes a `GOBIN=<dir> go install <pkg>`
+//     overwrite, which has no `-o` flag and so is invisible to every other
+//     RUN-based write-detection shape; and for how copyOrAddWritesTo closes
+//     the remaining gap of a first-class COPY/ADD instruction (not a RUN
+//     shell command at all) overwriting the artifact by destination alone.
+//     This is still a textual, non-path-resolving check, not a Dockerfile
+//     semantics interpreter: it recognizes a COPY/ADD destination of exactly
+//     /out/ch-oauth-ldap or exactly the bare directory /out/, but does not
+//     resolve any other directory-destination form (e.g. a multi-level
+//     subdirectory, a `--chown`-only rewrite, or a later RUN `mv`/symlink
+//     retargeting the file after the COPY lands) — see copyOrAddWritesTo's
+//     doc comment for the exact boundary.
 //     TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild,
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCompoundRunOverwrite,
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesNonGoBuildOverwrite,
+//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesGoInstallOverwrite,
 //     and
-//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesGoInstallOverwrite
-//     are this check's sabotage cases, against synthetic content.
+//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCopyOverwrite
+//     are this check's sabotage cases, against synthetic content;
+//     TestPhase3SelectorContract_RealDockerfileHasNoCopyOrAddArtifactWriters
+//     is its negative control against the real, checked-in Dockerfile.
 //   - TestPhase3SelectorContract_IntegrationDockerfileRuntimeCopyIsSole:
 //     the runtime-stage half of the same invariant — exactly one COPY
 //     instruction writes the final image's /bin/ch-oauth-ldap, and (review
@@ -379,25 +395,68 @@ func goInstallWritesTo(command, outputPath string) bool {
 	return path.Base(pkg) == base
 }
 
-// dockerfileArtifactWriters returns every RUN sub-command in content that
-// writes to outputPath, by any mechanism commandWritesTo recognizes. Unlike
+// dockerfileArtifactWriters returns every instruction in content that writes
+// to outputPath: every RUN sub-command commandWritesTo recognizes, plus
+// every COPY/ADD instruction copyOrAddWritesTo recognizes. Unlike
 // classifyDockerfileHelperBuildLines, which only ever recognizes `go build`
-// commands, this function is blind to what kind of command it is — it
-// exists specifically to close the gap review pass 1's P1 finding
+// commands, this function is blind to what kind of command or instruction it
+// is — it exists specifically to close the gap review pass 1's P1 finding
 // identified: a single Dockerfile RUN could perform the required tagged
 // `go build` and then silently overwrite the binary via a NON-`go build`
 // command (`go install`, `cp`, `mv`, a shell redirect) chained into the
 // same RUN, which every `go build`-line classifier — however carefully it
 // splits compound lines — can never see, because it never stops filtering
-// on the substring "go build" in the first place.
+// on the substring "go build" in the first place. The COPY/ADD half closes a
+// further gap an architecture consultation found: commandWritesTo only ever
+// looks at RUN shell sub-commands, so a first-class `COPY --from=<stage>
+// <src> /out/ch-oauth-ldap` (or an `ADD` with that destination) — an
+// instruction with its own destination syntax, not a shell command at all —
+// was invisible to every check here even though it would just as
+// effectively replace the intermediate artifact before the final runtime
+// COPY.
 func dockerfileArtifactWriters(content, outputPath string) []string {
+	instructions := dockerfileInstructions(content)
 	var writers []string
-	for _, command := range dockerfileRunShellCommands(dockerfileInstructions(content)) {
+	for _, command := range dockerfileRunShellCommands(instructions) {
 		if commandWritesTo(command, outputPath) {
 			writers = append(writers, command)
 		}
 	}
+	for _, instr := range instructions {
+		if copyOrAddWritesTo(instr, outputPath) {
+			writers = append(writers, instr)
+		}
+	}
 	return writers
+}
+
+// copyOrAddWritesTo reports whether a single COPY or ADD Dockerfile
+// instruction writes to outputPath. Its destination is the instruction's
+// last whitespace-separated field (COPY/ADD's own syntax always puts the
+// destination last, after any `--from=`/`--chown=` flags and every source
+// argument), and this recognizes exactly two destination shapes: outputPath
+// itself, or outputPath's parent directory written in trailing-slash
+// directory-destination form (e.g. `COPY --from=legacy /legacy/ch-oauth-ldap
+// /out/`). The second shape is deliberately coarse, not a path resolver: it
+// flags ANY COPY/ADD landing directly in outputPath's parent directory,
+// regardless of what the source is actually named, rather than computing the
+// resulting filename from the source's basename (which real Dockerfile COPY
+// semantics would require, and which the surgical fix this function exists
+// for explicitly does not attempt to build). A COPY/ADD into any deeper
+// subdirectory, or one whose effect on outputPath depends on a later RUN
+// `mv`/symlink, is out of scope — see this file's header comment for that
+// boundary stated in full.
+func copyOrAddWritesTo(instr, outputPath string) bool {
+	if !strings.HasPrefix(instr, "COPY ") && !strings.HasPrefix(instr, "ADD ") {
+		return false
+	}
+	fields := strings.Fields(instr)
+	if len(fields) < 3 {
+		// keyword + at least one source + one destination.
+		return false
+	}
+	dest := fields[len(fields)-1]
+	return dest == outputPath || dest == path.Dir(outputPath)+"/"
 }
 
 // dockerfileCopyInstructionsInto returns every COPY instruction in content
@@ -552,6 +611,85 @@ func TestCommandWritesTo_GoInstallGOBIN(t *testing.T) {
 				t.Fatalf("commandWritesTo(%q, %q) = %v, want %v", tc.command, phase3HelperArtifactPath, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCopyOverwrite
+// reproduces the architecture consultation's counterexample exactly: a
+// first-class Dockerfile `COPY --from=legacy /legacy/ch-oauth-ldap
+// /out/ch-oauth-ldap` (an `ADD` with the same destination is equivalent)
+// placed after the canonical tagged `go build`, replacing the intermediate
+// artifact. Before copyOrAddWritesTo existed, dockerfileArtifactWriters only
+// ever scanned RUN instructions' shell sub-commands, so this COPY was
+// invisible to it — every assertion in
+// TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild
+// stayed green, INCLUDING the final runtime-stage COPY tuple check, because
+// that check only ever looks at the COPY writing /bin/ch-oauth-ldap, never
+// at what else wrote /out/ch-oauth-ldap first. Because both the tagged
+// build's `go build` writer and the sabotage COPY writer land in the same
+// writers slice, this collapses into the existing `len(writers) != 1` guard
+// rather than needing a new assertion shape.
+func TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCopyOverwrite(t *testing.T) {
+	const sabotaged = "RUN CGO_ENABLED=0 go build -tags=phase3profile -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap\n" +
+		"COPY --from=legacy /legacy/ch-oauth-ldap /out/ch-oauth-ldap\n"
+	writers := dockerfileArtifactWriters(sabotaged, phase3HelperArtifactPath)
+	if len(writers) != 2 {
+		t.Fatalf("dockerfileArtifactWriters: expected both the tagged go build and the trailing COPY overwrite of %s to be detected, got %d: %v", phase3HelperArtifactPath, len(writers), writers)
+	}
+	sawGoBuild, sawCopy := false, false
+	for _, w := range writers {
+		switch {
+		case strings.Contains(w, "go build"):
+			sawGoBuild = true
+		case strings.HasPrefix(w, "COPY "):
+			sawCopy = true
+		}
+	}
+	if !sawGoBuild || !sawCopy {
+		t.Fatalf("dockerfileArtifactWriters: expected one go-build writer and one COPY writer, got: %v", writers)
+	}
+}
+
+// TestCopyOrAddWritesTo unit-tests copyOrAddWritesTo's destination matching
+// directly, including the ADD form, the trailing-slash directory-destination
+// form, and the negative cases that prove it does not over-match a COPY/ADD
+// that does not target /out/ch-oauth-ldap at all.
+func TestCopyOrAddWritesTo(t *testing.T) {
+	cases := []struct {
+		name  string
+		instr string
+		want  bool
+	}{
+		{"COPY exact destination match", "COPY --from=legacy /legacy/ch-oauth-ldap /out/ch-oauth-ldap", true},
+		{"ADD exact destination match", "ADD --from=legacy /legacy/ch-oauth-ldap /out/ch-oauth-ldap", true},
+		{"COPY trailing-slash directory destination match", "COPY --from=legacy /legacy/ch-oauth-ldap /out/", true},
+		{"the real runtime COPY (different destination) does not match", phase3ExpectedRuntimeCopyInstruction, false},
+		{"COPY into an unrelated directory does not match", "COPY --from=legacy /legacy/ch-oauth-ldap /elsewhere/ch-oauth-ldap", false},
+		{"COPY into a deeper subdirectory of /out does not match (out of scope by design)", "COPY --from=legacy /legacy/ch-oauth-ldap /out/nested/ch-oauth-ldap", false},
+		{"a RUN instruction is not a COPY/ADD at all", phase3ExpectedHelperBuildCommand, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := copyOrAddWritesTo(tc.instr, phase3HelperArtifactPath); got != tc.want {
+				t.Fatalf("copyOrAddWritesTo(%q, %q) = %v, want %v", tc.instr, phase3HelperArtifactPath, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPhase3SelectorContract_RealDockerfileHasNoCopyOrAddArtifactWriters is
+// the negative control for the fix above: it proves the real, checked-in
+// integration/clickhouse/Dockerfile genuinely contains zero COPY/ADD
+// instructions writing to /out/ch-oauth-ldap, rather than merely happening
+// to pass the count/equality assertions in
+// TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild for
+// some other reason.
+func TestPhase3SelectorContract_RealDockerfileHasNoCopyOrAddArtifactWriters(t *testing.T) {
+	content := readRepoFile(t, phase3IntegrationDockerfileRelPath)
+	for _, instr := range dockerfileInstructions(content) {
+		if copyOrAddWritesTo(instr, phase3HelperArtifactPath) {
+			t.Fatalf("phase3_selector_contract: unexpected COPY/ADD writer of %s in the real Dockerfile: %q", phase3HelperArtifactPath, instr)
+		}
 	}
 }
 
