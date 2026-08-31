@@ -1693,9 +1693,53 @@ _ia_workflow_assertions() {
     assert_match "$workflow" 'amd64'
     assert_match "$workflow" 'arm64'
 
-    # Immutable tag only -- no mutable main/latest alias (plan section 21).
+    # Immutable tag for the BUILD; `:latest` allowed only as a pointer
+    # (plan section 21, amended when the `:latest` alias was added).
+    #
+    # Plan section 21's rule was "no mutable alias at all", enforced as a
+    # blanket ban on the `:latest` string anywhere in the workflow. That is
+    # now too coarse: `:latest` exists, but only as an alias repointed at an
+    # immutable `<prefix>-<sha>` manifest that this same run already
+    # published under the full per-arch and republication guards. What
+    # section 21 actually protects -- that a tag can never be silently moved
+    # to a manifest nobody built under those guards -- is unchanged, because
+    # nothing is ever BUILT for `:latest`.
+    #
+    # So the assertions below check that specific shape instead of banning
+    # the string:
+    #   * `:main` stays banned outright -- there is no such alias;
+    #   * the alias is created with `imagetools create` from the immutable
+    #     tag, never from the per-arch sub-tags and never from a build;
+    #   * no `docker build`/`buildx build` line may mention `:latest`;
+    #   * the alias step is gated to a push with the default prefix.
     assert_not_match "$workflow" ':main'
-    assert_not_match "$workflow" ':latest'
+
+    # The alias is a pointer built from the immutable tag, not from a build
+    # or from raw per-arch sub-tags.
+    assert_match "$workflow" 'imagetools create -t "${FULL}:latest" "${FULL}:${TAG}"'
+
+    # No BUILD step may produce `:latest` directly. The build path is
+    # docker/build-push-action's `tags:` input (line ~203) plus any literal
+    # `docker build` / `docker buildx build` invocation; `imagetools
+    # create`/`inspect` are explicitly not builds, which is the whole point
+    # of the alias design. Matching on a bare "build" substring would catch
+    # `buildx imagetools` and `needs.build.outputs`, so the patterns below
+    # are anchored to real build invocations.
+    #
+    # $workflow is a PATH (assert_match takes a file), so this greps the
+    # file rather than a variable.
+    if grep -nE '^[[:space:]]*(tags|uses):.*:latest|docker (buildx )?build[[:space:]].*:latest' "$workflow" >/dev/null; then
+        fail "workflow: a build/tag input mentions ':latest' -- the alias must only ever be created by 'imagetools create' from an already-published immutable tag, never built"
+    else
+        pass "workflow: no build/tag input mentions ':latest'"
+    fi
+
+    # The per-arch build must still push only an immutable sub-tag.
+    assert_match "$workflow" 'tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.tag }}-${{ matrix.arch }}'
+
+    # The alias only moves for a default-prefix push, never for an
+    # out-of-band workflow_dispatch with a custom tag_prefix.
+    assert_match "$workflow" "github.event_name == 'push' && needs.build.outputs.tag_prefix == 'ldap'"
 
     # Per-arch $RUNNER_TEMP/runner.temp context; Docker context never
     # checkout root; go build -o points into runner temp (plan section 25).
