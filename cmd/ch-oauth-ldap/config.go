@@ -11,7 +11,6 @@ import (
 	"github.com/altinity/go-mcp-oauth-sdk/oauth"
 
 	"github.com/altinity/altinity-oauth-helper/internal/identity"
-	"github.com/altinity/altinity-oauth-helper/internal/ldap"
 	"github.com/altinity/altinity-oauth-helper/internal/roles"
 	"github.com/altinity/altinity-oauth-helper/internal/verification"
 )
@@ -78,7 +77,9 @@ type RolesConfig struct {
 }
 
 // LDAPConfig mirrors the issue's `ldap:` block exactly, and converts into
-// internal/ldap.Config.
+// the build-selected LDAP backend's own Config type (internal/ldap.Config
+// by default, internal/ldap/profile.Config under -tags=phase3profile) — see
+// ldap_backend_legacy.go / ldap_backend_phase3profile.go.
 type LDAPConfig struct {
 	Listen           string `yaml:"listen"`
 	UserBaseDN       string `yaml:"user_base_dn"`
@@ -132,10 +133,13 @@ func defaultConfig() *Config {
 // command-level checks the shared packages deliberately don't own (the
 // issuer/jwks_url either-or rule internal/verification.New does not
 // enforce, and every ldap.* required-value check) with real construction
-// calls into verification.New, roles.New and internal/ldap's DN parsers so
-// an invalid identity config, an invalid roles_filter/roles_transform, or
-// an unparseable configured base DN is caught here rather than surfacing
-// only later during command composition.
+// calls into verification.New, roles.New and the build-selected LDAP
+// backend's own DN/config validation (validateLDAPBackendConfig — see
+// ldap_backend_legacy.go / ldap_backend_phase3profile.go) so an invalid
+// identity config, an invalid roles_filter/roles_transform, or an
+// unparseable configured base DN is caught here rather than surfacing only
+// later during command composition. This function itself imports neither
+// LDAP backend.
 func validateConfig(cfg *Config) error {
 	if strings.TrimSpace(cfg.OAuth.ExpectedIssuer) == "" && strings.TrimSpace(cfg.OAuth.JWKSURL) == "" {
 		return fmt.Errorf("oauth: either issuer or jwks_url must be set")
@@ -169,13 +173,13 @@ func validateConfig(cfg *Config) error {
 		return err
 	}
 
-	// Catches an unparseable configured user/group base DN the same way
-	// internal/ldap.New itself would at command-composition time.
-	if _, err := ldap.NewUserBaseDN(cfg.LDAP.UserBaseDN, cfg.LDAP.UserRDNAttribute); err != nil {
-		return fmt.Errorf("ldap: invalid user_base_dn: %w", err)
-	}
-	if _, err := ldap.NewGroupBaseDN(cfg.LDAP.GroupBaseDN); err != nil {
-		return fmt.Errorf("ldap: invalid group_base_dn: %w", err)
+	// Catches an unparseable configured user/group base DN (and, under
+	// -tags=phase3profile, the replacement profile's additional
+	// UserRDNAttribute descriptor-grammar check) the same way the
+	// build-selected LDAP backend's own constructor would at
+	// command-composition time.
+	if err := validateLDAPBackendConfig(cfg); err != nil {
+		return err
 	}
 
 	return nil
@@ -218,17 +222,5 @@ func (cfg *Config) toRolesConfig() roles.Config {
 		Mapping:     cfg.Roles.RolesMapping,
 		Filter:      cfg.Roles.RolesFilter,
 		Transform:   cfg.Roles.RolesTransform,
-	}
-}
-
-// toLDAPConfig builds the internal/ldap.Config the LDAP server is
-// constructed from.
-func (cfg *Config) toLDAPConfig() ldap.Config {
-	return ldap.Config{
-		Listen:           cfg.LDAP.Listen,
-		UserBaseDN:       cfg.LDAP.UserBaseDN,
-		GroupBaseDN:      cfg.LDAP.GroupBaseDN,
-		UserRDNAttribute: cfg.LDAP.UserRDNAttribute,
-		RoleCNPrefix:     cfg.LDAP.RoleCNPrefix,
 	}
 }

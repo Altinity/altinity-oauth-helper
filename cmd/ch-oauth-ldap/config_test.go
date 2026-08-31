@@ -137,22 +137,13 @@ func TestValidateConfigRejectsInvalidRolesTransform(t *testing.T) {
 }
 
 // --- LDAP base-DN parsing checks ---
-
-func TestValidateConfigRejectsUnparseableUserBaseDN(t *testing.T) {
-	t.Parallel()
-	cfg := validConfig()
-	cfg.LDAP.UserBaseDN = "not-a-dn"
-	err := validateConfig(cfg)
-	require.ErrorContains(t, err, "user_base_dn")
-}
-
-func TestValidateConfigRejectsUnparseableGroupBaseDN(t *testing.T) {
-	t.Parallel()
-	cfg := validConfig()
-	cfg.LDAP.GroupBaseDN = "not-a-dn"
-	err := validateConfig(cfg)
-	require.ErrorContains(t, err, "group_base_dn")
-}
+//
+// "not-a-dn" cannot parse under EITHER backend's DN grammar, but the exact
+// wrapped error text a rejected base DN produces is backend-specific (see
+// ldap_backend_legacy.go / ldap_backend_phase3profile.go's
+// validateLDAPBackendConfig) — those message-text assertions live in
+// config_legacy_test.go (!phase3profile) and config_phase3profile_test.go
+// (phase3profile) instead of here.
 
 // --- required LDAP scalar checks ---
 
@@ -278,27 +269,11 @@ func TestToRolesConfigExactMapping(t *testing.T) {
 	require.Equal(t, "s/^ch_//", rc.Transform)
 }
 
-// TestToLDAPConfigExactMapping asserts the plan's ldap.* -> internal/ldap.Config
-// mapping.
-func TestToLDAPConfigExactMapping(t *testing.T) {
-	t.Parallel()
-	cfg := validConfig()
-	cfg.LDAP = LDAPConfig{
-		Listen:           ":1389",
-		UserBaseDN:       "ou=users,dc=altinity,dc=internal",
-		GroupBaseDN:      "ou=groups,dc=altinity,dc=internal",
-		UserRDNAttribute: "uid",
-		RoleCNPrefix:     "clickhouse_",
-	}
-
-	lc := cfg.toLDAPConfig()
-
-	require.Equal(t, ":1389", lc.Listen)
-	require.Equal(t, "ou=users,dc=altinity,dc=internal", lc.UserBaseDN)
-	require.Equal(t, "ou=groups,dc=altinity,dc=internal", lc.GroupBaseDN)
-	require.Equal(t, "uid", lc.UserRDNAttribute)
-	require.Equal(t, "clickhouse_", lc.RoleCNPrefix)
-}
+// TestToLDAPConfigExactMapping (the legacy internal/ldap.Config mapping)
+// and its phase3profile analog (internal/ldap/profile.Config) live in
+// config_legacy_test.go / config_phase3profile_test.go respectively — the
+// method name is the same (toLDAPConfig / toProfileConfig), but the return
+// type is backend-specific, so a single untagged test can't reference both.
 
 // TestLoadConfigParsesIssueVocabularyYAML loads the issue's exact example
 // configuration (see "Configuration design" in the phase-2 plan) from a
@@ -439,8 +414,13 @@ func TestOperatorGuideYAML_LoadsThroughProductionLoadConfig(t *testing.T) {
 	// verification.New/roles.New/ldap DN-parser construction (and returned
 	// no error above), but assert the exact converted values too, so a
 	// future accidental field-mapping regression in toVerificationConfig/
-	// toRolesConfig/toLDAPConfig is caught by this same file rather than
-	// only by the narrower field-by-field mapping tests above.
+	// toRolesConfig is caught by this same file rather than only by the
+	// narrower field-by-field mapping tests above. The build-selected LDAP
+	// backend's own conversion (toLDAPConfig / toProfileConfig) is asserted
+	// against this same file's Config in
+	// TestOperatorGuideYAML_LDAPBackendMapping in config_legacy_test.go /
+	// config_phase3profile_test.go instead, since its return type differs
+	// by build.
 	vc := cfg.toVerificationConfig()
 	require.Equal(t, "https://tenant.example.auth0.com/", vc.ExpectedIssuer)
 	require.Equal(t, "https://tenant.example.auth0.com/.well-known/jwks.json", vc.JWKSURL)
@@ -462,10 +442,6 @@ func TestOperatorGuideYAML_LoadsThroughProductionLoadConfig(t *testing.T) {
 	require.Equal(t, "roles", rc.GroupsClaim)
 	require.Equal(t, "^ch_[A-Za-z0-9_]+$", rc.Filter)
 	require.Equal(t, "s/^ch_//", rc.Transform)
-
-	lc := cfg.toLDAPConfig()
-	require.Equal(t, ":389", lc.Listen)
-	require.Equal(t, "clickhouse_", lc.RoleCNPrefix)
 }
 
 // TestOperatorGuideYAML_StrictKnownFields is the test-only strictness A3
