@@ -823,27 +823,53 @@ returns to ADR #32 for reconsideration.
 | 9  | `ACCEPT` | hardening: resource (deliberate 64 KiB outbound bound; not a legacy-parity claim — legacy has none) | New 64 KiB outbound PDU cap fails closed using `adminLimitExceeded`. |
 | 10 | `ACCEPT` | hardening: config (deliberate operator-config check; not a legacy-parity claim — legacy only rejects empty/whitespace) | Startup `UserRDNAttribute` descriptor check is consistent with the restricted structural DN model. |
 
-### 11.4 Phase 4's bounded test-only cursor supersedes this document's oracle
+### 11.4 The two permanent bounded test-only cursors that own independent-decoder evidence
 
 §10's `TestClickHouseWireCryptobyteDecision` characterizes each fixture with
 `cryptobyte` itself, but a cryptobyte characterization failure only counts
 as evidence (the local-ber-cursor justification) once it is corroborated by
-`independentlyWellFormedBER` — the vendored, patched goldap decoder — as a
-*second, structurally independent* decoder proving fixture well-formedness
-(see `internal/ldap/clickhouse_wire_cryptobyte_test.go`'s own doc comments).
-Phase 2's plan deliberately selects, for Phase 4, a **bounded test-only
-cursor** as *that independent goldap oracle's* replacement — not cryptobyte,
-and not the Phase 2 `profile` decoder — because using the eventual
-production decoder to prove fixture well-formedness for itself would be
-self-referential. Phase 4 must therefore: delete
-`internal/ldap/profile/differential_test.go`; replace this
-document's/`internal/ldap`'s independent goldap fixture decoder with a small,
-bounded, test-only definite-length structural cursor; preserve the
-well-formedness/filter-structure anti-drift assertions the current oracle
-provides; and never use the production `profile` package as that
-independent oracle. This explicitly supersedes the alternative the Phase 1
-ship log left open (replacing the oracle with the production decoder
-itself).
+a *second, structurally independent* decoder proving fixture
+well-formedness. Through Phase 3 that second decoder was
+`independentlyWellFormedBER`, the vendored, patched goldap decoder. Phase 4
+deleted the vendored `third_party/goldap`/`third_party/ldapserver` forks
+along with every production and test dependency on them, and replaced that
+single goldap-backed oracle with two separately hand-written, bounded,
+test-only BER cursors that share no decoding helpers with each other, with
+cryptobyte, or with the production `internal/ldap/profile` decoder — using
+the eventual production decoder to prove fixture well-formedness for itself
+would be self-referential, which is exactly what both cursors exist to
+avoid.
+
+**Oracle A** — fixture well-formedness / primitive-selection evidence —
+lives permanently at
+`internal/ldap/profile/clickhouse_wire_cryptobyte_test.go` (moved there,
+package `profile`, from this document's Phase 1 location under
+`internal/ldap`). Its `oracleAWellFormed` cursor independently checks
+exactly the supported fixture shapes named in §10's own scope (outer
+LDAPMessage sequence, bounded definite lengths, the minimal non-negative
+MessageID encoding including the 127/128 boundary, the four supported
+operations, Bind, the fixed Search fields/filter/attributes, empty Unbind,
+a valid positive Abandon target, no trailing bytes) and preserves the same
+three-way cryptobyte/local-ber-cursor/malformed verdict `§10` always used,
+including the mutation proving the cursor rejects malformed input rather
+than rubber-stamping it.
+
+**Oracle B** — wire-profile semantic decoder evidence — lives permanently
+at `internal/securitytest/wire_oracle_b_test.go`. It decodes only what
+`wire_profile_contract_test.go`'s own assertions need — Bind DN,
+`derefAliases`, the Controls presence/criticality sentinel, and the outer
+Search filter's operator and its two `equalityMatch` children — and
+requires the fixed `AND(objectClass==groupOfNames, member==<Bind DN>)`
+shape (either child order), retaining the AND→OR, `derefAliases`, and
+Controls sabotage cases that used to run against goldap.
+
+`internal/ldap/profile/differential_test.go`, the old/new differential
+oracle against the vendored goldap decoder, is deleted along with the
+vendored forks it depended on; its permanent successors are Oracle A,
+Oracle B, the committed frozen ClickHouse corpus, profile replay, the
+profile unit/adversarial/fuzz suites, real ClickHouse integration, HA, and
+wire verify — not a second general BER dependency and not the production
+`profile` package standing in as its own oracle.
 
 ### 11.4a Wire-capture verification policy (Phase 3)
 
@@ -880,6 +906,25 @@ unchanged. Phase 3's policy toward it is deliberately narrow:
 
 This distinction is also recorded in
 `integration/clickhouse/README.md`'s own "Wire capture" section.
+
+### §11.5 is historical; §11.6 is the current production certification
+
+§11.5 immediately below is preserved exactly as Phase 3's Stage B manual
+certification recorded it, byte-for-byte, between its own marker pair. It
+is not, and after Phase 4 must never again be read as, a live assertion
+about the current tree: the certified surface it describes (the
+`phase3profile`-tagged, dual-adapter composition) no longer exists.
+`internal/securitytest/wire_profile_contract_test.go`'s `Phase3Evidence*`
+tests check only that §11.5's recorded facts remain unchanged from what
+Phase 3 attested — never that today's tree still matches them.
+
+§11.6, added below after Phase 4's own manual certification completes, is
+the current production certification of record: it describes the ordinary,
+untagged `internal/ldap/profile`-backed production composition this
+document's earlier sections now describe as shipped, and its own live
+digest contract binds that section's recorded facts to the exact source
+tree certified — the same role §11.5 played for Phase 3, for the tree
+Phase 3 actually certified.
 
 <!-- phase3-release-gate-evidence:start -->
 ### 11.5 Phase 3 replacement release-gate evidence
@@ -1024,3 +1069,219 @@ authority):
   release gates on the untagged production path.
 
 <!-- phase3-release-gate-evidence:end -->
+
+<!-- phase4-release-gate-evidence:start -->
+### 11.6 Phase 4 production-cutover release-gate evidence
+
+This section is the populated evidence record for Phase 4's production
+cutover — replacing the legacy `internal/ldap` server with the ordinary,
+untagged `internal/ldap/profile`-backed production composition — manually
+certified against `tested_behavior_head` below and machine-checked for
+completeness, absence of placeholders, internal consistency, (unlike
+§11.5) live equality with the current certified-surface source tree, and
+that the recorded digest is actually bound to `tested_behavior_head`
+itself — not merely to whatever tree happens to be checked out when the
+suite runs — by `internal/securitytest/phase4_evidence_contract_test.go`.
+Those checks prove this section's shape, self-consistency, that the
+recorded certified-surface digest matches both the tree they run against
+and the git objects recorded at `tested_behavior_head`, and that
+`tested_behavior_head` names a real commit reachable from this branch's
+history — never that the Docker/fuzz commands below were actually run.
+Only the coordinator can attest that; see the human-attested list this
+document's plan carries.
+
+**Certification identity**
+
+- **tested_behavior_head:** `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`
+- **manual_verification_head:** `3c12ab752ba6e00516ea28a7bf24e7085290baac` — the
+  commit the Docker/fuzz/wire-capture suites below (Supported ClickHouse
+  matrix, HA, Wire-capture verification, Fuzz smoke) were actually executed
+  against, tracing back to the original manual certification at `76e8bcc`.
+  Kept as its own field, distinct from `tested_behavior_head` above, because
+  the two are not always the same commit: `tested_behavior_head` is free to
+  advance past `manual_verification_head` for a comment-only or otherwise
+  behavior-preserving certified-surface edit (as it did here — see below),
+  without that re-triggering a fresh manual run, but the coordinator
+  attestation must keep citing the commit manual verification was actually
+  run against, never whichever commit `tested_behavior_head` happens to name
+  at the time.
+- **Selector/composition:** ordinary, untagged production — `cmd/ch-oauth-ldap`
+  builds without any build tag and its `newLDAPServer` constructs
+  `internal/ldap/profile.Server` unconditionally; there is no
+  `phase3profile` tag, no legacy `internal/ldap` server, no YAML/CLI/
+  environment parser selector, and no fallback adapter anywhere in the
+  production, test, or integration build paths.
+- **Integration Dockerfile:** `integration/clickhouse/Dockerfile` builds
+  `./cmd/ch-oauth-ldap` untagged (no `-tags=phase3profile`), copies no
+  `third_party` tree, and installs the resulting binary at
+  `/out/ch-oauth-ldap` / `/bin/ch-oauth-ldap`, exactly as
+  `internal/securitytest/ch_oauth_ldap_build_contract_test.go` requires.
+- **Phase 3 selector absence:** confirmed absent from
+  `integration/clickhouse/Dockerfile`, `Dockerfile.ch-oauth-ldap`,
+  `scripts/build-ch-oauth-ldap-image.sh`,
+  `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
+  constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
+- **Certified-surface digest (SHA-256):** `3510ad40fe1ad910c5041f4f05ea1fc03aa4be4e3224aa1c299c6f2ee17e5390`
+  — computed over the same "Certified-surface anti-drift digest" file set
+  §11.5 used (`certifiedSurfacePatterns`, unchanged, `third_party/**` kept
+  even though the directory is now empty), reproduced 3× identically over
+  89 tracked files. This is not merely computed at `tested_behavior_head`
+  by assertion: `TestPhase4Evidence_DigestBoundToTestedBehaviorHead` reads
+  every certified-surface file straight out of the git object database at
+  the exact commit `tested_behavior_head` names (never the working tree)
+  and requires the two hash equal, so the field above and the head above
+  it are mechanically bound to each other, not merely both individually
+  self-consistent.
+  `tested_behavior_head` was originally `3c12ab752ba6e00516ea28a7bf24e7085290baac`
+  (recorded above as `manual_verification_head` — the head the
+  Docker/fuzz/wire-capture suites below were actually run against, tracing
+  back to the original manual certification at `76e8bcc`); it is now
+  `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`, one commit later,
+  because that commit made a comment-only edit to two certified-surface
+  files (`internal/ldap/profile/frame.go` and
+  `internal/ldap/profile/bind.go`, historicalizing two stale present-tense
+  references to the since-deleted vendored goldap parser — `git diff
+  3c12ab7 0ccbd43 -- internal/ldap/profile/frame.go
+  internal/ldap/profile/bind.go` shows only comment text changed, both
+  files' line counts unchanged, and the tracked-file count unchanged at
+  89). Per the plan's stop condition 9, a certified-surface change after
+  the attested head voids the attestation and is never resolved by
+  prose alone: it is resolved here by advancing `tested_behavior_head`
+  itself to the commit that actually contains the change, so that the
+  digest genuinely is the digest at the recorded head — not by leaving
+  the head frozen at the older commit and only editing the digest field
+  to match a newer, uncorrelated tree (the defect
+  `TestPhase4Evidence_DigestBoundToTestedBehaviorHead` now exists to
+  catch). No production behavior changed between the two heads; the
+  original Docker/fuzz/wire-capture attestation below remains the
+  evidence for both, since neither commit altered anything those suites
+  exercise.
+
+**Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+
+Both runs completed scenarios A–I including phase-5 scenario G' (Search-limit
+overflow); the two recorded ClickHouse upstream-bug expected failures
+(#78791/not-backported-to-24.8, and #116840's VIEW `external_roles` drop)
+reproduced exactly as expected against the untagged production build — no
+expectation-table edit was needed or made.
+
+**HA** (`integration/clickhouse/run-ha.sh`, run once per tracked image via
+`PHASE3_CH_IMAGE`, existing HAProxy + two-replica harness, existing
+persistent same-socket session probe — no new probe created)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+
+- **Session-probe result:** `PASS` on both images — both replicas
+  authenticate; no shared LDAP session store is required; authenticated
+  state is socket/connection-local; killing the replica owning a
+  connection kills that session rather than migrating it (confirmed on
+  both runs: the A-bound probe failed within the bound and helper B's Bind
+  count was unchanged by killing A); fresh authentication proceeds through
+  the survivor; the recreated replica rejoins and independently serves a
+  fresh Bind. As §"HA applicability" documents, this proves none of
+  Kubernetes routing, EndpointSlice/CNI convergence, pod-eviction
+  semantics, or a failover SLA.
+
+**Wire-capture verification**
+
+- **Command:** `bash integration/clickhouse/capture-ldap-wire.sh --mode verify --fixtures internal/ldap/testdata/clickhouse-wire`
+- **generation: frozen** — zero fixtures were regenerated or promoted;
+  `--mode verify` only.
+- **Result:** `PASS` for both tracked lines (`24.8`, `25.8`); every
+  committed session compared byte-for-byte equal against the untagged
+  production build; zero fixture drift; no new request shape observed.
+- **Search-before-Abandon:** confirmed for both tracked lines' recorded
+  timeout-abandon session (`wirecapture: diagnostic — Search precedes
+  Abandon as expected`).
+
+**Fuzz smoke** (`go test ./internal/ldap/profile -run '^$' -fuzz=<Target> -fuzztime=20s`, one target at a time)
+
+| Fuzz target | Duration | Result |
+| ------------------------ | -------- | ------ |
+| `FuzzLDAPFrame` | `20s` | `PASS` |
+| `FuzzBindRequest` | `20s` | `PASS` |
+| `FuzzSearchRequest` | `20s` | `PASS` |
+| `FuzzRestrictedDN` | `20s` | `PASS` |
+| `FuzzMemberAssertionDN` | `20s` | `PASS` |
+
+No crasher was found for any of the five targets.
+
+**LOC guardrail**
+
+- **Phase 3 profile-only historical LOC:** `2702` (pinned to §11.5's
+  `tested_behavior_head`; not recomputed against today's tree)
+- **Phase 4 profile-only LOC:** `2693` — `internal/ldap/profile/*.go`
+  non-test files at `tested_behavior_head`, using the identical
+  profile-only counting rule (`phase3FreshProfileLOC`, reused unmodified
+  for this component per the plan's "Final LOC accounting")
+- **Profile-only delta:** `-9`
+- **cmd/ch-oauth-ldap/ldap_backend.go LDAP-wiring LOC:** `64`
+- **Final Phase 4 production LDAP LOC:** `2757` (`2693 + 64`) — 743 lines
+  below ADR #32's ~3,500 architecture-review trigger; no architecture-review
+  stop condition was reached.
+
+**§11.3 narrowing dispositions** (unchanged from §11.5; Phase 4 revisited
+none of them)
+
+| ID | Disposition |
+| -- | ------------ |
+| 1  | `ACCEPT` |
+| 1a | `ACCEPT` |
+| 2  | `ACCEPT` |
+| 3  | `ACCEPT` |
+| 4  | `ACCEPT` |
+| 5  | `ACCEPT` |
+| 6  | `ACCEPT` |
+| 7  | `ACCEPT` |
+| 8  | `ACCEPT` |
+| 9  | `ACCEPT` |
+| 10 | `ACCEPT` |
+
+**Dependency closure and module graph**
+
+- **Production dependency closure:** `PASS` — `TestDependencyContract_ProductionClosureHasNoGeneralLDAP`
+  (unconditional; the `legacyUntilPhase4`/`replacement` staging mechanism no
+  longer exists), `TestDependencyContract_ProfileIsProductionImplementation`,
+  and `TestDependencyContract_NoNonStandardCryptobyte` (now requiring
+  cryptobyte's presence) all pass against the ordinary `./cmd/ch-oauth-ldap`
+  closure.
+- **Root test/module graph:** `PASS` — `TestModuleDenylistContract_RootTestGraphHasNoGeneralLDAP`
+  (deterministic `go list -deps -test` over `./...`) and
+  `TestModuleDenylistContract_RootModuleMetadataHasNoGeneralLDAP`
+  (`go mod edit -json`) both confirm none of the five denylisted module
+  paths appears anywhere in the root test-inclusive dependency graph or in
+  `go.mod`'s `Require`/`Replace`.
+
+**Redaction / release gate**
+
+- **`phase5release` vet:** `PASS`
+- **`phase5release` test:** `PASS`
+
+**TLS applicability:** N/A — issue #31 is a separate open unit and is out of scope for #33 Phase 4
+
+**Rollback:** no dual parser is retained. Rollback is a source-level revert
+of the complete Phase 4 migration, or redeploying the immediately previous
+known-good `ghcr.io/altinity/ch-oauth-ldap:ldap-<short-sha>` image; a source
+revert must restore the command adapter pair, the legacy `internal/ldap`
+package, the module requirements, and the vendored forks coherently, never
+partially.
+
+**Coordinator attestation:** Boris Tyshkevich (`@BorisTyshkevich`) certifies
+that every Docker/fuzz/wire-capture command and script named in this section
+(Supported ClickHouse matrix, HA, Wire-capture verification, Fuzz smoke) was
+run to completion against `3c12ab752ba6e00516ea28a7bf24e7085290baac`
+(`manual_verification_head` above) — not `tested_behavior_head`, which
+advanced one commit later by the comment-only edit recorded above and
+changed no certified behavior — that `git status --porcelain` was unchanged
+by verification, and that `docker ps -a` showed no suite leftovers after
+verification.
+
+<!-- phase4-release-gate-evidence:end -->

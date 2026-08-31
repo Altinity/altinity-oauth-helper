@@ -77,9 +77,8 @@ type RolesConfig struct {
 }
 
 // LDAPConfig mirrors the issue's `ldap:` block exactly, and converts into
-// the build-selected LDAP backend's own Config type (internal/ldap.Config
-// by default, internal/ldap/profile.Config under -tags=phase3profile) — see
-// ldap_backend_legacy.go / ldap_backend_phase3profile.go.
+// the LDAP backend's own internal/ldap/profile.Config type — see
+// ldap_backend.go.
 type LDAPConfig struct {
 	Listen           string `yaml:"listen"`
 	UserBaseDN       string `yaml:"user_base_dn"`
@@ -133,13 +132,12 @@ func defaultConfig() *Config {
 // command-level checks the shared packages deliberately don't own (the
 // issuer/jwks_url either-or rule internal/verification.New does not
 // enforce, and every ldap.* required-value check) with real construction
-// calls into verification.New, roles.New and the build-selected LDAP
-// backend's own DN/config validation (validateLDAPBackendConfig — see
-// ldap_backend_legacy.go / ldap_backend_phase3profile.go) so an invalid
-// identity config, an invalid roles_filter/roles_transform, or an
+// calls into verification.New, roles.New and the LDAP backend's own
+// DN/config validation (validateLDAPBackendConfig — see ldap_backend.go) so
+// an invalid identity config, an invalid roles_filter/roles_transform, or an
 // unparseable configured base DN is caught here rather than surfacing only
-// later during command composition. This function itself imports neither
-// LDAP backend.
+// later during command composition. This function itself imports no LDAP
+// backend package directly.
 func validateConfig(cfg *Config) error {
 	if strings.TrimSpace(cfg.OAuth.ExpectedIssuer) == "" && strings.TrimSpace(cfg.OAuth.JWKSURL) == "" {
 		return fmt.Errorf("oauth: either issuer or jwks_url must be set")
@@ -173,10 +171,9 @@ func validateConfig(cfg *Config) error {
 		return err
 	}
 
-	// Catches an unparseable configured user/group base DN (and, under
-	// -tags=phase3profile, the replacement profile's additional
-	// UserRDNAttribute descriptor-grammar check) the same way the
-	// build-selected LDAP backend's own constructor would at
+	// Catches an unparseable configured user/group base DN, and the
+	// profile's additional UserRDNAttribute descriptor-grammar check, the
+	// same way the LDAP backend's own constructor would at
 	// command-composition time.
 	if err := validateLDAPBackendConfig(cfg); err != nil {
 		return err

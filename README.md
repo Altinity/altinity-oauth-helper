@@ -198,9 +198,9 @@ What the fixture proves, and what you should expect in production:
   committed non-secret corpus of sanitized captured request PDUs under
   [`internal/ldap/testdata/clickhouse-wire/`](internal/ldap/testdata/clickhouse-wire/),
   and the resulting `cryptobyte`-vs-bounded-first-party-cursor primitive
-  decision for the future replacement parser. It does not restate this
+  decision behind the production parser. It does not restate this
   fixture's configuration and is not a second operator-facing guide — read
-  it only if you're implementing or reviewing that replacement.
+  it only if you're implementing or reviewing that parser.
 - **⚠️ This validates plain LDAP only — the OAuth bearer travels in clear
   text.** TLS, LDAPS and StartTLS are out of MVP scope, so the JWT (the
   OAuth bearer) crosses the ClickHouse→helper hop as the *LDAP simple-bind password*,
@@ -224,73 +224,76 @@ What the fixture proves, and what you should expect in production:
     lands, keep `ch-oauth-ldap` on a trusted internal network and never
     expose it publicly.
 
-### Compatibility profile (issue #33 phase 3 — certified for integration, production cutover is Phase 4)
+### Compatibility profile
 
-Issue #33 is replacing the vendored `third_party/goldap`/`third_party/ldapserver`
-LDAP stack above with a first-party, bounded ClickHouse compatibility profile at
-`internal/ldap/profile/`. **This is a certification-status note, not a cutover
-announcement**: `cmd/ch-oauth-ldap` still runs the legacy server described above
-in production, and the published `Dockerfile.ch-oauth-ldap` image still builds
-that same untagged, legacy-selecting binary — nothing production-reachable
-imports the profile package. Phase 3 added a temporary compile-time
-`phase3profile` Go build tag inside `cmd/ch-oauth-ldap` that selects the
-profile package only for `integration/clickhouse/Dockerfile`'s helper build,
-and under that selector certified the real command composition against both
-tracked ClickHouse images, HA (`run-ha.sh`), the committed wire-fixture corpus
-(verify-only, no regeneration), and all five native fuzz targets. See
+`internal/ldap/profile/` is `cmd/ch-oauth-ldap`'s only LDAP backend — a
+first-party, bounded ClickHouse compatibility profile that issue #33 phase 4
+cut over into ordinary, untagged production code, deleting the vendored
+`third_party/goldap`/`third_party/ldapserver` LDAP stack and the first-party
+legacy `internal/ldap` package that drove it. There is no build tag, runtime
+selector, or fallback path: every ordinary build and the published
+`Dockerfile.ch-oauth-ldap` image construct the same `internal/ldap/profile.Server`.
+The package was certified ahead of that cutover, in Phase 3, through a
+temporary compile-time `phase3profile` Go build tag applied only to
+`integration/clickhouse/Dockerfile`'s helper build — under that selector it
+was proven against the real command composition, both tracked ClickHouse
+images, HA (`run-ha.sh`), the committed wire-fixture corpus (verify-only, no
+regeneration), and all five native fuzz targets. See
 [`docs/clickhouse-ldap-wire-profile.md`](docs/clickhouse-ldap-wire-profile.md)
-§11.5 for the full evidence record (tested commit, certified-surface digest,
-and every result). Phase 4 owns deleting the temporary selector and making
-this composition ordinary production code.
+§11.5 for that historical Phase 3 evidence record (tested commit,
+certified-surface digest, and every result) and §11.6 for Phase 4's own
+cutover evidence.
 
-Two ClickHouse-configured values stay genuinely variable, not hard-coded, in the
-replacement:
+Two ClickHouse-configured values stayed genuinely variable, not hard-coded,
+across cutover:
 
 - **`search_limit`** stays a client/operator-controlled `N` (the fixture default
   above is `256`);
 - **client `timeLimit`** is honored as sent (the currently tracked ClickHouse
   value is `20` seconds).
 
-Cutover also brings several **deliberate narrowings** — behavior this legacy
-server tolerates today that the replacement will not. Phase 3 reviewed and
-explicitly `ACCEPT`ed all eleven of them (see the disposition table below);
-none is a merely-incidental parser gap:
+Cutover also brought several **deliberate narrowings** — behavior the
+deleted legacy server tolerated that this implementation does not. Phase 3
+reviewed and explicitly `ACCEPT`ed all eleven of them (see the disposition
+table below); none was a merely-incidental parser gap, and all eleven are
+now the repository's permanent, current behavior:
 
 - **Search-shape narrowing.** Only subtree scope, `derefAliases=0`,
   `typesOnly=false`, and exactly one requested attribute (case-insensitive
   `cn`) are accepted; an empty attribute list, `*`, `1.1`, or any other/
-  multiple attribute selection is rejected (result 50) instead of today's
-  generic projection.
-- **LDAPv3-only narrowing.** Only LDAPv3 simple Bind is accepted; the current
-  server's incidental Bind-version-2 acceptance is not retained (result 2
-  instead). A version-boundary refinement was reviewed separately: version 0,
-  negative, or non-minimally-encoded values close the connection as
-  malformed, while minimally encoded values `>=128` can decode and receive
-  result 2, even though legacy `goldap` closed above 127 — tracked ClickHouse
-  only ever emits version 3, so the parser is neither widened nor narrowed to
-  copy that incidental legacy behavior.
+  multiple attribute selection is rejected (result 50) instead of the
+  deleted legacy server's generic projection.
+- **LDAPv3-only narrowing.** Only LDAPv3 simple Bind is accepted; the
+  deleted legacy server's incidental Bind-version-2 acceptance is not
+  retained (result 2 instead). A version-boundary refinement was reviewed
+  separately: version 0, negative, or non-minimally-encoded values close the
+  connection as malformed, while minimally encoded values `>=128` can decode
+  and receive result 2, even though the deleted legacy `goldap` fork closed
+  above 127 — tracked ClickHouse only ever emits version 3, so the parser is
+  neither widened nor narrowed to copy that incidental legacy behavior.
 - **DN-grammar narrowing.** Multi-valued RDNs, `;` RDN separators, `#`
   BER-hexstring values, dotted-decimal/OID attribute types, and arbitrary
   escaped attribute-type names are rejected; supported whitespace handling
   and `\XX` value escapes remain.
 - **Control-plane narrowing.** Ordinary Abandon remains a no-response
   compatibility no-op but no longer cancels an in-flight operation; ordinary
-  RFC 3909 Cancel becomes an unsupported Extended request (result 53) instead
-  of today's vendored Cancel scheduler; a peer disconnect no longer
-  asynchronously cancels an already-running verification call.
+  RFC 3909 Cancel is an unsupported Extended request (result 53) instead of
+  the deleted legacy server's vendored Cancel scheduler; a peer disconnect no
+  longer asynchronously cancels an already-running verification call.
 - **New response-PDU cap.** Every outbound LDAPMessage is capped at 64 KiB;
   an oversized `SearchResultEntry` is dropped in favor of `SearchResultDone`
   result 11 (`adminLimitExceeded`), with the already-emitted entry count
-  preserved. This is a genuinely new client-visible behavior, not parity —
-  today's write path has no outbound size bound at all.
-- **New `UserRDNAttribute` startup validation.** The replacement requires the
-  configured attribute descriptor to match `[A-Za-z][A-Za-z0-9-]*`; current
-  production only rejects an empty/whitespace value.
+  preserved. This was a genuinely new client-visible behavior at cutover, not
+  parity — the deleted legacy server's write path had no outbound size bound
+  at all.
+- **New `UserRDNAttribute` startup validation.** This implementation requires
+  the configured attribute descriptor to match `[A-Za-z][A-Za-z0-9-]*`; the
+  deleted legacy server only rejected an empty/whitespace value.
 
 See [`docs/clickhouse-ldap-wire-profile.md`](docs/clickhouse-ldap-wire-profile.md)
 §11 for the full engineering-evidence writeup of all eleven narrowings (rows
 `1`, `1a`, `2`–`10`) and their Phase 3 `ACCEPT` dispositions, and
-[`docs/ch-oauth-ldap-operator-guide.md`](docs/ch-oauth-ldap-operator-guide.md#10-compatibility-profile-issue-33-phase-3--certified-for-integration-production-cutover-is-phase-4)
+[`docs/ch-oauth-ldap-operator-guide.md`](docs/ch-oauth-ldap-operator-guide.md#10-the-compatibility-profile-and-its-deliberate-narrowings-versus-the-historical-legacy-server)
 §10 for the equivalent operator-facing note.
 
 [ch-ldap]: https://clickhouse.com/docs/operations/external-authenticators/ldap
@@ -431,15 +434,15 @@ sub-tag) that already exists in the registry; there is no force override.
 
 ```
 cmd/ch-jwt-verify/     # the sidecar binary (main, config, settings, verify)
-cmd/ch-oauth-ldap/     # the standalone LDAPv3 server (main, config)
-internal/ldap/         # LDAP session/DN/filter/entry primitives + Bind/Search handlers
+cmd/ch-oauth-ldap/     # the standalone LDAPv3 server (main, config, ldap_backend: the one production LDAP adapter)
+internal/ldap/profile/ # the production LDAP implementation (session/DN/filter/entry primitives, Bind/Search
+                       # handlers, bounded cryptobyte framing) — cmd/ch-oauth-ldap's only backend since issue #33
+                       # phase 4's cutover; no build tag, runtime selector, or fallback path
 internal/ldap/testdata/phase1-baseline/ # immutable pre-replacement snapshot (issue #33 phase 1; never rewritten)
 internal/ldap/testdata/clickhouse-wire/ # committed sanitized ClickHouse LDAP request corpus (issue #33 phase 1)
 internal/wirefixture/  # shared Profile/Session/PDU schema + constructed-fixture generator (issue #33 phase 1;
                        # test/tooling support only, mechanically absent from the production closure)
 internal/securitytest/ # phase-5 AST redaction inventory, SDK contract, docs contract (see its doc.go)
-third_party/goldap/    # vendored, patched github.com/vjeantet/goldap message package (see its PATCHES.md)
-third_party/ldapserver/ # vendored, patched github.com/vjeantet/ldapserver LDAP server package
 docs/                  # ch-oauth-ldap-operator-guide.md: config/roles/cache/Search-limit/trust/HA consolidated
                        # clickhouse-ldap-wire-profile.md: byte-level wire evidence + primitive decision (issue #33 phase 1)
 integration/clickhouse/ # real-ClickHouse acceptance suite for ch-oauth-ldap (manual; see its README)

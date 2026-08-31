@@ -138,12 +138,10 @@ func TestValidateConfigRejectsInvalidRolesTransform(t *testing.T) {
 
 // --- LDAP base-DN parsing checks ---
 //
-// "not-a-dn" cannot parse under EITHER backend's DN grammar, but the exact
-// wrapped error text a rejected base DN produces is backend-specific (see
-// ldap_backend_legacy.go / ldap_backend_phase3profile.go's
-// validateLDAPBackendConfig) — those message-text assertions live in
-// config_legacy_test.go (!phase3profile) and config_phase3profile_test.go
-// (phase3profile) instead of here.
+// "not-a-dn" cannot parse under the profile's DN grammar; the exact wrapped
+// error text a rejected base DN produces (see ldap_backend.go's
+// validateLDAPBackendConfig) is asserted in config_profile_test.go instead
+// of here.
 
 // --- required LDAP scalar checks ---
 
@@ -269,11 +267,8 @@ func TestToRolesConfigExactMapping(t *testing.T) {
 	require.Equal(t, "s/^ch_//", rc.Transform)
 }
 
-// TestToLDAPConfigExactMapping (the legacy internal/ldap.Config mapping)
-// and its phase3profile analog (internal/ldap/profile.Config) live in
-// config_legacy_test.go / config_phase3profile_test.go respectively — the
-// method name is the same (toLDAPConfig / toProfileConfig), but the return
-// type is backend-specific, so a single untagged test can't reference both.
+// TestToProfileConfigExactMapping (the internal/ldap/profile.Config mapping)
+// lives in config_profile_test.go instead of here.
 
 // TestLoadConfigParsesIssueVocabularyYAML loads the issue's exact example
 // configuration (see "Configuration design" in the phase-2 plan) from a
@@ -415,12 +410,10 @@ func TestOperatorGuideYAML_LoadsThroughProductionLoadConfig(t *testing.T) {
 	// no error above), but assert the exact converted values too, so a
 	// future accidental field-mapping regression in toVerificationConfig/
 	// toRolesConfig is caught by this same file rather than only by the
-	// narrower field-by-field mapping tests above. The build-selected LDAP
-	// backend's own conversion (toLDAPConfig / toProfileConfig) is asserted
-	// against this same file's Config in
-	// TestOperatorGuideYAML_LDAPBackendMapping in config_legacy_test.go /
-	// config_phase3profile_test.go instead, since its return type differs
-	// by build.
+	// narrower field-by-field mapping tests above. The LDAP backend's own
+	// conversion (toProfileConfig) is asserted against this same file's
+	// Config in TestOperatorGuideYAML_LDAPBackendMapping in
+	// config_profile_test.go instead.
 	vc := cfg.toVerificationConfig()
 	require.Equal(t, "https://tenant.example.auth0.com/", vc.ExpectedIssuer)
 	require.Equal(t, "https://tenant.example.auth0.com/.well-known/jwks.json", vc.JWKSURL)

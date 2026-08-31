@@ -21,9 +21,11 @@ const nestedLDAPModuleImportPath = "github.com/altinity/altinity-oauth-helper"
 // explicit scopeDirs list (originally six first-party packages; issue #33
 // phase 1, plan §10/§35, added internal/wirefixture and
 // integration/clickhouse/wirecapture once the ClickHouse-wire-capture
-// tooling gave them non-test sinks of their own) plus the vendored
-// third_party/ldapserver fork (see doc.go), and cross-checks the result
-// against testdata/redaction-sites.tsv. None of these tests capture logs or
+// tooling gave them non-test sinks of their own), and cross-checks the
+// result against testdata/redaction-sites.tsv. The vendored
+// third_party/ldapserver fork's separate Logger.Print* enumeration
+// (discoverVendoredLoggerSites) was removed in issue #33 phase 4's cutover
+// along with the fork itself. None of these tests capture logs or
 // set zerolog's global level, so — unlike the marker matrices in
 // internal/verification and cmd/ch-jwt-verify — nothing here needs the A2
 // non-parallel-capture discipline.
@@ -64,11 +66,7 @@ func discoverAllSites(t *testing.T) []DiscoveredSite {
 	if err != nil {
 		t.Fatalf("securitytest: discover sites: %v", err)
 	}
-	vendored, err := discoverVendoredLoggerSites(root)
-	if err != nil {
-		t.Fatalf("securitytest: discover vendored logger sites: %v", err)
-	}
-	return append(sites, vendored...)
+	return sites
 }
 
 func manifestByKey(rows []ManifestRow) map[string][]ManifestRow {

@@ -25,15 +25,18 @@ import (
 // significant. Decoded values are byte-exact and, after decoding, rejected
 // if they contain a NUL byte or are not valid UTF-8.
 //
-// Rejected — deliberate Phase 3-visible narrowings versus current
-// production's github.com/go-ldap/ldap/v3-based parsing: multi-valued RDNs
-// via an unescaped '+'; ';' as an RDN separator; '#' introducing a
+// Rejected — deliberate narrowings versus the historical legacy
+// internal/ldap implementation's github.com/go-ldap/ldap/v3-based parsing
+// (deleted at issue #33 phase 4's cutover; this package's restricted
+// grammar is the only DN parsing production carries now): multi-valued
+// RDNs via an unescaped '+'; ';' as an RDN separator; '#' introducing a
 // BER-hexstring value; dotted-decimal/OID attribute types and escaped
 // attribute-type names (both rejected implicitly — a leading digit, an
 // embedded '.', or a leading '\\' never matches the descriptor grammar);
 // and any RFC 4514 equivalence beyond case-insensitive types and
-// byte-exact values. Phase 3 must explicitly accept these narrowings
-// (the plan's "Deliberate DN narrowing" handoff list) before Phase 4.
+// byte-exact values. These narrowings were accepted (the plan's "Deliberate
+// DN narrowing" handoff list, §11.3's eleven dispositions) ahead of Phase 4
+// cutover and remain the permanent grammar.
 
 // DN is a parsed, immutable value produced by ParseDN under this package's
 // restricted grammar. Its zero value is the empty DN (no RDNs).
@@ -410,11 +413,12 @@ func ParseBindDN(candidate string, base DN, rdnAttribute string) (string, error)
 // RenderGroupDN renders the synthetic group DN "cn=<escaped
 // roleCNPrefix+role>,<groupBaseDN>" for one mapped role, using
 // EscapeDNValue for safe rendering; groupBaseDN is used verbatim, never
-// re-parsed/re-rendered. Matching current production's defensive behavior,
-// an empty role is the caller's skip case, not a rendering failure:
-// RenderGroupDN reports ("", false) for it instead of an error. The
-// response-PDU size cap that can still reject an oversized rendered entry
-// is enforced by the encoder, not here.
+// re-parsed/re-rendered. Matching the historical legacy internal/ldap
+// implementation's defensive behavior (deleted at issue #33 phase 4's
+// cutover), an empty role is the caller's skip case, not a rendering
+// failure: RenderGroupDN reports ("", false) for it instead of an error.
+// The response-PDU size cap that can still reject an oversized rendered
+// entry is enforced by the encoder, not here.
 func RenderGroupDN(groupBaseDN, roleCNPrefix, role string) (string, bool) {
 	if role == "" {
 		return "", false

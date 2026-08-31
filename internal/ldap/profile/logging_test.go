@@ -58,6 +58,47 @@ func TestCorrelationID_KnownVector(t *testing.T) {
 	}
 }
 
+// TestCorrelationID_KnownVectorFlowsThroughRealBind is the profile-side
+// transplant of internal/ldap/profile_compat_test.go's
+// TestProfileCompatibility_CorrelationIDExactValue — the one case in that
+// retired old/new parity file that compared an actual produced hash
+// string rather than merely field presence (see t3's Oracle B/§11.5 work
+// and the plan's "Compatibility harnesses" audit). TestCorrelationID_KnownVector
+// above only proves correlationID(issuer, subject) reproduces the known
+// vector when called directly; TestHandleBind_ExactSuccessLogLine (in
+// bind_test.go) only proves the logged correlation_id equals
+// correlationID(issuer, subject) computed a second time with the same
+// arguments — a tautology that would not catch bind.go accidentally
+// swapping issuer/subject at its logBindSucceeded call site. This test
+// closes that gap: it drives a real handleBind call for the exact same
+// (issuer, subject) pair as the known vector and requires the emitted log
+// line's own correlation_id field equal the same hard-coded literal.
+func TestCorrelationID_KnownVectorFlowsThroughRealBind(t *testing.T) {
+	const (
+		issuer  = "https://idp.example.com/"
+		subject = "user-42"
+		want    = "7c28a3bb8ee79fb3"
+	)
+	verifier := newFakeVerifier().withSuccess("carol-pw", newVerificationResult("carol", issuer, subject, 9999999999))
+	resolver := newFakeResolver().withRoles(subject, []string{"ch_engineer"})
+	c, clientConn, cleanup := newBindTestConnection(t, verifier, resolver)
+	defer cleanup()
+
+	fields := captureLog(t, zerolog.InfoLevel, func() {
+		if _, _, _, wrote := doBind(t, c, clientConn, 1, bindOp(3, testAliceDN, authTagSimple, []byte("carol-pw")), false); !wrote {
+			t.Fatal("Bind did not write a response")
+		}
+	})
+
+	got, ok := fields["correlation_id"].(string)
+	if !ok {
+		t.Fatalf("correlation_id missing or not a string: %v", fields)
+	}
+	if got != want {
+		t.Fatalf("correlation_id = %q, want known vector %q", got, want)
+	}
+}
+
 // TestCorrelationID_SeparatorAndTruncationSensitivity demonstrates, without
 // touching production code, that the known vector above actually pins the
 // separator and truncation choices: an independently computed hash using

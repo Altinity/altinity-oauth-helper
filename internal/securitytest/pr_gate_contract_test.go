@@ -78,6 +78,16 @@ import (
 //   - Every external `uses:` is pinned to a full 40-hex commit SHA. A floating
 //     tag (`@v4`) is mutable by the action's owner, so the gate that decides
 //     what may merge would execute code chosen after review.
+//   - The checkout step requests full history (`fetch-depth: 0`), not the
+//     action's own depth-1 default. Two of this gate's five commands
+//     (`go test -race ./...`, which compiles and runs
+//     internal/securitytest/phase4_evidence_contract_test.go) resolve a
+//     historical commit SHA recorded in
+//     docs/clickhouse-ldap-wire-profile.md against real git objects — a
+//     depth-1 checkout leaves that commit unreachable to git the moment
+//     HEAD advances even one commit past it, failing Race tests while Build
+//     and Vet still pass (observed on commit
+//     25089e0d770c05e814374d291cd71aa6b275c675, CI run 33368931796).
 //   - Every pin's trailing `# <identity>@vX.Y.Z` comment names that step's own
 //     action and a version at or above the first release declaring the
 //     `node24` runtime (`actions/checkout` >= v5.0.0, `actions/setup-go` >=
@@ -655,6 +665,61 @@ func TestPRGateContract_ExternalActionsArePinnedToFullCommitSHA(t *testing.T) {
 
 	if strings.Join(identities, ",") != strings.Join(prGateExpectedActions, ",") {
 		t.Errorf("securitytest: %s uses actions %v, want exactly %v — the gate deliberately runs only first-party checkout/setup-go; any additional third-party action is new code with access to the verification job", prGateWorkflowRelPath, identities, prGateExpectedActions)
+	}
+}
+
+// prGateCheckoutStep returns the actions/checkout step's own mapping node,
+// so its `with:` inputs can be inspected directly — prGateStepRuns only
+// surfaces `run:` steps, and the checkout step has none.
+func prGateCheckoutStep(t *testing.T, job *yaml.Node) *yaml.Node {
+	t.Helper()
+	steps := yamlMapValue(job, "steps")
+	if steps == nil || steps.Kind != yaml.SequenceNode {
+		t.Fatalf("securitytest: %s job has no `steps:` sequence", prGateWorkflowRelPath)
+	}
+	for _, step := range steps.Content {
+		uses := yamlMapValue(step, "uses")
+		if uses != nil && strings.HasPrefix(uses.Value, "actions/checkout@") {
+			return step
+		}
+	}
+	t.Fatalf("securitytest: %s has no actions/checkout step", prGateWorkflowRelPath)
+	return nil
+}
+
+// TestPRGateContract_CheckoutFetchesFullHistoryForHistoricalEvidenceChecks
+// guards the fix for a concrete, observed CI failure: commit
+// 25089e0d770c05e814374d291cd71aa6b275c675's "Required PR gate" run
+// (33368931796) had Build and Vet succeed while Race tests failed, because
+// internal/securitytest/phase4_evidence_contract_test.go's
+// TestPhase4Evidence_TestedBehaviorHead and
+// TestPhase4Evidence_DigestBoundToTestedBehaviorHead resolve a historical
+// commit SHA recorded in docs/clickhouse-ldap-wire-profile.md
+// (`tested_behavior_head`) via `git cat-file -e`, `git merge-base
+// --is-ancestor`, `git ls-files --with-tree=`, and `git show <sha>:<path>` —
+// every one of which needs that commit's git objects present locally.
+// actions/checkout's own default (fetch-depth: 1) fetches only the tip
+// commit, so those checks fail — "does not resolve to a commit reachable
+// from HEAD" / "fatal: bad tree-ish" — the instant HEAD advances even one
+// commit past the recorded head, which is exactly what happened one commit
+// after 0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9 was recorded. This test
+// asserts the checkout step explicitly requests full history
+// (fetch-depth: 0) so that class of failure cannot silently return.
+func TestPRGateContract_CheckoutFetchesFullHistoryForHistoricalEvidenceChecks(t *testing.T) {
+	top := loadPRGateWorkflow(t)
+	_, job := prGateSingleJob(t, top)
+	step := prGateCheckoutStep(t, job)
+
+	with := yamlMapValue(step, "with")
+	if with == nil || with.Kind != yaml.MappingNode {
+		t.Fatalf("securitytest: %s actions/checkout step has no `with:` mapping — it must set `fetch-depth: 0`, or the default shallow (depth-1) checkout leaves historical commits recorded in docs/clickhouse-ldap-wire-profile.md's tested_behavior_head unreachable to git, failing internal/securitytest/phase4_evidence_contract_test.go's git-object checks the moment HEAD advances past that commit", prGateWorkflowRelPath)
+	}
+	depth := yamlMapValue(with, "fetch-depth")
+	if depth == nil {
+		t.Fatalf("securitytest: %s actions/checkout step has no `fetch-depth:` input — without an explicit override the action defaults to a depth-1 (tip-only) checkout, which leaves docs/clickhouse-ldap-wire-profile.md's recorded tested_behavior_head unreachable to git the moment HEAD advances past it, failing phase4_evidence_contract_test.go's git-object checks (observed on commit 25089e0d770c05e814374d291cd71aa6b275c675, CI run 33368931796: Race tests failed with \"does not resolve to a commit reachable from HEAD\")", prGateWorkflowRelPath)
+	}
+	if depth.Value != "0" {
+		t.Fatalf("securitytest: %s actions/checkout `fetch-depth` is %q, want \"0\" (full history) — any positive depth risks the same historical-object-unreachable failure once tested_behavior_head falls outside that window", prGateWorkflowRelPath, depth.Value)
 	}
 }
 
