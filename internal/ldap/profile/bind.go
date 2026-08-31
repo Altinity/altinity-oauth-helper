@@ -21,14 +21,14 @@ import (
 //	                   [3] SaslCredentials  -- sasl, recognized as unsupported
 //	}
 //
-// Amendment 2: legacy's vendored goldap decoder only ever recognizes
-// context tags [0] and [3] for AuthenticationChoice and turns any other
-// tag into a decode error that closes the connection — so result 7 is
-// reachable only for [3], and every other tag (or any other ASN.1
-// malformation anywhere in this shape) is "not a recognizable Bind":
-// handleBind returns errMalformed and the caller (server.go) closes the
-// connection without writing a response or touching authentication
-// state.
+// Amendment 2: legacy's vendored goldap decoder only ever recognized
+// context tags [0] and [3] for AuthenticationChoice and turned any other
+// tag into a decode error that closed the connection (decoder deleted at
+// the phase 4 cutover) — so result 7 is reachable only for [3], and every
+// other tag (or any other ASN.1 malformation anywhere in this shape) is
+// "not a recognizable Bind": handleBind returns errMalformed and the
+// caller (server.go) closes the connection without writing a response or
+// touching authentication state.
 
 // authChoiceSimple/authChoiceSASL are the only two authentication CHOICE
 // tags this profile recognizes (RFC 4511 §4.2's AuthenticationChoice):

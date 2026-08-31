@@ -1104,11 +1104,18 @@ can attest that; see the human-attested list this document's plan carries.
   `scripts/build-ch-oauth-ldap-image.sh`,
   `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
   constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
-- **Certified-surface digest (SHA-256):** `e5265b85999bdbcdfda04989bc7623a5f5093386a3a6ba56a6bbc38a4da8210d`
+- **Certified-surface digest (SHA-256):** `3510ad40fe1ad910c5041f4f05ea1fc03aa4be4e3224aa1c299c6f2ee17e5390`
   — computed at `tested_behavior_head` over the same "Certified-surface
   anti-drift digest" file set §11.5 used (`certifiedSurfacePatterns`,
   unchanged, `third_party/**` kept even though the directory is now empty),
-  reproduced 3× identically over 89 tracked files.
+  reproduced 3× identically over 89 tracked files. Updated after the
+  attested head for comment-only edits to
+  `internal/ldap/profile/frame.go` and `internal/ldap/profile/bind.go`
+  (historicalizing two stale present-tense references to the
+  since-deleted vendored goldap parser); the behavior surface is
+  unchanged (no code touched, only comments; still 89 tracked files), and
+  the Docker attestation at `76e8bcc` remains valid — only this digest
+  field was refreshed to match the current tree.
 
 **Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
 

@@ -206,10 +206,10 @@ func decodeEnvelope(body []byte) (Envelope, error) {
 // this function's return.
 //
 // criticality is decoded with cryptobyte.ReadASN1Boolean's strict
-// 0x00/0xff-only BOOLEAN rule (matching this repository's existing
-// vendored goldap parser and the pinned cryptobyte release): a
-// non-canonical TRUE encoding such as content byte 0x01 is malformed, not
-// a compatibility narrowing.
+// 0x00/0xff-only BOOLEAN rule (matching the formerly vendored goldap
+// parser, deleted at the #33 phase 4 cutover, and the pinned cryptobyte
+// release): a non-canonical TRUE encoding such as content byte 0x01 is
+// malformed, not a compatibility narrowing.
 //
 // A malformed Controls element returns errMalformed.
 func scanControls(s *cryptobyte.String) (bool, error) {
