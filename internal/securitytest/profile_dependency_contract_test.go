@@ -33,6 +33,14 @@ package securitytest
 //     ./cmd/ch-oauth-ldap command closure after composition, not to this
 //     package in isolation.
 //
+// Issue #33 phase 3 ("Dependency closure contract › Shared policy") refactored
+// the general-LDAP prefix list this second test uses to consume
+// dependency_contract_test.go's generalLDAPDenylistPrefixes/
+// isGeneralLDAPDependency instead of maintaining its own copy — the two
+// files must never carry two independently drifting module lists. The
+// internal/wirefixture check stays a separate, local assertion here (it was
+// never a general-LDAP-stack entry; it is test/tooling support).
+//
 // Amendment 5 also requires recording, in test comments (not yet in code),
 // that TestDependencyContract_NoNonStandardCryptobyte and the committed
 // internal/securitytest/testdata/production-nonstdlib-deps.txt expectation
@@ -51,7 +59,6 @@ import (
 	"bytes"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -62,20 +69,6 @@ const profileImportPath = "github.com/altinity/altinity-oauth-helper/internal/ld
 // profileClosureTarget is the package the profile dependency-policy test
 // evaluates: the profile package itself, not the shipped command.
 const profileClosureTarget = "./internal/ldap/profile"
-
-// forbiddenGeneralLDAPPrefixes are import-path prefixes for the old/general
-// LDAP stack that internal/ldap/profile's own closure must never contain
-// during Phase 2 (plan "Profile dependency policy", L1255-1310). Matched by
-// prefix so every subpackage of github.com/vjeantet/goldap is caught, not
-// just its root package.
-var forbiddenGeneralLDAPPrefixes = []string{
-	"github.com/vjeantet/ldapserver",
-	"github.com/vjeantet/goldap",
-	"github.com/go-ldap/ldap/v3",
-	"github.com/go-asn1-ber/asn1-ber",
-	"github.com/Azure/go-ntlmssp",
-	"github.com/altinity/altinity-oauth-helper/internal/wirefixture",
-}
 
 // TestDependencyContract_ProfileImplementationIsNotProduction requires
 // internal/ldap/profile to stay absent from ./cmd/ch-oauth-ldap's live
@@ -140,10 +133,11 @@ func TestDependencyContract_ProfileClosureHasRequiredPrimitiveAndNoGeneralLDAP(t
 	}
 
 	for _, dep := range got {
-		for _, prefix := range forbiddenGeneralLDAPPrefixes {
-			if dep == prefix || strings.HasPrefix(dep, prefix+"/") {
-				t.Fatalf("profile_dependency_contract: %s's live import closure must not contain the old/general LDAP stack, but found %s (forbidden prefix %s)", profileClosureTarget, dep, prefix)
-			}
+		if isGeneralLDAPDependency(dep) {
+			t.Fatalf("profile_dependency_contract: %s's live import closure must not contain the old/general LDAP stack, but found %s", profileClosureTarget, dep)
+		}
+		if dep == forbiddenWirefixtureImport {
+			t.Fatalf("profile_dependency_contract: %s's live import closure must not contain %s (test/tooling support only, not a profile production dependency)", profileClosureTarget, forbiddenWirefixtureImport)
 		}
 	}
 }
