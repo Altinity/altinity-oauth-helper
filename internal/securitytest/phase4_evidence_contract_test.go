@@ -599,3 +599,72 @@ func TestPhase4Evidence_RollbackAndCoordinatorAttestation(t *testing.T) {
 		t.Fatalf("phase4_evidence_contract: %s: §11.6 coordinator attestation field is empty", wireProfileDocRelPath)
 	}
 }
+
+// phase4AttestationHeadRE captures the exact commit SHA the Coordinator
+// attestation sentence claims the manual Docker/fuzz/wire-capture suites
+// were "run to completion against". It requires a literal 40-hex SHA (never
+// a bare field name like `tested_behavior_head`) so the claim is checkable
+// against a recorded field's actual value, not merely present as prose.
+var phase4AttestationHeadRE = regexp.MustCompile("run to completion against `([0-9a-f]{40})`")
+
+// TestPhase4Evidence_ManualVerificationHead requires §11.6 to separately
+// record manual_verification_head — the commit the Docker/fuzz/wire-capture
+// suites were actually run against — as a real commit reachable from HEAD,
+// exactly like TestPhase4Evidence_TestedBehaviorHead does for
+// tested_behavior_head. The two fields are allowed to diverge (see
+// TestPhase4Evidence_CoordinatorAttestationBoundToManualVerificationHead for
+// why), but both must independently name real history.
+func TestPhase4Evidence_ManualVerificationHead(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("phase4_evidence_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase4EvidenceSection(t, doc)
+
+	head := phase4EvidenceField(t, section, "manual_verification_head")
+	if !phase4TestedBehaviorHeadRE.MatchString(head) {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 manual_verification_head is %q, want a full 40-character lowercase hex commit SHA", wireProfileDocRelPath, head)
+	}
+	if !gitCommitIsReachable(t, root, head) {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 manual_verification_head %q does not resolve to a commit reachable from HEAD in this repository", wireProfileDocRelPath, head)
+	}
+}
+
+// TestPhase4Evidence_CoordinatorAttestationBoundToManualVerificationHead
+// closes the exact gap pass 3 review found: the Coordinator attestation
+// sentence must name the commit the manual suites were actually run
+// against (manual_verification_head), never tested_behavior_head — a
+// separate field that §11.6 explicitly documents can advance past
+// manual_verification_head for a behavior-preserving certified-surface
+// edit (see the tested_behavior_head paragraph above) without the manual
+// suites having been re-run against the newer commit. Prose alone said
+// this correctly once already and drifted; this test makes it mechanical
+// by extracting the literal SHA the attestation sentence cites — via the
+// required "run to completion against `<sha>`" phrasing — and requiring it
+// equal the recorded manual_verification_head field, not merely be present
+// somewhere in the section.
+func TestPhase4Evidence_CoordinatorAttestationBoundToManualVerificationHead(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("phase4_evidence_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase4EvidenceSection(t, doc)
+
+	manualHead := phase4EvidenceField(t, section, "manual_verification_head")
+
+	idx := strings.Index(section, "**Coordinator attestation:**")
+	if idx < 0 {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 has no Coordinator attestation sentence", wireProfileDocRelPath)
+	}
+	attestation := section[idx:]
+
+	m := phase4AttestationHeadRE.FindStringSubmatch(attestation)
+	if m == nil {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 Coordinator attestation does not name the exact commit the manual suites were run to completion against, in the required \"run to completion against `<sha>`\" form — a claim naming a field by name instead of a literal SHA (or naming none at all) cannot be checked against manual_verification_head", wireProfileDocRelPath)
+	}
+	if m[1] != manualHead {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 Coordinator attestation certifies the manual suites were run to completion against %q, but manual_verification_head records %q as the commit they were actually run against — these must be the same commit, or the attestation certifies work against a head nobody actually tested (this is the exact defect pass 3 review found: tested_behavior_head can legitimately advance past manual_verification_head, and the attestation must track the latter, not the former)", wireProfileDocRelPath, m[1], manualHead)
+	}
+}

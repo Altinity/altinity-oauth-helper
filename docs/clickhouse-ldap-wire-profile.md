@@ -1093,6 +1093,18 @@ document's plan carries.
 **Certification identity**
 
 - **tested_behavior_head:** `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`
+- **manual_verification_head:** `3c12ab752ba6e00516ea28a7bf24e7085290baac` — the
+  commit the Docker/fuzz/wire-capture suites below (Supported ClickHouse
+  matrix, HA, Wire-capture verification, Fuzz smoke) were actually executed
+  against, tracing back to the original manual certification at `76e8bcc`.
+  Kept as its own field, distinct from `tested_behavior_head` above, because
+  the two are not always the same commit: `tested_behavior_head` is free to
+  advance past `manual_verification_head` for a comment-only or otherwise
+  behavior-preserving certified-surface edit (as it did here — see below),
+  without that re-triggering a fresh manual run, but the coordinator
+  attestation must keep citing the commit manual verification was actually
+  run against, never whichever commit `tested_behavior_head` happens to name
+  at the time.
 - **Selector/composition:** ordinary, untagged production — `cmd/ch-oauth-ldap`
   builds without any build tag and its `newLDAPServer` constructs
   `internal/ldap/profile.Server` unconditionally; there is no
@@ -1121,9 +1133,10 @@ document's plan carries.
   it are mechanically bound to each other, not merely both individually
   self-consistent.
   `tested_behavior_head` was originally `3c12ab752ba6e00516ea28a7bf24e7085290baac`
-  (the head the Docker/fuzz/wire-capture suites below were actually run
-  against, tracing back to the original manual certification at `76e8bcc`);
-  it is now `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`, one commit later,
+  (recorded above as `manual_verification_head` — the head the
+  Docker/fuzz/wire-capture suites below were actually run against, tracing
+  back to the original manual certification at `76e8bcc`); it is now
+  `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`, one commit later,
   because that commit made a comment-only edit to two certified-surface
   files (`internal/ldap/profile/frame.go` and
   `internal/ldap/profile/bind.go`, historicalizing two stale present-tense
@@ -1262,8 +1275,12 @@ package, the module requirements, and the vendored forks coherently, never
 partially.
 
 **Coordinator attestation:** Boris Tyshkevich (`@BorisTyshkevich`) certifies
-that every command and script named in this section was run to completion
-against `tested_behavior_head`, that `git status --porcelain` was unchanged
+that every Docker/fuzz/wire-capture command and script named in this section
+(Supported ClickHouse matrix, HA, Wire-capture verification, Fuzz smoke) was
+run to completion against `3c12ab752ba6e00516ea28a7bf24e7085290baac`
+(`manual_verification_head` above) — not `tested_behavior_head`, which
+advanced one commit later by the comment-only edit recorded above and
+changed no certified behavior — that `git status --porcelain` was unchanged
 by verification, and that `docker ps -a` showed no suite leftovers after
 verification.
 

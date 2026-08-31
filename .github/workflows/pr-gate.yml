@@ -75,6 +75,25 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          # fetch-depth: 0 (full history) is load-bearing, not a convenience
+          # default. internal/securitytest/phase4_evidence_contract_test.go's
+          # TestPhase4Evidence_TestedBehaviorHead and
+          # TestPhase4Evidence_DigestBoundToTestedBehaviorHead shell out to
+          # `git cat-file -e <sha>^{commit}`, `git merge-base --is-ancestor`,
+          # `git ls-files --with-tree=<sha>`, and `git show <sha>:<path>` to
+          # prove docs/clickhouse-ldap-wire-profile.md's recorded
+          # tested_behavior_head is a real, reachable historical commit and
+          # that the recorded digest is bound to the git objects AT that
+          # commit — not the working tree. The action's own default
+          # (fetch-depth: 1) fetches only the tip commit, so those checks
+          # fail with "does not resolve to a commit reachable from HEAD" /
+          # "fatal: bad tree-ish" the moment HEAD moves even one commit past
+          # the recorded head (observed on 25089e0d, one commit after
+          # 0ccbd432: Build and Vet passed, Race tests failed on exactly
+          # this). Do not narrow this back to a shallow fetch to save CI
+          # time without also changing the evidence design to not depend on
+          # historical git objects.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # actions/setup-go@v7.0.0
