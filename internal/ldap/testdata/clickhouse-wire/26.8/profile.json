@@ -4,7 +4,7 @@
   "tracked_image": "clickhouse/clickhouse-server:26.8.1.2041",
   "clickhouse_repository": "ClickHouse/ClickHouse",
   "clickhouse_tag": "v26.8.1.2041-lts",
-  "clickhouse_commit": "be4175ff9ba169fe2421dc8c7d06b0e94cfb4594",
+  "clickhouse_commit": "537693a9b20b947a3cf0c4ac90c7c966eee963c9",
   "clickhouse_source_blobs": {
     "ExternalAuthenticators.cpp": "40fc3b719d195fc600961e10059a827c0cd7545e",
     "LDAPAccessStorage.cpp": "e464d5818b552b4e7623cb34f3e43f6e5302e176",

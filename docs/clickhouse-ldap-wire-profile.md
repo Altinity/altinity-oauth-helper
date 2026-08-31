@@ -67,12 +67,23 @@ both registries satisfy, so this deviation costs the suite nothing. Every
 tag below was confirmed to resolve to the exact commit shown, in the
 repository shown.
 
+The **Commit** column holds commit-object SHAs, never tag-object SHAs. That
+distinction is load-bearing for `26.8` specifically: `v26.8.1.2041-lts` is
+an **annotated** tag, so its ref reports object type `tag` and SHA
+`be4175ff9ba169fe2421dc8c7d06b0e94cfb4594` — the tag object. Peeling it
+(`gh api repos/ClickHouse/ClickHouse/git/tags/be4175ff… --jq .object.sha`)
+gives the commit recorded below. The other three tags are lightweight and
+resolve directly. A tag SHA substituted here would still fetch the right
+file contents — the GitHub contents API peels refs — so §2.2's blob SHAs
+are unaffected by the distinction; what breaks is anyone trying to resolve
+the recorded value as a commit, which is exactly what this table promises.
+
 | Line   | ClickHouse repository | Tag                              | Commit                                     | OpenLDAP repository   | Pin                                        | Version |
 | ------ | ---------------------- | --------------------------------- | ------------------------------------------- | ---------------------- | -------------------------------------------- | ------- |
 | `24.8` | `Altinity/ClickHouse`  | `v24.8.11.51285.altinitystable`  | `351edb1a2ec26940aee4c2d1d332fd280c232964` | `ClickHouse/openldap`  | `5671b80e369df2caf5f34e02924316205a43c895`  | 2.5.16  |
 | `25.8` | `Altinity/ClickHouse`  | `v25.8.28.10001.altinitystable`  | `568824f4327b379e86bce93f12b9cebe0cfd9ff5` | `openldap/openldap`    | `22fe35c6b4098e3ad166469f9574c79832c42952`  | 2.6.10  |
 | `26.3` | `Altinity/ClickHouse`  | `v26.3.16.10001.altinitystable`  | `8de06fed91fa7a6545a72f37c98e81d4cc024bb1` | `openldap/openldap`    | `22fe35c6b4098e3ad166469f9574c79832c42952`  | 2.6.10  |
-| `26.8` | `ClickHouse/ClickHouse` | `v26.8.1.2041-lts`              | `be4175ff9ba169fe2421dc8c7d06b0e94cfb4594` | `openldap/openldap`    | `22fe35c6b4098e3ad166469f9574c79832c42952`  | 2.6.10  |
+| `26.8` | `ClickHouse/ClickHouse` | `v26.8.1.2041-lts`              | `537693a9b20b947a3cf0c4ac90c7c966eee963c9` | `openldap/openldap`    | `22fe35c6b4098e3ad166469f9574c79832c42952`  | 2.6.10  |
 
 Every `build/version.var` at those exact pins was fetched and read
 directly: the 24.8 line's submodule reports `ol_major=2 ol_minor=5
@@ -103,7 +114,13 @@ own repository at the commit recorded in §2.1 — `Altinity/ClickHouse` for
 `24.8` = `25.8`, and `26.3` = `26.8` for the header, with the two `.cpp`
 blobs differing only as described below — but **not across** the pairs. So
 a citation into those two files is valid for a pair, not for all four
-lines, and §5 gives its line numbers as `24.8/25.8 → 26.3/26.8`.
+lines. Every `LDAPClient.cpp` citation in this document is therefore given
+in the form `24.8/25.8 → 26.3/26.8` (§4, §5, §6, §8). `LDAPClient.h` is the
+exception that needs no such treatment: its blob differs between the pairs
+and the file grew from 161 to 163 lines, but every line this document cites
+from it (`:96`, `:120`–`:123` — the protocol-version and timeout/limit
+defaults) sits at an unchanged line number in both pairs, verified rather
+than assumed.
 
 Two source deltas separate the pairs, both established by direct diff
 rather than inferred from the differing SHAs:
@@ -179,26 +196,30 @@ becomes a socket write. Each hop below is cited as
    reading the `<ldap_servers><oauth_helper>` block) and calls
 4. **`LDAPSimpleAuthClient::authenticate`**
    (`Altinity/ClickHouse@351edb1a2ec26940aee4c2d1d332fd280c232964:src/Access/LDAPClient.cpp::LDAPSimpleAuthClient::authenticate`,
-   line 587 — identical in both commits), which drives the actual libldap
+   line 587 → 600 — identical within each source pair), which drives the
+   actual libldap
    calls:
-   * `LDAPClient::openConnection` (`LDAPClient.cpp:213`) — connection setup
+   * `LDAPClient::openConnection` (`LDAPClient.cpp:213` → `:214`) — connection setup
      and every `ldap_set_option` (§5 below);
    * the simple Bind itself, via `ldap_sasl_bind_s(...,
-     LDAP_SASL_SIMPLE, ...)` (`LDAPClient.cpp:360`);
+     LDAP_SASL_SIMPLE, ...)` (`LDAPClient.cpp:360` → `:368`);
    * for each configured role-mapping entry, `LDAPClient::search`
-     (`LDAPClient.cpp:405`, issuing `ldap_search_ext_s` at `LDAPClient.cpp:445`);
-   * `LDAPClient::closeConnection` (`LDAPClient.cpp:391`, issuing
-     `ldap_unbind_ext_s` at `LDAPClient.cpp:398`) once the `~LDAPClient`
+     (`LDAPClient.cpp:405` → `:413`, issuing `ldap_search_ext_s` at
+     `LDAPClient.cpp:445` → `:453`);
+   * `LDAPClient::closeConnection` (`LDAPClient.cpp:391` → `:399`, issuing
+     `ldap_unbind_ext_s` at `LDAPClient.cpp:398` → `:406`) once the `~LDAPClient`
      destructor runs or the connection is otherwise torn down.
 
 Role-search parameters themselves are parsed by
 `parseLDAPRoleSearchParams` (`ExternalAuthenticators.cpp:259` in the 24.8
-commit, `:269` in the 25.8 commit — the two commits' `checkLDAPCredentials`/
-`parseLDAPServer` bodies differ in length above this function, shifting its
-line number, even though the function itself is otherwise equivalent) and
+commit, `:269` in the 25.8 commit, `:273` in both the 26.3 and 26.8 commits
+— the commits' `checkLDAPCredentials`/`parseLDAPServer` bodies differ in
+length above this function, shifting its line number, even though the
+function itself is otherwise equivalent) and
 threaded through `LDAPAccessStorage`'s own
 `role_search_params` member (`LDAPAccessStorage.cpp`, constructed around
-line 71–84 in both commits), which is what turns the fixture's single
+line 71–84 in the 24.8/25.8 commits and 66–79 in the 26.3/26.8 commits),
+which is what turns the fixture's single
 `<role_mapping>` block into the one `LDAPClient::RoleSearchParams` instance
 `LDAPSimpleAuthClient::authenticate` iterates and searches with.
 
@@ -227,13 +248,14 @@ column below gives both, as `24.8/25.8 → 26.3/26.8`.
 | `LDAP_OPT_NETWORK_TIMEOUT`    | line 269 → 277 (`#ifdef LDAP_OPT_NETWORK_TIMEOUT`) | Operation/network timeout | Connect/network-level timeout (30 s default) — distinct from both the above and `timeLimit`. Likewise its own `#ifdef`-guarded block, present on both tracked OpenLDAP pins. |
 | `LDAP_OPT_TIMELIMIT`          | line 275 → 283            | Search defaults           | Handle-wide default Search time limit (20 s). This configuration path requests no per-call deadline, so this value is what reaches the wire: every captured `SearchRequest.timeLimit` in the corpus is 20 (BER `02 01 14`), on all four lines. Not `#ifdef`-guarded — set unconditionally. |
 | `LDAP_OPT_SIZELIMIT`          | line 280 → 288            | Search defaults           | Handle-wide default Search size limit, set from this fixture's explicit `<search_limit>256</search_limit>`; reaches the wire as `SearchRequest.sizeLimit` = 256 on all four lines. Not `#ifdef`-guarded — set unconditionally. |
-| `LDAP_OPT_X_TLS_PROTOCOL_MIN` (line 294), `LDAP_OPT_X_TLS_REQUIRE_CERT` (line 308), `LDAP_OPT_X_TLS_NEWCTX` (line 340) | lines 283–296, 298–309, 337–341 | TLS configuration | Each guarded **only** by its own compile-time `#ifdef` (does the macro exist on this OpenLDAP build) — there is no `params.enable_tls` check and no field-present check on any of these three. They run unconditionally whenever compiled with TLS support, `<enable_tls>no</enable_tls>` notwithstanding. |
-| `LDAP_OPT_X_TLS_CERTFILE`, `LDAP_OPT_X_TLS_KEYFILE`, `LDAP_OPT_X_TLS_CACERTFILE`, `LDAP_OPT_X_TLS_CACERTDIR`, `LDAP_OPT_X_TLS_CIPHER_SUITE` | lines 312–335 | TLS configuration | Each guarded by its own `#ifdef` **and** a field-emptiness check (`if (!params.tls_*.empty())`) — not by `params.enable_tls`. In this fixture's config all five fields are empty, so these five specifically do not fire; the three above still do. |
+| `LDAP_OPT_X_TLS_PROTOCOL_MIN` (line 294 → 302), `LDAP_OPT_X_TLS_REQUIRE_CERT` (line 308 → 316), `LDAP_OPT_X_TLS_NEWCTX` (line 340 → 348) | lines 283–296, 298–309, 337–341 → 291–304, 306–317, 345–349 | TLS configuration | Each guarded **only** by its own compile-time `#ifdef` (does the macro exist on this OpenLDAP build) — there is no `params.enable_tls` check and no field-present check on any of these three. They run unconditionally whenever compiled with TLS support, `<enable_tls>no</enable_tls>` notwithstanding. |
+| `LDAP_OPT_X_TLS_CERTFILE`, `LDAP_OPT_X_TLS_KEYFILE`, `LDAP_OPT_X_TLS_CACERTFILE`, `LDAP_OPT_X_TLS_CACERTDIR`, `LDAP_OPT_X_TLS_CIPHER_SUITE` | lines 312–335 → 320–343 | TLS configuration | Each guarded by its own `#ifdef` **and** a field-emptiness check (`if (!params.tls_*.empty())`) — not by `params.enable_tls`. In this fixture's config all five fields are empty, so these five specifically do not fire; the three above still do. |
 
 Recorded for completeness of the source read. **None of these eight options
 gate on `params.enable_tls`** — the fixture's `<enable_tls>no</enable_tls>`
 only controls the later, separately guarded `ldap_start_tls_s` call (line
-344: `if (params.enable_tls == ...::YES_STARTTLS) ldap_start_tls_s(...)`),
+344 → 352: `if (params.enable_tls == ...::YES_STARTTLS)
+ldap_start_tls_s(...)`),
 which is what actually starts TLS on the wire. So while three of these
 eight `ldap_set_option` calls (`PROTOCOL_MIN`, `REQUIRE_CERT`, `NEWCTX`) do
 execute for the captured sessions, none of them causes any TLS wire traffic
@@ -267,11 +289,11 @@ fallback/default, or (6) only observable on the wire itself.
 | Protocol version                | 3                      | (2) ClickHouse default (`LDAPClient.h:96`, `ProtocolVersion::V3`) applied via (3) `LDAP_OPT_PROTOCOL_VERSION`   |
 | Operation timeout               | 40 s                   | (2) ClickHouse compiled-in default (`LDAPClient.h:120`) applied via (3) `LDAP_OPT_TIMEOUT` — handle-wide only, no explicit per-call libldap operation-timeout argument exists for this call shape. |
 | Network timeout                 | 30 s                   | (2) ClickHouse compiled-in default (`LDAPClient.h:121`) applied via (3) `LDAP_OPT_NETWORK_TIMEOUT` — handle-wide only, same reasoning as above. |
-| Search time limit                | 20 s                   | (2) ClickHouse compiled-in default (`LDAPClient.h:122`), applied **both** via (3) `LDAP_OPT_TIMELIMIT` at connection-open time **and** (4) as the explicit `&timeout` argument `LDAPClient::search` builds and passes to `ldap_search_ext_s` (`LDAPClient.cpp:434`,`445`) — the handle-wide default is redundant with, not overridden by, the per-call value here, since both derive from the same `params.search_timeout`. |
-| Search size limit ("Search limit")| 256                    | (1) repository XML (`ldap.xml`'s `<search_limit>`, which overwrites (2) ClickHouse's own compiled-in default of 256 — `LDAPClient.h:123` — with the same numeric value, making this line behavior-neutral versus leaving it unset), applied **both** via (3) `LDAP_OPT_SIZELIMIT` and (4) the explicit `params.search_limit` argument to `ldap_search_ext_s` (`LDAPClient.cpp:445`), for the same belt-and-suspenders reason as the Search time limit. |
+| Search time limit                | 20 s                   | (2) ClickHouse compiled-in default (`LDAPClient.h:122`), applied **both** via (3) `LDAP_OPT_TIMELIMIT` at connection-open time **and** (4) as the explicit `&timeout` argument `LDAPClient::search` builds and passes to `ldap_search_ext_s` (`LDAPClient.cpp:434`,`445` → `:442`,`:453`) — the handle-wide default is redundant with, not overridden by, the per-call value here, since both derive from the same `params.search_timeout`. |
+| Search size limit ("Search limit")| 256                    | (1) repository XML (`ldap.xml`'s `<search_limit>`, which overwrites (2) ClickHouse's own compiled-in default of 256 — `LDAPClient.h:123` — with the same numeric value, making this line behavior-neutral versus leaving it unset), applied **both** via (3) `LDAP_OPT_SIZELIMIT` and (4) the explicit `params.search_limit` argument to `ldap_search_ext_s` (`LDAPClient.cpp:445` → `:453`), for the same belt-and-suspenders reason as the Search time limit. |
 | Search base DN                  | `ou=groups,dc=altinity,dc=internal` | (1) repository XML (`ldap.xml`'s `role_mapping/base_dn`)                                    |
-| Search scope                    | subtree                | (1) repository XML (`ldap.xml`'s `role_mapping/scope`), mapped to `LDAP_SCOPE_SUBTREE` (`LDAPClient.cpp:405`ff.) |
-| `derefAliases`                   | `neverDerefAliases` (0) | (5) libldap fallback/default — `LDAPClient::search` calls `ldap_search_ext_s` (`LDAPClient.cpp:445`), whose signature has no `deref` parameter at all; `ldap_search_ext_s` hardcodes `deref = -1` internally when it delegates to `ldap_pvt_search_s` (`search.c:151`, both pins), and `ldap_build_search_req`'s non-UDP branch resolves any negative `deref` to the handle's own `ld_deref` (`search.c:326`, both pins: `(deref < 0) ? ld->ld_deref : deref`). `ld_deref` is a per-handle copy of the process-wide global default options made at handle-creation time (`open.c:150`, inside the `ldap_create` already cited in §7), and that global default is set once by `ldap_int_initialize_global_options` (`init.c:563`, both pins: `gopts->ldo_deref = LDAP_DEREF_NEVER;`, i.e. `0x00` — `ldap.h:795`). ClickHouse never calls `ldap_set_option(..., LDAP_OPT_DEREF, ...)` anywhere in `LDAPClient.cpp`, so nothing overrides this chain. Confirmed on the wire: byte `00` in the `derefAliases` ENUMERATED immediately following the `scope` ENUMERATED in every committed `002-search-request.ber` fixture (24.8 and 25.8, `success` and `timeout-abandon`). |
+| Search scope                    | subtree                | (1) repository XML (`ldap.xml`'s `role_mapping/scope`), mapped to `LDAP_SCOPE_SUBTREE` (`LDAPClient.cpp:405`ff. → `:413`ff.) |
+| `derefAliases`                   | `neverDerefAliases` (0) | (5) libldap fallback/default — `LDAPClient::search` calls `ldap_search_ext_s` (`LDAPClient.cpp:445` → `:453`), whose signature has no `deref` parameter at all; `ldap_search_ext_s` hardcodes `deref = -1` internally when it delegates to `ldap_pvt_search_s` (`search.c:151`, both pins), and `ldap_build_search_req`'s non-UDP branch resolves any negative `deref` to the handle's own `ld_deref` (`search.c:326`, both pins: `(deref < 0) ? ld->ld_deref : deref`). `ld_deref` is a per-handle copy of the process-wide global default options made at handle-creation time (`open.c:150`, inside the `ldap_create` already cited in §7), and that global default is set once by `ldap_int_initialize_global_options` (`init.c:563`, both pins: `gopts->ldo_deref = LDAP_DEREF_NEVER;`, i.e. `0x00` — `ldap.h:795`). ClickHouse never calls `ldap_set_option(..., LDAP_OPT_DEREF, ...)` anywhere in `LDAPClient.cpp`, so nothing overrides this chain. Confirmed on the wire: byte `00` in the `derefAliases` ENUMERATED immediately following the `scope` ENUMERATED in every committed `002-search-request.ber` fixture (all four tracked lines, `success` and `timeout-abandon`). |
 | Search filter                   | `(&(objectClass=groupOfNames)(member={bind_dn}))` | (1) repository XML (`ldap.xml`'s `role_mapping/search_filter`), placeholders substituted per §6.3 below |
 | Requested attribute             | `cn`                   | (1) repository XML (`ldap.xml`'s `role_mapping/attribute`)                                                  |
 | MessageID sequence              | 1, 2, 3, …             | (6) observed wire / (5) libldap fallback — see §6.4; no ClickHouse or repository input chooses these values at all. |
@@ -389,7 +411,7 @@ Every tracked connection issues exactly one `BindRequest` before any
 `LDAPClient.h:96`, and every tracked deployment leaves that default in
 place) and `AuthenticationChoice::simple` — never SASL, never anonymous —
 via `ldap_sasl_bind_s(handle, final_bind_dn.c_str(), LDAP_SASL_SIMPLE,
-&cred, ...)` (`LDAPClient.cpp:360`). The credential (`cred.bv_val`) is the
+&cred, ...)` (`LDAPClient.cpp:360` → `:368`). The credential (`cred.bv_val`) is the
 caller's password field verbatim — in this fixture's deployment, the
 caller-side JWT — with no client-side transformation.
 
@@ -407,8 +429,9 @@ substituted, `sizeLimit` 256, `timeLimit` 20, `typesOnly` false (ClickHouse
 never sets it), and the single requested attribute `cn`. Every request PDU this fixture captures — Bind, Search, Abandon, Unbind
 alike — carries no LDAP Controls: `ldap_sasl_bind_s` and `ldap_search_ext_s`
 are both called from `LDAPClient.cpp` with `nullptr` for both the server-
-and client-controls arguments (`LDAPClient.cpp:360`,`445`); `Unbind` goes
-through `ldap_unbind_ext_s(handle, nullptr, nullptr)` (`LDAPClient.cpp:398`);
+and client-controls arguments (`LDAPClient.cpp:360`,`445` → `:368`,`:453`);
+`Unbind` goes through `ldap_unbind_ext_s(handle, nullptr, nullptr)`
+(`LDAPClient.cpp:398` → `:406`);
 and the client-side-timeout `Abandon` (§8.6) is libldap's own internal
 `ldap_abandon(ld, msgid)` call inside `ldap_result` (§7), which itself
 always passes `NULL, NULL` for controls (`abandon.c:102`, both pins). So
@@ -419,20 +442,20 @@ always passes `NULL, NULL` for controls (`abandon.c:102`, both pins). So
 
 `LDAPClient.cpp`'s anonymous-namespace helpers (identical in both tracked
 commits) do the substitution in two distinct escaping modes, and
-`LDAPClient::search` (`LDAPClient.cpp:420`ff.) is careful to apply the
+`LDAPClient::search` (`LDAPClient.cpp:420`ff. → `:428`ff.) is careful to apply the
 filter-safe one specifically to filter placeholders:
 
-* **`escapeForDN`** (`LDAPClient.cpp:89`): backslash-escapes the RFC 4514
+* **`escapeForDN`** (`LDAPClient.cpp:89` → `:90`): backslash-escapes the RFC 4514
   DN special characters (`, \ # + < > ; "` and `=`) one at a time. Used
   once, on the raw HTTP username, to produce `final_user_name`
-  (`LDAPClient.cpp:347`), which then feeds the Bind DN template's
-  `{user_name}` placeholder (`LDAPClient.cpp:348`) via a plain
-  string-replace helper (`replacePlaceholders`, `LDAPClient.cpp:149`).
-* **`escapeForFilter`** (`LDAPClient.cpp:116`): RFC 4515 filter-escapes
+  (`LDAPClient.cpp:347` → `:355`), which then feeds the Bind DN template's
+  `{user_name}` placeholder (`LDAPClient.cpp:348` → `:356`) via a plain
+  string-replace helper (`replacePlaceholders`, `LDAPClient.cpp:149` → `:150`).
+* **`escapeForFilter`** (`LDAPClient.cpp:116` → `:117`): RFC 4515 filter-escapes
   `*`, `(`, `)`, `\`, and NUL as `\2A`, `\28`, `\29`, `\5C`, `\00`
   respectively. Used when building the Search filter's own placeholders
   (`{user_name}`, `{bind_dn}`, `{user_dn}`, `{base_dn}` —
-  `LDAPClient.cpp:427`–`430`), never for the DN fields themselves — the
+  `LDAPClient.cpp:427`–`430` → `:435`–`:438`), never for the DN fields themselves — the
   same underlying string is escaped differently depending on which BER
   field it is about to land in.
 
@@ -490,7 +513,8 @@ scanner's own committed fixture to trip its own positive-match logic.
 
 Every session ends with exactly one `UnbindRequest` — `SEQUENCE {
 messageID, [APPLICATION 2] NULL }` — issued from `~LDAPClient`'s call to
-`closeConnection` (`LDAPClient.cpp:391`, `ldap_unbind_ext_s` at line 398)
+`closeConnection` (`LDAPClient.cpp:391` → `:399`, `ldap_unbind_ext_s` at
+line 398 → 406)
 with its own freshly allocated MessageID (§7). It carries no credential
 content of any kind.
 

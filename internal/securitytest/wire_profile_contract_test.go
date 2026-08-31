@@ -62,6 +62,15 @@ import (
 // auditedLineProvenance is one tracked line's independently audited
 // source-provenance record (plan §2.2/§2.3), typed in here rather than
 // read from any file this test also checks against it.
+//
+// ClickHouseCommit is a COMMIT object SHA, never a tag object SHA. Most
+// ClickHouse release tags are lightweight and resolve straight to a commit,
+// but v26.8.1.2041-lts is annotated: its ref reports object type "tag" and
+// must be peeled to the underlying commit before being recorded. A tag SHA
+// silently "works" for fetching file contents — the GitHub contents API
+// peels refs — so the Blobs below are unaffected either way, and nothing
+// here can catch the substitution offline. Check .object.type when
+// resolving a tag.
 type auditedLineProvenance struct {
 	Line                 string
 	Image                string
@@ -135,7 +144,7 @@ var auditedProvenanceMatrix = []auditedLineProvenance{
 		Image:                "clickhouse/clickhouse-server:26.8.1.2041",
 		ClickHouseRepository: "ClickHouse/ClickHouse",
 		ClickHouseTag:        "v26.8.1.2041-lts",
-		ClickHouseCommit:     "be4175ff9ba169fe2421dc8c7d06b0e94cfb4594",
+		ClickHouseCommit:     "537693a9b20b947a3cf0c4ac90c7c966eee963c9",
 		Blobs: map[string]string{
 			wirefixture.BlobKeyLDAPClientCPP:             "7465096b834f789bd8856cc74cc5dbefe6397ded",
 			wirefixture.BlobKeyLDAPClientH:               "558017704e75731fd1b2bb0eb88367c00d40aa69",

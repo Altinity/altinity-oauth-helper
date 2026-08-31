@@ -356,7 +356,20 @@ fi
 # session's profile.json via `ldap-wire-recorder sanitize`'s profile flags
 # (the wirecapture-profile-writer sub-task). A line present in BUILDS but
 # absent here is a real gap: fail loudly rather than capture without
-# provenance (checked per-line inside the main loop below). ────────────────
+# provenance (checked per-line inside the main loop below).
+#
+# WIRECAP_CH_COMMIT must be a COMMIT object SHA, never a tag object SHA.
+# Most ClickHouse release tags are lightweight and point straight at a
+# commit, but not all: v26.8.1.2041-lts is an ANNOTATED tag, so
+# `git/ref/tags/<tag>` reports object type `tag` and a SHA
+# (be4175ff…) that is the tag object, not the commit. It must be peeled —
+# `gh api repos/<repo>/git/tags/<tag-sha> --jq .object.sha` — to the real
+# commit (537693a9…) before being recorded here. Always check
+# `.object.type` when resolving a tag; a tag SHA silently "works" for
+# fetching file contents (the GitHub contents API peels refs for you, so
+# the blob SHAs below come out correct either way) and only shows up as
+# wrong when someone tries to resolve the recorded value as a commit.
+# ──────────────────────────────────────────────────────────────────────────
 declare -A WIRECAP_CH_REPO=(
     ["24.8"]="Altinity/ClickHouse"
     ["25.8"]="Altinity/ClickHouse"
@@ -373,7 +386,7 @@ declare -A WIRECAP_CH_COMMIT=(
     ["24.8"]="351edb1a2ec26940aee4c2d1d332fd280c232964"
     ["25.8"]="568824f4327b379e86bce93f12b9cebe0cfd9ff5"
     ["26.3"]="8de06fed91fa7a6545a72f37c98e81d4cc024bb1"
-    ["26.8"]="be4175ff9ba169fe2421dc8c7d06b0e94cfb4594"
+    ["26.8"]="537693a9b20b947a3cf0c4ac90c7c966eee963c9"
 )
 declare -A WIRECAP_BLOB_LDAPCLIENT_CPP=(
     ["24.8"]="3a0b82b9a760e8c0e4f37f422e673a1c5a2228e0"
