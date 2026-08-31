@@ -31,8 +31,40 @@ package securitytest
 //     (test/tooling support introduced alongside this contract, plan §8.1)
 //     stays mechanically outside the shipped command's closure.
 //
-// See the Phase-3 extension point comment at the bottom of this file for
-// where the issue's later general-LDAP denylist test lands.
+// Issue #33 phase 3 extends this same file (plan §31 "Later-phase handoff",
+// "Dependency closure contract") with the staged general-purpose-LDAP-library
+// denylist and the temporary phase3profile tagged-replacement contracts, at
+// the bottom of this file:
+//
+//   - TestDependencyContract_ProductionClosureHasNoGeneralLDAP: the staged,
+//     test-only-enum-gated policy over the ordinary (untagged)
+//     ./cmd/ch-oauth-ldap closure. At productionLDAPClosureStage ==
+//     legacyUntilPhase4 (today's value) it requires — rather than forbids —
+//     at least one dependency matching EACH of the five general-LDAP
+//     prefixes, so the staged contract stays an honest proof that the known
+//     legacy dependency problem is really present, never a vacuously-passing
+//     no-op. Phase 4 flips the single stage constant to replacement, which
+//     inverts the assertion to zero matches plus profile/cryptobyte
+//     presence.
+//   - TestDependencyContract_Phase3ReplacementClosureHasNoGeneralLDAP: the
+//     same denylist applied to the -tags=phase3profile closure of the same
+//     command, which is already expected to be general-LDAP-free today.
+//   - TestDependencyContract_Phase3ReplacementCommandBuilds: a real
+//     deterministic `go build -tags=phase3profile ./cmd/ch-oauth-ldap`,
+//     because `go list -deps` alone proves closure membership, not that the
+//     tagged function bodies still type-check.
+//   - TestDependencyContract_Phase3ReplacementCommandTests: a real
+//     deterministic `go test -tags=phase3profile ./cmd/ch-oauth-ldap`,
+//     because compiling the tagged composition proves nothing about the
+//     tagged test files' own assertions, and the Required PR gate's
+//     untagged `go test -race ./...` step never adds -tags=phase3profile on
+//     its own.
+//
+// The five-prefix denylist and its prefix matcher (generalLDAPDenylistPrefixes,
+// matchesGeneralLDAPPrefix, isGeneralLDAPDependency) are defined once, here,
+// and reused verbatim by profile_dependency_contract_test.go's own
+// profile-closure policy — never forked into a second, independently
+// drifting list.
 
 import (
 	"bytes"
@@ -41,6 +73,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -310,17 +343,335 @@ func diffStringSets(got, want []string) (added, removed []string) {
 	return added, removed
 }
 
-// --- Phase-3 extension point --------------------------------------------
+// --- Phase 3: general-LDAP denylist + tagged-replacement contracts ------
 //
-// Phase 3 extends this same file (plan §31 "Later-phase handoff") with a
-// test enforcing the issue's general-purpose-LDAP-library denylist against
-// the same live closure liveProductionNonstdlibDeps already computes, e.g.:
+// phase3ReplacementTag is the temporary Phase 3 compile-time selector (plan
+// "Central design: temporary phase3profile compile-time selection") that
+// switches ./cmd/ch-oauth-ldap's LDAP backend from legacy internal/ldap to
+// internal/ldap/profile. Phase 4 deletes it; until then it must appear
+// nowhere except integration/clickhouse/Dockerfile's ch-oauth-ldap build
+// line (see phase3_selector_contract_test.go) and must never become a
+// runtime selector.
+const phase3ReplacementTag = "phase3profile"
+
+// legacyLDAPImportPath is this module's own legacy general-purpose LDAP
+// server package. It must be present in the ordinary (untagged) production
+// closure and absent from the -tags=phase3profile closure throughout
+// Phase 3 (Phase 4 deletes the package and inverts both expectations).
+const legacyLDAPImportPath = "github.com/altinity/altinity-oauth-helper/internal/ldap"
+
+// generalLDAPDenylistPrefixes are the production general-purpose LDAP-stack
+// import-path prefixes the issue's dependency policy forbids everywhere it
+// applies (plan "Dependency closure contract"). Defined once, here, and
+// reused verbatim by profile_dependency_contract_test.go's own
+// profile-closure policy — never forked into a second, independently
+// drifting list. The production snapshot contains
+// github.com/vjeantet/goldap/message (not github.com/vjeantet/goldap
+// itself), which is exactly why matching is prefix-based
+// (matchesGeneralLDAPPrefix) rather than bare equality.
+var generalLDAPDenylistPrefixes = []string{
+	"github.com/vjeantet/ldapserver",
+	"github.com/vjeantet/goldap",
+	"github.com/go-ldap/ldap/v3",
+	"github.com/go-asn1-ber/asn1-ber",
+	"github.com/Azure/go-ntlmssp",
+}
+
+// TestGeneralLDAPDenylistPrefixes_ExactlyTheRequiredFive guards
+// generalLDAPDenylistPrefixes itself, independent of any of its three real
+// consumers (TestDependencyContract_ProductionClosureHasNoGeneralLDAP's
+// legacyUntilPhase4 loop below, isGeneralLDAPDependency, and — through
+// isGeneralLDAPDependency — TestDependencyContract_
+// Phase3ReplacementClosureHasNoGeneralLDAP and profile_dependency_contract_
+// test.go's TestDependencyContract_ProfileClosureHasRequiredPrimitiveAndNoGeneralLDAP).
+// All three derive their entire check from ranging over this one mutable
+// package-level slice, so a one-line edit shortening or emptying it would
+// silently defang every one of them with no compile error: an emptied slice
+// makes the legacyUntilPhase4 loop's body never execute (vacuously
+// passing — checking nothing) and makes isGeneralLDAPDependency
+// unconditionally return false (recognizing nothing). This test is the
+// independent assertion that closes that gap by comparing the literal
+// against a separately declared want-list, non-emptiness, and uniqueness —
+// not by re-deriving expectations from generalLDAPDenylistPrefixes itself,
+// which could never detect a change to it.
+func TestGeneralLDAPDenylistPrefixes_ExactlyTheRequiredFive(t *testing.T) {
+	want := []string{
+		"github.com/vjeantet/ldapserver",
+		"github.com/vjeantet/goldap",
+		"github.com/go-ldap/ldap/v3",
+		"github.com/go-asn1-ber/asn1-ber",
+		"github.com/Azure/go-ntlmssp",
+	}
+	if len(generalLDAPDenylistPrefixes) != len(want) {
+		t.Fatalf("generalLDAPDenylistPrefixes: expected exactly %d prefixes, got %d: %v",
+			len(want), len(generalLDAPDenylistPrefixes), generalLDAPDenylistPrefixes)
+	}
+	if !reflect.DeepEqual(generalLDAPDenylistPrefixes, want) {
+		t.Fatalf("generalLDAPDenylistPrefixes: expected exactly %v (in this order), got %v",
+			want, generalLDAPDenylistPrefixes)
+	}
+	seen := make(map[string]bool, len(generalLDAPDenylistPrefixes))
+	for _, prefix := range generalLDAPDenylistPrefixes {
+		if prefix == "" {
+			t.Fatalf("generalLDAPDenylistPrefixes: contains an empty prefix, which would match every non-empty dependency string via matchesGeneralLDAPPrefix's HasPrefix(dep, \"\"+\"/\") branch")
+		}
+		if seen[prefix] {
+			t.Fatalf("generalLDAPDenylistPrefixes: prefix %q is duplicated — every entry must be unique", prefix)
+		}
+		seen[prefix] = true
+	}
+}
+
+// matchesGeneralLDAPPrefix reports whether dep is prefix itself or one of
+// its subpackages, using exactly the rule plan "Dependency closure contract"
+// requires: "dep == prefix || strings.HasPrefix(dep, prefix+"/")".
+func matchesGeneralLDAPPrefix(dep, prefix string) bool {
+	return dep == prefix || strings.HasPrefix(dep, prefix+"/")
+}
+
+// isGeneralLDAPDependency reports whether dep matches any
+// generalLDAPDenylistPrefixes entry.
+func isGeneralLDAPDependency(dep string) bool {
+	for _, prefix := range generalLDAPDenylistPrefixes {
+		if matchesGeneralLDAPPrefix(dep, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ldapClosureStage is the test-only closed enum gating
+// TestDependencyContract_ProductionClosureHasNoGeneralLDAP's assertion
+// direction (plan "Staged production state"). It has exactly two valid
+// values; anything else fails the test rather than silently defaulting.
+type ldapClosureStage string
+
+const (
+	// legacyUntilPhase4 is today's honest state: the ordinary production
+	// closure still contains the full general-LDAP stack, and the staged
+	// contract requires — never forbids — evidence of that fact, so the
+	// contract cannot pass vacuously while quietly proving nothing.
+	legacyUntilPhase4 ldapClosureStage = "legacyUntilPhase4"
+	// replacement is Phase 4's post-cutover state: zero general-LDAP
+	// matches, plus profile and cryptobyte present. Phase 4 flips
+	// productionLDAPClosureStage to this value only after the cutover is
+	// actually present.
+	replacement ldapClosureStage = "replacement"
+)
+
+// productionLDAPClosureStage is the single flag Phase 4 flips once the
+// production cutover has actually landed (plan "Staged production state").
+// Do not flip it ahead of the real cutover: at legacyUntilPhase4 (today's
+// value) this is a truthful staged denylist over a known-bad closure, not an
+// aspirational one.
+const productionLDAPClosureStage = legacyUntilPhase4
+
+// TestDependencyContract_ProductionClosureHasNoGeneralLDAP is the staged
+// general-LDAP dependency policy over ./cmd/ch-oauth-ldap's ordinary
+// (untagged) live production closure (plan "Staged production state").
 //
-//	func TestDependencyContract_ProductionClosureHasNoGeneralLDAP(t *testing.T) {
-//		...
-//	}
+// At legacyUntilPhase4 (today's stage) it requires at least one dependency
+// matching EACH of the five generalLDAPDenylistPrefixes entries in the
+// ordinary closure — a deliberately non-vacuous proof that the staged
+// contract is honestly observing today's known legacy dependency problem,
+// not a no-op dressed up as a policy. At replacement it requires zero
+// matches for all five prefixes, plus internal/ldap/profile and
+// golang.org/x/crypto/cryptobyte both present. An unknown stage value fails
+// the test outright.
+func TestDependencyContract_ProductionClosureHasNoGeneralLDAP(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("dependency_contract: resolve module root: %v", err)
+	}
+	got := liveProductionNonstdlibDeps(t, root)
+
+	switch productionLDAPClosureStage {
+	case legacyUntilPhase4:
+		for _, prefix := range generalLDAPDenylistPrefixes {
+			found := false
+			for _, dep := range got {
+				if matchesGeneralLDAPPrefix(dep, prefix) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("dependency_contract: staged denylist stage %q requires at least one dependency matching prefix %s in %s's live closure, but none was found — the staged contract must observe today's known legacy dependency honestly and must never become vacuous",
+					productionLDAPClosureStage, prefix, productionClosureTarget)
+			}
+		}
+	case replacement:
+		for _, dep := range got {
+			if isGeneralLDAPDependency(dep) {
+				t.Fatalf("dependency_contract: staged denylist stage %q requires zero general-LDAP matches in %s's live closure, but found %s",
+					productionLDAPClosureStage, productionClosureTarget, dep)
+			}
+		}
+		requireDepPresent(t, got, profileImportPath, "stage "+string(productionLDAPClosureStage))
+		requireDepPresent(t, got, forbiddenCryptobyteImport, "stage "+string(productionLDAPClosureStage))
+	default:
+		t.Fatalf("dependency_contract: unknown productionLDAPClosureStage %q — must be %q or %q", productionLDAPClosureStage, legacyUntilPhase4, replacement)
+	}
+}
+
+// requireDepPresent fails the test unless want appears in got, reporting
+// context in the failure message.
+func requireDepPresent(t *testing.T, got []string, want, context string) {
+	t.Helper()
+	for _, dep := range got {
+		if dep == want {
+			return
+		}
+	}
+	t.Fatalf("dependency_contract: %s requires %s present in the live closure, but it is absent", context, want)
+}
+
+// liveTaggedProductionNonstdlibDeps runs the same deterministic `go list`
+// invocation liveProductionNonstdlibDeps uses, with -tags=phase3profile
+// added, against productionClosureTarget (plan "Tagged replacement
+// contract": "go list -mod=readonly -tags=phase3profile -deps
+// ./cmd/ch-oauth-ldap").
+func liveTaggedProductionNonstdlibDeps(t *testing.T, root string) []string {
+	t.Helper()
+
+	goBin := resolveGoBin(t)
+
+	cmd := exec.Command(goBin, //nolint:gosec // fixed, deterministically-resolved go tool binary; fixed argv below
+		"list", "-mod=readonly", "-tags="+phase3ReplacementTag, "-deps",
+		"-f", "{{if not .Standard}}{{.ImportPath}}{{end}}",
+		productionClosureTarget)
+	cmd.Dir = root
+	cmd.Env = deterministicGoListEnv()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dependency_contract: %s list -tags=%s -deps %s failed: %v\nstderr:\n%s", filepath.Base(goBin), phase3ReplacementTag, productionClosureTarget, err, stderr.String())
+	}
+	return normalizeDepsOutput(stdout.String())
+}
+
+// TestDependencyContract_Phase3ReplacementClosureHasNoGeneralLDAP requires
+// the -tags=phase3profile live closure of ./cmd/ch-oauth-ldap to already
+// satisfy the final (post-cutover) dependency policy today (plan "Tagged
+// replacement contract"): internal/ldap/profile present, cryptobyte
+// present, legacy internal/ldap absent, all five general-LDAP prefixes
+// absent, and internal/wirefixture (test/tooling support) absent. This is a
+// closure proof only — the separate
+// TestDependencyContract_Phase3ReplacementCommandBuilds test proves the
+// tagged composition also actually compiles.
+func TestDependencyContract_Phase3ReplacementClosureHasNoGeneralLDAP(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("dependency_contract: resolve module root: %v", err)
+	}
+	got := liveTaggedProductionNonstdlibDeps(t, root)
+
+	requireDepPresent(t, got, profileImportPath, "the -tags="+phase3ReplacementTag+" closure")
+	requireDepPresent(t, got, forbiddenCryptobyteImport, "the -tags="+phase3ReplacementTag+" closure")
+
+	for _, dep := range got {
+		if dep == legacyLDAPImportPath {
+			t.Fatalf("dependency_contract: the -tags=%s closure of %s must not contain the legacy %s, but it does", phase3ReplacementTag, productionClosureTarget, legacyLDAPImportPath)
+		}
+		if dep == forbiddenWirefixtureImport {
+			t.Fatalf("dependency_contract: the -tags=%s closure of %s must not contain %s (test/tooling support only), but it does", phase3ReplacementTag, productionClosureTarget, forbiddenWirefixtureImport)
+		}
+		if isGeneralLDAPDependency(dep) {
+			t.Fatalf("dependency_contract: the -tags=%s closure of %s must not contain the general-LDAP stack, but found %s", phase3ReplacementTag, productionClosureTarget, dep)
+		}
+	}
+}
+
+// TestDependencyContract_Phase3ReplacementCommandBuilds performs a real
+// deterministic `go build -tags=phase3profile ./cmd/ch-oauth-ldap` (plan "CI
+// compilation of the tagged composition"). `go list -deps` alone proves
+// dependency-closure membership but not that the tagged function bodies
+// still type-check — a renamed profile.Config field, a changed profile.New
+// signature, or a tagged syntax/type error would all pass the closure
+// contracts above while failing to compile. This test is deliberately
+// untagged so the Required PR gate's `go test -race ./...` step executes it
+// on every pull request and every push to main, without ever touching
+// .github/workflows/pr-gate.yml's pinned five-command contract.
 //
-// Phase 4 then updates ONLY the live expectation file at
-// liveExpectationRelPath after the approved dependency deletions land —
-// internal/ldap/testdata/phase1-baseline/production-nonstdlib-deps.txt stays
-// immutable forever, per plan §4.2/§31.
+// The build output goes to t.TempDir(), which the testing package removes
+// automatically — no build artifact is ever left in the checkout.
+func TestDependencyContract_Phase3ReplacementCommandBuilds(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("dependency_contract: resolve module root: %v", err)
+	}
+
+	goBin := resolveGoBin(t)
+	outBin := filepath.Join(t.TempDir(), "ch-oauth-ldap-phase3")
+
+	cmd := exec.Command(goBin, //nolint:gosec // fixed, deterministically-resolved go tool binary; fixed argv below
+		"build",
+		"-mod=readonly",
+		"-tags="+phase3ReplacementTag,
+		"-o", outBin,
+		productionClosureTarget)
+	cmd.Dir = root
+	cmd.Env = deterministicGoListEnv()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dependency_contract: %s build -tags=%s -o %s %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			filepath.Base(goBin), phase3ReplacementTag, outBin, productionClosureTarget, err, stdout.String(), stderr.String())
+	}
+	if info, err := os.Stat(outBin); err != nil || info.IsDir() {
+		t.Fatalf("dependency_contract: expected a built binary at %s after a successful build, stat: %v", outBin, err)
+	}
+}
+
+// TestDependencyContract_Phase3ReplacementCommandTests closes the gap left
+// by TestDependencyContract_Phase3ReplacementCommandBuilds: a real
+// deterministic `go build -tags=phase3profile` proves the tagged
+// composition compiles, but the Required PR gate's own `go test -race
+// ./...` step never adds `-tags=phase3profile`, so it never executes
+// cmd/ch-oauth-ldap/config_phase3profile_test.go or
+// cmd/ch-oauth-ldap/main_phase3profile_test.go (both `//go:build
+// phase3profile`) — a logic regression confined to those tagged test files
+// (e.g. newLDAPServer silently selecting the wrong backend, or a broken
+// tagged config-narrowing rule) could pass every required check while the
+// tagged tests themselves fail. This test is deliberately untagged, exactly
+// like TestDependencyContract_Phase3ReplacementCommandBuilds, so the
+// Required PR gate's untagged `go test -race ./...` step runs it on every
+// pull request and every push to main, without touching
+// .github/workflows/pr-gate.yml's pinned five-command contract.
+func TestDependencyContract_Phase3ReplacementCommandTests(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("dependency_contract: resolve module root: %v", err)
+	}
+
+	goBin := resolveGoBin(t)
+
+	cmd := exec.Command(goBin, //nolint:gosec // fixed, deterministically-resolved go tool binary; fixed argv below
+		"test",
+		"-mod=readonly",
+		"-tags="+phase3ReplacementTag,
+		productionClosureTarget)
+	cmd.Dir = root
+	// Deliberately NOT deterministicGoListEnv(): that pins GOOS=linux/
+	// GOARCH=amd64 for the host-independent `go list -deps` TEXT OUTPUT
+	// comparisons elsewhere in this file, which never execute anything. This
+	// test's whole point is to actually RUN the tagged test binary, so it
+	// must build for (and run on) the current host — cross-compiling it to
+	// linux/amd64 on a non-Linux/amd64 machine (e.g. darwin/arm64 in local
+	// dev) would produce a binary `go test` cannot execute at all
+	// ("exec format error"), a false failure unrelated to the tagged tests
+	// themselves. Inheriting the ambient environment is correct here.
+	cmd.Env = os.Environ()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dependency_contract: %s test -tags=%s %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			filepath.Base(goBin), phase3ReplacementTag, productionClosureTarget, err, stdout.String(), stderr.String())
+	}
+}

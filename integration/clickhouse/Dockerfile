@@ -45,9 +45,27 @@ COPY internal ./internal
 COPY integration/clickhouse/ha ./integration/clickhouse/ha
 COPY integration/clickhouse/wirecapture ./integration/clickhouse/wirecapture
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=integration-test" -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap
+RUN CGO_ENABLED=0 go build -tags=phase3profile -ldflags="-s -w -X main.version=integration-test" -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap
 # synthetic-idp, ldap-session-probe, and ldap-wire-recorder have no
 # main.version symbol to stamp.
+#
+# The `phase3profile` build tag above (issue #33 phase 3) is the ONLY build
+# selector in this image; it picks the temporary internal/ldap/profile
+# replacement over the default legacy internal/ldap backend
+# (cmd/ch-oauth-ldap's build-tag
+# seam, see cmd/ch-oauth-ldap/ldap_backend_phase3profile.go /
+# ldap_backend_legacy.go). synthetic-idp, ldap-session-probe, and
+# ldap-wire-recorder do not import either LDAP backend and stay untagged.
+# There is no ARG/env selector: the whole Docker suite that consumes this
+# image (run.sh, run-all-builds.sh, run-ha.sh, and
+# compose-wirecapture.yml's ldap-helper-upstream service, which runs this
+# same /bin/ch-oauth-ldap) always exercises the replacement, while ordinary
+# `go build ./cmd/ch-oauth-ldap` (and the published
+# Dockerfile.ch-oauth-ldap production image) remain legacy until Phase 4
+# deletes this tag and makes the replacement the only backend. See
+# integration/clickhouse/README.md and
+# docs/clickhouse-ldap-wire-profile.md for the corresponding wire-capture
+# policy.
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/synthetic-idp ./cmd/synthetic-idp
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/ldap-session-probe ./integration/clickhouse/ha/session-probe
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/ldap-wire-recorder ./integration/clickhouse/wirecapture

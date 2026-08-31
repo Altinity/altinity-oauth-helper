@@ -375,6 +375,21 @@ any Kubernetes failover SLA. Every one of those claims is summarized in one
 phrase: **not verified in this environment** — execute the Kubernetes
 runbook below on a real cluster before relying on them.
 
+**Issue #33 phase 3 note.** This same Docker HA harness was also run against
+the replacement compatibility profile (`internal/ldap/profile`) for both
+tracked ClickHouse images (`24.8.11.51285`, `25.8.28.10001`). The replacement
+is selected only by a temporary compile-time `phase3profile` Go build tag
+applied solely to `integration/clickhouse/Dockerfile`'s helper build — see
+[`docs/clickhouse-ldap-wire-profile.md`](clickhouse-ldap-wire-profile.md)
+§11.5 for the full result record. Both runs passed with the **identical
+claim boundary above, verbatim**: they prove the same Docker/HAProxy
+socket-local-session behavior described above and nothing about Kubernetes
+routing, EndpointSlice/CNI convergence, pod-eviction semantics, or a
+failover SLA. Ordinary production deployment — `cmd/ch-oauth-ldap` built
+without the tag, and the published `ghcr.io/altinity/ch-oauth-ldap` image —
+remains on the legacy implementation described in §1–§9 until Phase 4
+removes the selector and cuts over.
+
 ### 8.2 Kubernetes runbook (not executed in this environment)
 
 No live Kubernetes cluster was available to this phase's implementation.
@@ -435,19 +450,29 @@ the one Search filter `ch-oauth-ldap` ever authorizes
 deep. This is not an operator-configurable knob; it is a fixed hardening
 bound in the vendored dependency.
 
-## 10. Compatibility profile (issue #33 phase 2 — in development)
+## 10. Compatibility profile (issue #33 phase 3 — certified for integration, production cutover is Phase 4)
 
-**This section is a development-status note, not a cutover announcement.**
+**This section is a certification-status note, not a cutover announcement.**
 Issue #33 is building a first-party, bounded ClickHouse compatibility profile
 at `internal/ldap/profile/` to eventually replace the vendored
 `third_party/goldap`/`third_party/ldapserver` LDAP stack described in §1–§9
 above. Today, `cmd/ch-oauth-ldap` still runs that legacy server in
-production — nothing production-reachable imports the profile package yet.
-It exists with its own real-TCP black-box tests, native fuzzing, real-TCP
-replay of every committed wire fixture, and dependency/architecture/redaction
-contracts; see `CLAUDE.md`'s `internal/ldap/profile/` repo-map row and
+production, and so does the published `Dockerfile.ch-oauth-ldap` image —
+nothing production-reachable imports the profile package. Phase 3 added a
+temporary compile-time `phase3profile` Go build tag inside
+`cmd/ch-oauth-ldap` that selects the profile package only for
+`integration/clickhouse/Dockerfile`'s helper build, and under that selector
+certified the real command composition (config, verifier, role pipeline,
+listener, lifecycle) against both tracked ClickHouse images, HA (§8.1
+above), the committed wire-fixture corpus (verify-only), and all five native
+fuzz targets. The package exists with its own real-TCP black-box tests,
+native fuzzing, real-TCP replay of every committed wire fixture, and
+dependency/architecture/redaction contracts; see `CLAUDE.md`'s
+`internal/ldap/profile/` repo-map row and
 [`docs/clickhouse-ldap-wire-profile.md`](clickhouse-ldap-wire-profile.md) §11
-for the complete engineering-evidence writeup this note summarizes.
+(especially §11.5) for the complete engineering-evidence writeup this note
+summarizes. Phase 4 owns deleting the temporary selector and making this
+composition ordinary production code.
 
 ### Search values retained as variable
 
@@ -472,7 +497,12 @@ projection, but those forms are outside documented ClickHouse traffic.
 
 Only LDAPv3 simple Bind is accepted after cutover; current production's
 incidental Bind-version-2 acceptance is not retained (the replacement returns
-result 2 `protocolError` instead).
+result 2 `protocolError` instead). A separately reviewed decoder-boundary
+note: version 0, negative, or non-minimally-encoded values close the
+connection as malformed, while minimally encoded values `>=128` can decode
+and receive result 2, even though legacy `goldap` closed above 127 — tracked
+ClickHouse emits version 3, so the parser is neither widened nor narrowed
+merely to copy that incidental legacy behavior.
 
 ### Deliberate DN narrowing
 
@@ -489,8 +519,10 @@ unsupported Extended request (result 53) rather than today's vendored Cancel
 implementation; critical Cancel/Abandon retain their result-12/no-target-action
 behavior where applicable; a peer disconnect no longer asynchronously cancels
 an already-running verification call. These are real legacy-behavior removals,
-permitted by the replacement's bounded synchronous architecture, that Phase 3
-must explicitly accept before Phase 4.
+permitted by the replacement's bounded synchronous architecture. Phase 3 has
+reviewed and explicitly `ACCEPT`ed each one (see
+[`docs/clickhouse-ldap-wire-profile.md`](clickhouse-ldap-wire-profile.md)
+§11.3/§11.5 rows 6, 7, and 8) ahead of the Phase 4 cutover.
 
 ### New response-PDU cap and `UserRDNAttribute` validation
 

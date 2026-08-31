@@ -14,8 +14,8 @@
 //
 //   - cmd/ch-oauth-ldap does not import it —
 //     TestDependencyContract_ProfileImplementationIsNotProduction fails the
-//     build if it ever appears in that command's dependency closure before
-//     Phase 4;
+//     build if it ever appears in that command's ordinary (untagged)
+//     dependency closure before Phase 4;
 //   - it carries no production ClickHouse traffic; the shipping server
 //     remains internal/ldap's existing implementation, driven by
 //     third_party/goldap and third_party/ldapserver;
@@ -25,10 +25,30 @@
 //     and hands Server.Serve an already-listening net.Listener, exactly as
 //     cmd/ch-oauth-ldap's ldap.listen already does for the current server.
 //
-// Phase 4 is the only phase authorized to import this package from
-// cmd/ch-oauth-ldap, switch command config conversion to profile.Config,
-// replace the old DN-constructor startup validation with
-// profile.ValidateConfig, and delete internal/ldap's non-test
-// implementation. No file in this package moves during that cutover; the
-// package itself already sits at its permanent import path.
+// # Phase 3 status — temporary tagged import, not yet production
+//
+// Issue #33 phase 3 adds a temporary, compile-time-only exception to the
+// "cmd/ch-oauth-ldap does not import it" rule above: cmd/ch-oauth-ldap's
+// ldap_backend_phase3profile.go (guarded by `//go:build phase3profile`)
+// imports this package to map command config into profile.Config, call
+// profile.ValidateConfig, and construct profile.New — but ONLY when the
+// command is built with `-tags=phase3profile`, which no shipped production
+// artifact does. The ordinary (untagged) build still compiles
+// ldap_backend_legacy.go instead, importing internal/ldap exactly as
+// before, so TestDependencyContract_ProfileImplementationIsNotProduction's
+// untagged assertion above remains true and unweakened throughout Phase 3.
+// The tagged import exists solely so the replacement's real command
+// composition, lifecycle, and configuration mapping can be certified
+// ahead of cutover (see docs/clickhouse-ldap-wire-profile.md's Phase 3
+// evidence) — it is not a second production entrypoint, there is no
+// runtime selector, and no file in this package moves for it.
+//
+// Phase 4 removes the phase3profile build tag entirely: it deletes
+// ldap_backend_legacy.go, deletes internal/ldap's non-test implementation,
+// and promotes ldap_backend_phase3profile.go's logic (minus the build
+// constraint) to cmd/ch-oauth-ldap's only, ordinary LDAP backend adapter —
+// at which point TestDependencyContract_ProfileImplementationIsNotProduction
+// itself inverts (see that test's own Amendment 5 doc comment) rather than
+// being deleted. No file in this package moves during that cutover either;
+// the package itself already sits at its permanent import path.
 package profile

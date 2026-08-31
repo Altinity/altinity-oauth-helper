@@ -224,17 +224,24 @@ What the fixture proves, and what you should expect in production:
     lands, keep `ch-oauth-ldap` on a trusted internal network and never
     expose it publicly.
 
-### Compatibility profile (issue #33 phase 2 — implementation only, not yet in production)
+### Compatibility profile (issue #33 phase 3 — certified for integration, production cutover is Phase 4)
 
 Issue #33 is replacing the vendored `third_party/goldap`/`third_party/ldapserver`
 LDAP stack above with a first-party, bounded ClickHouse compatibility profile at
-`internal/ldap/profile/`. **This is a development-status note, not a cutover
+`internal/ldap/profile/`. **This is a certification-status note, not a cutover
 announcement**: `cmd/ch-oauth-ldap` still runs the legacy server described above
-in production; the profile package exists with its own real-TCP tests, native
-fuzzing, real-TCP replay of every committed wire fixture, and
-dependency/architecture/redaction contracts (see `CLAUDE.md`'s
-`internal/ldap/profile/` repo-map row), but nothing production-reachable imports
-it yet — that cutover is Phase 4.
+in production, and the published `Dockerfile.ch-oauth-ldap` image still builds
+that same untagged, legacy-selecting binary — nothing production-reachable
+imports the profile package. Phase 3 added a temporary compile-time
+`phase3profile` Go build tag inside `cmd/ch-oauth-ldap` that selects the
+profile package only for `integration/clickhouse/Dockerfile`'s helper build,
+and under that selector certified the real command composition against both
+tracked ClickHouse images, HA (`run-ha.sh`), the committed wire-fixture corpus
+(verify-only, no regeneration), and all five native fuzz targets. See
+[`docs/clickhouse-ldap-wire-profile.md`](docs/clickhouse-ldap-wire-profile.md)
+§11.5 for the full evidence record (tested commit, certified-surface digest,
+and every result). Phase 4 owns deleting the temporary selector and making
+this composition ordinary production code.
 
 Two ClickHouse-configured values stay genuinely variable, not hard-coded, in the
 replacement:
@@ -245,8 +252,9 @@ replacement:
   value is `20` seconds).
 
 Cutover also brings several **deliberate narrowings** — behavior this legacy
-server tolerates today that the replacement will not, each one requiring
-explicit Phase 3 acceptance before Phase 4:
+server tolerates today that the replacement will not. Phase 3 reviewed and
+explicitly `ACCEPT`ed all eleven of them (see the disposition table below);
+none is a merely-incidental parser gap:
 
 - **Search-shape narrowing.** Only subtree scope, `derefAliases=0`,
   `typesOnly=false`, and exactly one requested attribute (case-insensitive
@@ -255,7 +263,12 @@ explicit Phase 3 acceptance before Phase 4:
   generic projection.
 - **LDAPv3-only narrowing.** Only LDAPv3 simple Bind is accepted; the current
   server's incidental Bind-version-2 acceptance is not retained (result 2
-  instead).
+  instead). A version-boundary refinement was reviewed separately: version 0,
+  negative, or non-minimally-encoded values close the connection as
+  malformed, while minimally encoded values `>=128` can decode and receive
+  result 2, even though legacy `goldap` closed above 127 — tracked ClickHouse
+  only ever emits version 3, so the parser is neither widened nor narrowed to
+  copy that incidental legacy behavior.
 - **DN-grammar narrowing.** Multi-valued RDNs, `;` RDN separators, `#`
   BER-hexstring values, dotted-decimal/OID attribute types, and arbitrary
   escaped attribute-type names are rejected; supported whitespace handling
@@ -275,8 +288,9 @@ explicit Phase 3 acceptance before Phase 4:
   production only rejects an empty/whitespace value.
 
 See [`docs/clickhouse-ldap-wire-profile.md`](docs/clickhouse-ldap-wire-profile.md)
-§11 for the full engineering-evidence writeup of all ten narrowings and
-[`docs/ch-oauth-ldap-operator-guide.md`](docs/ch-oauth-ldap-operator-guide.md#10-compatibility-profile-issue-33-phase-2--in-development)
+§11 for the full engineering-evidence writeup of all eleven narrowings (rows
+`1`, `1a`, `2`–`10`) and their Phase 3 `ACCEPT` dispositions, and
+[`docs/ch-oauth-ldap-operator-guide.md`](docs/ch-oauth-ldap-operator-guide.md#10-compatibility-profile-issue-33-phase-3--certified-for-integration-production-cutover-is-phase-4)
 §10 for the equivalent operator-facing note.
 
 [ch-ldap]: https://clickhouse.com/docs/operations/external-authenticators/ldap

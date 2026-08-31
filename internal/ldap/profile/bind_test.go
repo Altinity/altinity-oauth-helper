@@ -349,10 +349,31 @@ func TestHandleBind_SASLPrecedesVersionCheckForNonV3(t *testing.T) {
 	}
 }
 
+// TestHandleBind_VersionOtherThan3ReturnsProtocolError's version list
+// includes 127 and 128 to close the reviewer-flagged gap in row 1a of
+// docs/clickhouse-ldap-wire-profile.md §11.3: 127 is the largest value
+// minimalPositiveInt32 accepts in a one-octet INTEGER content (bindOp's
+// berInteger naturally emits the single byte 0x7f), while 128 is the
+// smallest value that legitimately requires the two-octet minimal form
+// (berInteger emits 0x00 0x80 — the leading 0x00 disambiguates the
+// following high bit, per minimalPositiveInt32's own rule, so it is not
+// itself a non-minimal encoding). Both are well-formed, decodable
+// versions that are simply not 3, so both must land on protocolError via
+// the same version-narrowing path as versions 1/2/4 below — proving the
+// row 1a composite (minimally-encoded version >=128 decodes fine and
+// then fails only the != 3 check) end-to-end rather than as an isolated
+// claim.
+//
+// A NON-minimal version encoding (e.g. tag/length/content 02 02 00 07,
+// or the 128-adjacent 02 03 00 00 80) is deliberately not exercised here:
+// TestHandleBind_MalformedASN1Closes's "version_non_minimal" case
+// already drives exactly that code path (minimalPositiveInt32's
+// leading-0x00/0xff padding rule) with content 00 03, and a
+// same-shape/different-digit repeat of that case would not add coverage.
 func TestHandleBind_VersionOtherThan3ReturnsProtocolError(t *testing.T) {
 	verifier := newFakeVerifier().withSuccess("alice-pw", newVerificationResult("alice", "https://idp.example.com/", "subj-alice", 9999))
 	resolver := newFakeResolver()
-	for _, version := range []int64{1, 2, 4} {
+	for _, version := range []int64{1, 2, 4, 127, 128} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			c, clientConn, cleanup := newBindTestConnection(t, verifier, resolver)
 			defer cleanup()

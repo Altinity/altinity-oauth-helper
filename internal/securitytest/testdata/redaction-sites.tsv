@@ -174,8 +174,9 @@ cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap
 cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: user_base_dn must be set	no	config-value	local	non-credential	n/a	safe	-
 cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: group_base_dn must be set	no	config-value	local	non-credential	n/a	safe	-
 cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: user_rdn_attribute must be set	no	config-value	local	non-credential	n/a	safe	-
-cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: invalid user_base_dn: %w	no	config-value	local	non-credential	n/a	safe	-
-cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/config.go	validateConfig	fmt-errorf	lit:ldap: invalid group_base_dn: %w	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/ldap_backend_legacy.go	validateLDAPBackendConfig	fmt-errorf	lit:ldap: invalid user_base_dn: %w	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/ldap_backend_legacy.go	validateLDAPBackendConfig	fmt-errorf	lit:ldap: invalid group_base_dn: %w	no	config-value	local	non-credential	n/a	safe	-
+cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/ldap_backend_phase3profile.go	validateLDAPBackendConfig	fmt-errorf	lit:ldap: %w	no	config-value	local	non-credential	n/a	safe	-
 cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	main	zerolog-terminal	Fatal|Err|lit:ch-oauth-ldap exited with error	no	infra-error-text	local	structural	n/a	safe	-
 cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	run	zerolog-terminal	Info|Str(network,tcp)|Str(address)|Str(version)|lit:ch-oauth-ldap listening	no	config-value	local	non-credential	n/a	safe	-
 cmd/ch-oauth-ldap	cmd/ch-oauth-ldap/main.go	run	zerolog-terminal	Info|lit:ch-oauth-ldap shutting down	no	none	local	non-credential	n/a	safe	-
