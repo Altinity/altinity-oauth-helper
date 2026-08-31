@@ -12,7 +12,7 @@
 # Subsequent builds are cached.
 
 # ---- 1. backend: clone, patch, mage build ----
-FROM golang:1.26 AS plugin-go-builder
+FROM golang:1.27 AS plugin-go-builder
 ARG ALTINITY_PLUGIN_TAG=v3.4.11
 RUN git clone --depth 1 --branch ${ALTINITY_PLUGIN_TAG} \
         https://github.com/Altinity/clickhouse-grafana /src
