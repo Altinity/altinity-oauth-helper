@@ -14,36 +14,30 @@ harness's own shell libraries under `lib/`: that script **is** run by
 `.github/workflows/pr-gate.yml` as part of the required `Required PR gate`
 check, so a change under `lib/` that breaks it fails CI.
 
-## Issue #33 phase 3 note: this suite now exercises the replacement, via a temporary build tag
+## Issue #33 phase 4 note: this suite and production build the identical binary
 
-Issue #33 phase 2 built a first-party LDAP compatibility profile at
-`internal/ldap/profile/` alongside the legacy production server this suite
-used to drive exclusively. Issue #33 phase 3 changes that: `integration/clickhouse/Dockerfile`'s
-`ch-oauth-ldap` build line now adds `-tags=phase3profile`, and that is the
-**only** build-selector change in the image — the `synthetic-idp`,
-`ldap-session-probe`, and `ldap-wire-recorder` build lines stay untagged
-because none of them import either LDAP backend. That one tag flips
-`cmd/ch-oauth-ldap`'s compile-time backend seam
-(`ldap_backend_phase3profile.go` vs. `ldap_backend_legacy.go`) to
-`internal/ldap/profile` for every `/bin/ch-oauth-ldap` this image ever
-produces.
+`internal/ldap/profile/` is `cmd/ch-oauth-ldap`'s only LDAP backend — normal
+production and this integration suite build it the same way, ordinarily and
+untagged, with no build tag, Docker `ARG`, environment variable, or CLI flag
+selecting between backends. `integration/clickhouse/Dockerfile`'s
+`ch-oauth-ldap` build line is an untagged `go build ./cmd/ch-oauth-ldap`,
+identical in composition to the published `Dockerfile.ch-oauth-ldap`
+production image and to an ordinary local `go build ./cmd/ch-oauth-ldap` —
+all three link `internal/ldap/profile` via `cmd/ch-oauth-ldap/ldap_backend.go`.
+The `synthetic-idp`, `ldap-session-probe`, and `ldap-wire-recorder` build
+lines in the same image stay untagged too, as they always have.
 
-Concretely, **the whole Docker suite now exercises the replacement**:
-`run.sh`, `run-all-builds.sh`, and `run-ha.sh` all run the tagged binary, and
-so does `compose-wirecapture.yml`'s `ldap-helper-upstream` service (the real
-helper renamed for that fixture — see "Wire capture" below), since it is the
-same shared image and the same `/bin/ch-oauth-ldap`. Existing scenario
-expectations (A–I, G') are unchanged by this — the replacement is expected to
-satisfy them exactly as the legacy server did.
+Concretely, **the whole Docker suite exercises production code**: `run.sh`,
+`run-all-builds.sh`, and `run-ha.sh` all run the same `/bin/ch-oauth-ldap`
+production builds, and so does `compose-wirecapture.yml`'s
+`ldap-helper-upstream` service (the real helper renamed for that fixture —
+see "Wire capture" below), since it is the same shared image. This predates
+today's state: `internal/ldap/profile` replaced a since-deleted legacy
+`internal/ldap` server at issue #33 phase 4's cutover, and existing scenario
+expectations (A–I, G') were unchanged by that cutover — the profile
+implementation satisfies them exactly as the legacy server did.
 
-This is deliberately **not** production cutover. Ordinary untagged
-`go build ./cmd/ch-oauth-ldap` and the published `Dockerfile.ch-oauth-ldap`
-production image both remain on the legacy `internal/ldap` backend — there is
-no Docker `ARG`, environment variable, or CLI flag that selects the backend,
-only this one compile-time tag applied solely inside this integration image.
-Phase 4 deletes `phase3profile` (from this Dockerfile and from the command
-package) and makes the replacement the only backend everywhere, including
-production. Until then, a Docker run through this suite is real coverage of
+A Docker run through this suite is real coverage of
 `internal/ldap/profile`'s production composition (config, verifier, role
 pipeline, listener, lifecycle) that a pure `go test ./internal/ldap/profile`
 run cannot provide, on top of — not instead of — the profile package's own
@@ -51,12 +45,11 @@ real-TCP black-box tests and its replay of every committed session under
 `internal/ldap/testdata/clickhouse-wire/**` (`internal/ldap/profile/replay_test.go`;
 see `CLAUDE.md`'s `internal/ldap/profile/` repo-map row and
 `docs/clickhouse-ldap-wire-profile.md` §11). Keep running the Docker gates
-here as before for any change to `cmd/ch-oauth-ldap`, `internal/ldap`,
-`internal/ldap/profile`, or ClickHouse-facing config; a change confined to
-`internal/ldap/profile/**` alone can still be validated faster with
-`go test -race ./internal/ldap/profile` (and, for parser/security boundary
-changes, its five native fuzz targets — see the wire-profile doc) before
-also running the Docker suite.
+here as before for any change to `cmd/ch-oauth-ldap`, `internal/ldap/profile`,
+or ClickHouse-facing config; a change confined to `internal/ldap/profile/**`
+alone can still be validated faster with `go test -race ./internal/ldap/profile`
+(and, for parser/security boundary changes, its five native fuzz targets —
+see the wire-profile doc) before also running the Docker suite.
 
 ## Prerequisites
 
@@ -281,18 +274,19 @@ non-secret, byte-level ClickHouse LDAP request evidence that backs
 [`docs/clickhouse-ldap-wire-profile.md`](../../docs/clickhouse-ldap-wire-profile.md)
 and the `cryptobyte`-vs-bounded-parser decision for issue #33's later phases.
 
-**Issue #33 phase 3 policy: `--mode generate` is frozen.** No committed
+**Issue #33 phase 3 policy: `--mode generate` is frozen, and it stays frozen
+after phase 4's cutover.** No committed
 `internal/ldap/testdata/clickhouse-wire/**` file may be regenerated or
-promoted during phase 3, for any reason — the corpus captured in phase 1 is
-historical evidence of real `libldap` request traffic and must retain that
-provenance unchanged. Only `--mode verify` runs. Because the shared
-integration image now builds `/bin/ch-oauth-ldap` with `-tags=phase3profile`
-(see the phase-3 note above), `compose-wirecapture.yml`'s
-`ldap-helper-upstream` service is itself the replacement, so a phase-3
-`--mode verify` run is **replacement-backed verification of the historical
+promoted, for any reason — the corpus captured in phase 1 is historical
+evidence of real `libldap` request traffic and must retain that provenance
+unchanged. Only `--mode verify` runs. The shared integration image builds
+`/bin/ch-oauth-ldap` ordinarily and untagged (see the phase-4 note above),
+so `compose-wirecapture.yml`'s `ldap-helper-upstream` service is the same
+production `internal/ldap/profile` composition every other build is, and a
+`--mode verify` run is **production-backed verification of the historical
 phase-1 corpus** — it proves `internal/ldap/profile` still reproduces the
-same request/response bytes the legacy server produced when the corpus was
-captured — and not new fixture provenance. If a verify run ever exposes a new
+same request/response bytes the legacy `internal/ldap` server produced when
+the corpus was captured — and not new fixture provenance. If a verify run ever exposes a new
 request shape from a tracked ClickHouse client (a byte-level mismatch that
 isn't explained by the fixed sanitization/placeholder rules), **stop**: do
 not broaden the parser and do not regenerate the baseline to make it pass.
