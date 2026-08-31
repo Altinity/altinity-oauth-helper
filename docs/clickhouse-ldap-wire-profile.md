@@ -1136,8 +1136,8 @@ document's plan carries.
 
 **Certification identity**
 
-- **tested_behavior_head:** `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`
-- **manual_verification_head:** `3c12ab752ba6e00516ea28a7bf24e7085290baac` — the
+- **tested_behavior_head:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
+- **manual_verification_head:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the
   commit the Docker/fuzz/wire-capture suites below (Supported ClickHouse
   matrix, HA, Wire-capture verification, Fuzz smoke) were actually executed
   against, tracing back to the original manual certification at `76e8bcc`.
@@ -1165,41 +1165,32 @@ document's plan carries.
   `scripts/build-ch-oauth-ldap-image.sh`,
   `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
   constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
-- **Certified-surface digest (SHA-256):** `3510ad40fe1ad910c5041f4f05ea1fc03aa4be4e3224aa1c299c6f2ee17e5390`
+- **Certified-surface digest (SHA-256):** `b252de7ddcdfa920590697c7bfc0cf7099643880c215f91a63e81258cb3db8de`
   — computed over the same "Certified-surface anti-drift digest" file set
   §11.5 used (`certifiedSurfacePatterns`, unchanged, `third_party/**` kept
   even though the directory is now empty), reproduced 3× identically over
-  89 tracked files. This is not merely computed at `tested_behavior_head`
+  109 tracked files. This is not merely computed at `tested_behavior_head`
   by assertion: `TestPhase4Evidence_DigestBoundToTestedBehaviorHead` reads
   every certified-surface file straight out of the git object database at
   the exact commit `tested_behavior_head` names (never the working tree)
   and requires the two hash equal, so the field above and the head above
   it are mechanically bound to each other, not merely both individually
   self-consistent.
-  `tested_behavior_head` was originally `3c12ab752ba6e00516ea28a7bf24e7085290baac`
-  (recorded above as `manual_verification_head` — the head the
-  Docker/fuzz/wire-capture suites below were actually run against, tracing
-  back to the original manual certification at `76e8bcc`); it is now
-  `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`, one commit later,
-  because that commit made a comment-only edit to two certified-surface
-  files (`internal/ldap/profile/frame.go` and
-  `internal/ldap/profile/bind.go`, historicalizing two stale present-tense
-  references to the since-deleted vendored goldap parser — `git diff
-  3c12ab7 0ccbd43 -- internal/ldap/profile/frame.go
-  internal/ldap/profile/bind.go` shows only comment text changed, both
-  files' line counts unchanged, and the tracked-file count unchanged at
-  89). Per the plan's stop condition 9, a certified-surface change after
-  the attested head voids the attestation and is never resolved by
-  prose alone: it is resolved here by advancing `tested_behavior_head`
-  itself to the commit that actually contains the change, so that the
-  digest genuinely is the digest at the recorded head — not by leaving
-  the head frozen at the older commit and only editing the digest field
-  to match a newer, uncorrelated tree (the defect
-  `TestPhase4Evidence_DigestBoundToTestedBehaviorHead` now exists to
-  catch). No production behavior changed between the two heads; the
-  original Docker/fuzz/wire-capture attestation below remains the
-  evidence for both, since neither commit altered anything those suites
-  exercise.
+  Both head fields, the digest, and the tracked-file count above were
+  advanced together when ClickHouse 26.3 and 26.8 became tracked lines
+  (see §11.7). That change edited certified-surface files — `BUILDS`,
+  `lib/expectations.sh`, `scenarios/65-ldap-search-limits.sh`,
+  `tests/lib-tests.sh`, `capture-ldap-wire.sh` — and added 20 new fixture
+  files under `internal/ldap/testdata/clickhouse-wire/`, taking the tracked
+  count from 89 to 109. Per the plan's stop condition 9, a certified-surface
+  change after the attested head voids the attestation and is never resolved
+  by prose: it is resolved by re-running the manual suites against the new
+  head and advancing both fields to the commit that actually contains the
+  change, so the digest genuinely is the digest at the recorded head. That
+  re-run happened — every image in the tables below was re-certified at this
+  head, not carried forward from the previous one — which is why
+  `manual_verification_head` equals `tested_behavior_head` here rather than
+  trailing it.
 
 **Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
 
@@ -1239,9 +1230,11 @@ persistent same-socket session probe — no new probe created)
 - **Command:** `bash integration/clickhouse/capture-ldap-wire.sh --mode verify --fixtures internal/ldap/testdata/clickhouse-wire`
 - **generation: frozen** — zero fixtures were regenerated or promoted;
   `--mode verify` only.
-- **Result:** `PASS` for both tracked lines (`24.8`, `25.8`); every
-  committed session compared byte-for-byte equal against the untagged
-  production build; zero fixture drift; no new request shape observed.
+- **Result:** `PASS` for both tracked lines this section certifies
+  (`24.8`, `25.8`); every committed session compared byte-for-byte equal
+  against the untagged production build; zero fixture drift; no new request
+  shape observed. The verify run at this head covered all four tracked
+  lines and passed on every one — see §11.7 for the `26.3`/`26.8` half.
 - **Search-before-Abandon:** confirmed for both tracked lines' recorded
   timeout-abandon session (`wirecapture: diagnostic — Search precedes
   Abandon as expected`).
@@ -1321,11 +1314,148 @@ partially.
 **Coordinator attestation:** Boris Tyshkevich (`@BorisTyshkevich`) certifies
 that every Docker/fuzz/wire-capture command and script named in this section
 (Supported ClickHouse matrix, HA, Wire-capture verification, Fuzz smoke) was
-run to completion against `3c12ab752ba6e00516ea28a7bf24e7085290baac`
-(`manual_verification_head` above) — not `tested_behavior_head`, which
-advanced one commit later by the comment-only edit recorded above and
-changed no certified behavior — that `git status --porcelain` was unchanged
-by verification, and that `docker ps -a` showed no suite leftovers after
-verification.
+run to completion against `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
+(`manual_verification_head` above, which for this attestation is the same
+commit as `tested_behavior_head` — the certified surface changed, so the
+suites were re-run rather than carried forward), that `git status
+--porcelain` was unchanged by verification, and that `docker ps -a` showed
+no suite leftovers after verification.
+
+The two tables immediately above remain this section's own Phase 4
+cutover record and name the two lines tracked at that time. The 26.3 and
+26.8 lines, and the four-image re-certification performed at this head,
+are recorded separately in §11.7.
 
 <!-- phase4-release-gate-evidence:end -->
+
+### 11.7 Tracked-line expansion: ClickHouse 26.3 and 26.8
+
+This section records the evidence for extending the tracked set from two
+lines to four. Unlike §11.5 and §11.6 it carries **no contract of its own**:
+the machinery that would otherwise guard it already does so from elsewhere —
+`wire_profile_contract_test.go` holds the four-way tracked-line set equal
+(BUILDS ↔ this document's §1/§2.1/§2.2 ↔ fixture directories ↔ every
+`profile.json`), and §11.6's live digest and head fields were advanced to
+the commit this work landed in. What is recorded here is the manual,
+Docker-and-fuzz evidence no test can produce.
+
+**Certification identity**
+
+- **Tested at:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the same
+  commit §11.6 now names as both `tested_behavior_head` and
+  `manual_verification_head`.
+- **Composition:** unchanged. Ordinary, untagged production
+  (`cmd/ch-oauth-ldap` → `internal/ldap/profile`); no build tag, no
+  selector, no second backend. Adding tracked lines changes what the suite
+  is *run against*, never what is built.
+
+**Why 26.8 is an upstream image**
+
+No Altinity Stable 26.8 build exists. At the time this line was added the
+newest Altinity tags were `26.3.16.10001.altinitystable` (2026-07-01) and
+`26.6.2.20001.altinityantalya` (2026-08-26), while upstream 26.8 had
+shipped. `run-all-builds.sh` requires only a tag equal to the server's
+`version()` string; both registries satisfy that, confirmed live for both
+new images before any suite ran. §2.1 records the same deviation.
+
+**Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, all four builds)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:26.3.16.10001.altinitystable` | `PASS` |
+| `clickhouse/clickhouse-server:26.8.1.2041` | `PASS` |
+
+All four completed scenarios A–I including G'. The recorded upstream-bug
+expected failures reproduced exactly as recorded: #78791 on 24.8 only, and
+#116840's VIEW `external_roles` drop on every one of the four — that bug is
+still open upstream, so the H' canary stays an expected-fail on 26.8 too.
+
+**HA** (`integration/clickhouse/run-ha.sh`, once per image via `PHASE3_CH_IMAGE`)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:26.3.16.10001.altinitystable` | `PASS` |
+| `clickhouse/clickhouse-server:26.8.1.2041` | `PASS` |
+
+**Session-probe result:** `PASS` on all four images — the A-bound probe
+confirmed live (heartbeat n=2, freshness bound satisfied), then correctly
+failed within the bound after helper A was killed, on every image. Same
+claim boundary as §11.6: this proves nothing about Kubernetes routing,
+EndpointSlice/CNI convergence, pod-eviction semantics, or a failover SLA.
+
+**Wire capture**
+
+- **Generation:** run once, into a fresh output directory, for the two new
+  lines only. The phase-3 freeze was narrowed, not lifted — see §11.4a.
+- **Committed fixtures were not rewritten.** The generate run re-derived
+  all four lines; `24.8` and `25.8` reproduced every committed `.ber` byte
+  exactly, and only `26.3/` and `26.8/` were promoted. `git status` after
+  promotion showed additions only.
+- **Verify command:** `bash integration/clickhouse/capture-ldap-wire.sh --mode verify --fixtures internal/ldap/testdata/clickhouse-wire`
+- **Verify result:** `PASS` for all four tracked lines, both sessions each;
+  `Search precedes Abandon` confirmed on every `timeout-abandon` session;
+  zero fixture drift.
+- **No new request shape.** Every `26.3` and `26.8` request PDU is
+  byte-identical to the corresponding `25.8` PDU. The bounded compatibility
+  profile therefore covers 26.x with no parser change, and none was made.
+
+**Fuzz smoke** (`-run '^$' -fuzz=<target> -fuzztime=20s`, one target at a time)
+
+| Fuzz target | Duration | Result |
+| ----- | ----- | ----- |
+| `FuzzLDAPFrame` | 20s | `PASS` |
+| `FuzzBindRequest` | 20s | `PASS` |
+| `FuzzSearchRequest` | 20s | `PASS` |
+| `FuzzRestrictedDN` | 20s | `PASS` |
+| `FuzzMemberAssertionDN` | 20s | `PASS` |
+
+One honest note on that table: an earlier `FuzzMemberAssertionDN` run
+failed with `context deadline exceeded` while the machine was still loaded
+from the Docker suites. It was investigated rather than re-run until green.
+No crasher was written, no reproducer exists, the repository stayed clean of
+fuzz artifacts, and the target passed 3/3 at reduced parallelism and again
+on an idle machine — Go's fuzzing coordinator failing to retire workers
+inside its shutdown grace period, not a defect in `decodeMembershipFilter`.
+Recorded because a green table that quietly replaced a red one would be the
+more misleading artifact.
+
+**Source-audit findings**
+
+- **26.3 added one non-TLS `ldap_set_option`.** A new `<follow_referrals>`
+  server-config key introduced
+  `ldap_set_option(handle, LDAP_OPT_REFERRALS, ...)` into
+  `openConnection()` (§5 classifies it). `ExternalAuthenticators.cpp` sets
+  it only when `config.has(...)` finds the key; this fixture does not set
+  it, so the option is `LDAP_OPT_OFF`, and the captured bytes confirm no
+  wire effect.
+- **26.3 → 26.8 is LDAP-behaviorally identical** — value-initialization
+  hygiene only (§2.2).
+
+**Two defects this expansion surfaced**
+
+1. **ClickHouse 26.8 maps `ACCESS_DENIED` to HTTP 403**, where
+   24.8/25.8/26.3 map it to 500. Scenario H's negative control asserted 500
+   outright and so failed on 26.8 even though propagation was correct and
+   the response body was exactly the expected shape (`Code: 497 ... Received
+   from clickhouse-remote:9000 ... (ACCESS_DENIED)`). The status is now a
+   per-line recorded fact (`remote_access_denied_http_status_for`),
+   fail-closed for an unrecorded prefix. Note the cost: on 26.8
+   `ACCESS_DENIED` and `AUTHENTICATION_FAILED` share status 403, so the
+   status no longer discriminates and the two body markers carry that
+   weight — which they always did.
+2. **`search_limit_overflow_wire_tuple` recorded `time_limit=0` on every
+   line; the real value is 20.** The reasoning error was "this path has no
+   `<search_timeout>` XML key, therefore 0"; with no per-call deadline
+   requested, libldap sends the handle-wide `LDAP_OPT_TIMELIMIT` default,
+   which §5 documents as 20s and §8.2 has always recorded as the Search's
+   `timeLimit` outright. Corrected from two further independent directions:
+   decoding `SearchRequest.timeLimit` out of the committed corpus (BER
+   `02 01 14` = 20, identical on all four lines) and the helper's own live
+   T2 telemetry during a real scenario G' run (`time_limit=20`). The field
+   was recorded and logged but never asserted against telemetry, which is
+   exactly how two committed records contradicted each other unnoticed. No
+   behavior changed.
