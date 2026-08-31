@@ -52,8 +52,6 @@ import (
 	"strings"
 	"testing"
 
-	goldapmessage "github.com/vjeantet/goldap/message"
-
 	"github.com/altinity/altinity-oauth-helper/internal/wirefixture"
 )
 
@@ -1281,12 +1279,14 @@ func TestWireProfileContract_LDAPOptionSentinelMatchesAuditedSet(t *testing.T) {
 //     table/prose locations §6/§8.2 use today.
 //  2. Fixture side: every committed searchRequest PDU (and every PDU's
 //     LDAPMessage generally, for Controls) is independently decoded with
-//     the vendored goldap BER decoder — a second, structurally distinct
-//     implementation from internal/ldap's cryptobyte characterizer, which
-//     stays the SOLE owner of the primitive-layer cryptobyte-vs-
-//     local-ber-cursor decision (plan §33) — and the actual decoded field
-//     values are asserted directly, not merely compared to the doc's own
-//     text.
+//     Oracle B (wire_oracle_b_test.go) — a second, structurally distinct,
+//     hand-written bounded BER cursor from internal/ldap's cryptobyte
+//     characterizer, which stays the SOLE owner of the primitive-layer
+//     cryptobyte-vs-local-ber-cursor decision (plan §33) — and the actual
+//     decoded field values are asserted directly, not merely compared to
+//     the doc's own text. Issue #33 phase 4 replaced this leg's prior
+//     vendored-goldap decoder with Oracle B as part of deleting the
+//     general vendored LDAP/BER stack from the repository entirely.
 //
 // Removing either leg's claim (the doc prose, or the byte-level truth it
 // describes) now fails this test, instead of both drifting together
@@ -1313,11 +1313,11 @@ func TestWireProfileContract_LDAPOptionSentinelMatchesAuditedSet(t *testing.T) {
 // shape and compared it against the canonical profile.
 //
 // assertSearchProfileFixedFields below closes this: for every committed
-// searchRequest PDU it independently decodes the Filter (still via the same
-// goldap decoder, never recomputing internal/ldap's cryptobyte verdict) and
-// requires it to be exactly FilterAnd{FilterEqualityMatch(objectClass,
-// groupOfNames), FilterEqualityMatch(member, <this session's own Bind DN>)}
-// — not a hardcoded literal Bind DN (which would itself be an unverified
+// searchRequest PDU it independently decodes the Filter (still via Oracle
+// B, never recomputing internal/ldap's cryptobyte verdict) and requires it
+// to be exactly AND(equalityMatch(objectClass, groupOfNames),
+// equalityMatch(member, <this session's own Bind DN>)) — not a hardcoded
+// literal Bind DN (which would itself be an unverified
 // second copy of "alice@example.com" that could silently drift from what a
 // future recapture actually uses), but the exact Bind DN bytes this
 // sentinel independently decodes from the *same session's own* bindRequest
@@ -1406,15 +1406,14 @@ func TestWireProfileContract_SearchProfileFixedFieldsSentinel(t *testing.T) {
 			if err != nil {
 				t.Fatalf("wire_profile_contract: read %s: %v", path, err)
 			}
-			msg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, raw))
+			msg, err := oracleBDecodeLDAPMessage(raw)
 			if err != nil {
-				t.Fatalf("wire_profile_contract: %s: independent goldap BER decode of bindRequest failed: %v", path, err)
+				t.Fatalf("wire_profile_contract: %s: independent Oracle B decode of bindRequest failed: %v", path, err)
 			}
-			bind, ok := msg.ProtocolOp().(goldapmessage.BindRequest)
-			if !ok {
-				t.Fatalf("wire_profile_contract: %s: committed metadata says operation %q but decoded protocolOp is %T", path, pdu.Operation, msg.ProtocolOp())
+			if msg.Bind == nil {
+				t.Fatalf("wire_profile_contract: %s: committed metadata says operation %q but decoded protocolOp tag is 0x%02x, not bindRequest", path, pdu.Operation, msg.OpTag)
 			}
-			bindDN = string(bind.Name())
+			bindDN = msg.Bind.Name
 			sawBindRequest = true
 			break
 		}
@@ -1460,9 +1459,10 @@ func TestWireProfileContract_SearchProfileFixedFieldsSentinel(t *testing.T) {
 }
 
 // assertSearchProfileFixedFields independently decodes raw as a complete
-// LDAPMessage using the vendored goldap BER decoder (third_party/goldap,
-// already this repo's production LDAP decoder, consumed by internal/ldap's
-// non-test files — not a decoder invented for this test) and asserts:
+// LDAPMessage using Oracle B (wire_oracle_b_test.go — a hand-written
+// bounded BER cursor implemented separately from Oracle A, from
+// internal/ldap/profile's own production decoder, and from
+// integration/clickhouse/wirecapture's producer parsing) and asserts:
 //
 //   - every PDU's LDAPMessage carries no Controls sequence (plan §8.2:
 //     absent, not merely empty), regardless of operation type;
@@ -1470,11 +1470,11 @@ func TestWireProfileContract_SearchProfileFixedFieldsSentinel(t *testing.T) {
 //     (plan §6/§8.2), and *sawSearchRequest is set so the caller can
 //     require at least one such PDU was actually checked.
 //
-// This never recomputes internal/ldap's cryptobyte-vs-local-ber-cursor
-// verdict (plan §33 reserves that to TestClickHouseWireCryptobyteDecision
-// alone) — goldap is used here purely to read specific decoded field
-// values, an orthogonal concern from which BER primitive parser ClickHouse
-// wire traffic should use.
+// This never recomputes internal/ldap/profile's cryptobyte-vs-local-ber-
+// cursor verdict (plan §33 reserves that to Oracle A alone) — Oracle B is
+// used here purely to read specific decoded field values, an orthogonal
+// concern from which BER primitive parser ClickHouse wire traffic should
+// use.
 //
 // wantBindDN is the exact Bind DN this same session's own bindRequest PDU
 // decoded to (see the caller, checkSession) — the ground truth the Search
@@ -1482,99 +1482,44 @@ func TestWireProfileContract_SearchProfileFixedFieldsSentinel(t *testing.T) {
 func assertSearchProfileFixedFields(t *testing.T, path, operation string, raw []byte, wantBindDN string, sawSearchRequest *bool) {
 	t.Helper()
 
-	msg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, raw))
+	msg, err := oracleBDecodeLDAPMessage(raw)
 	if err != nil {
-		t.Errorf("wire_profile_contract: %s: independent goldap BER decode failed: %v", path, err)
+		t.Errorf("wire_profile_contract: %s: independent Oracle B decode failed: %v", path, err)
 		return
 	}
-	if msg.Controls() != nil {
+	if msg.ControlsPresent {
 		t.Errorf("wire_profile_contract: %s: decoded LDAPMessage carries a Controls sequence, want absent (plan §8.2)", path)
 	}
 
 	if operation != wirefixture.OperationSearchRequest {
 		return
 	}
-	search, ok := msg.ProtocolOp().(goldapmessage.SearchRequest)
-	if !ok {
-		t.Errorf("wire_profile_contract: %s: committed metadata says operation %q but decoded protocolOp is %T", path, operation, msg.ProtocolOp())
+	if msg.Search == nil {
+		t.Errorf("wire_profile_contract: %s: committed metadata says operation %q but decoded protocolOp tag is 0x%02x, not searchRequest", path, operation, msg.OpTag)
 		return
 	}
 	*sawSearchRequest = true
-	if got := int(search.DerefAliases()); got != 0 {
-		t.Errorf("wire_profile_contract: %s: decoded derefAliases=%d, want neverDerefAliases(0)", path, got)
+	if msg.Search.DerefAliases != 0 {
+		t.Errorf("wire_profile_contract: %s: decoded derefAliases=%d, want neverDerefAliases(0)", path, msg.Search.DerefAliases)
 	}
-	for _, msg := range canonicalGroupMembershipFilterDefects(search.Filter(), wantBindDN) {
-		t.Errorf("wire_profile_contract: %s: %s", path, msg)
+	for _, defect := range oracleBCanonicalFilterDefects(msg.Search.Filter, wantBindDN) {
+		t.Errorf("wire_profile_contract: %s: %s", path, defect)
 	}
-}
-
-// canonicalGroupMembershipFilterDefects requires filter to be exactly the
-// canonical §6/§8.2 shape — AND(equalityMatch(objectClass, groupOfNames),
-// equalityMatch(member, wantBindDN)) — decoded structurally (Filter CHOICE
-// type and AttributeValueAssertion field values), never by re-encoding and
-// byte-comparing, and returns one human-readable defect string per violated
-// property (nil/empty means the filter fully matches). It is a pure
-// function, rather than one taking *testing.T directly, so
-// TestWireProfileContract_SearchFilterStructureIsDiscriminating below can
-// call it directly on a deliberately mutated fixture and assert the defect
-// list is non-empty, without needing a fake sub-test harness.
-//
-// A same-shape tag swap (AND 0xa0 -> OR 0xa1, or any other Filter CHOICE
-// alternative) fails the very first type assertion below, because goldap's
-// Filter() already decoded it as a different concrete Go type (FilterOr,
-// FilterNot, FilterSubstrings, ...) — this is what closes the review-pass-3
-// gap: cryptobyte's characterization stays purely structural/tag-based (plan
-// §32's deliberately narrow profile) and the wire-profile doc's
-// derefAliases/Controls sentinel never inspected the filter at all, so
-// nothing previously would have noticed such a swap on a fixture whose
-// sanitized_sha256 was updated to match.
-func canonicalGroupMembershipFilterDefects(filter goldapmessage.Filter, wantBindDN string) []string {
-	var defects []string
-
-	and, ok := filter.(goldapmessage.FilterAnd)
-	if !ok {
-		return append(defects, fmt.Sprintf("decoded Search filter is %T, want an AND (FilterAnd) of two equalityMatch terms (plan §6/§8.2)", filter))
-	}
-	if len(and) != 2 {
-		return append(defects, fmt.Sprintf("decoded Search filter AND has %d child term(s), want exactly 2", len(and)))
-	}
-
-	objectClassTerm, ok := and[0].(goldapmessage.FilterEqualityMatch)
-	if !ok {
-		defects = append(defects, fmt.Sprintf("decoded Search filter AND's first term is %T, want an equalityMatch (FilterEqualityMatch)", and[0]))
-	} else {
-		if got := string(objectClassTerm.AttributeDesc()); got != "objectClass" {
-			defects = append(defects, fmt.Sprintf("AND's first term attribute description is %q, want %q", got, "objectClass"))
-		}
-		if got := string(objectClassTerm.AssertionValue()); got != "groupOfNames" {
-			defects = append(defects, fmt.Sprintf("AND's first term assertion value is %q, want %q", got, "groupOfNames"))
-		}
-	}
-
-	memberTerm, ok := and[1].(goldapmessage.FilterEqualityMatch)
-	if !ok {
-		defects = append(defects, fmt.Sprintf("decoded Search filter AND's second term is %T, want an equalityMatch (FilterEqualityMatch)", and[1]))
-	} else {
-		if got := string(memberTerm.AttributeDesc()); got != "member" {
-			defects = append(defects, fmt.Sprintf("AND's second term attribute description is %q, want %q", got, "member"))
-		}
-		if got := string(memberTerm.AssertionValue()); got != wantBindDN {
-			defects = append(defects, fmt.Sprintf("AND's second term assertion value is %q, want this session's own decoded Bind DN %q ({bind_dn}, plan §6.3)", got, wantBindDN))
-		}
-	}
-	return defects
 }
 
 // TestWireProfileContract_SearchFilterStructureIsDiscriminating is the
-// sabotage check for canonicalGroupMembershipFilterDefects itself (review
-// pass 3): it proves the new Search-filter structural/value check added to
-// TestWireProfileContract_SearchProfileFixedFieldsSentinel is a real,
-// discriminating check — not a rubber stamp — by reproducing the exact
-// scenario the review named: a committed searchRequest fixture's outer
-// filter tag mutated from AND (0xa0) to OR (0xa1), same shape and length,
-// which independent goldap decoding still accepts as well-formed BER (both
-// are `SET OF Filter`) but which must now be rejected as not matching the
-// canonical AND-of-two-equalityMatch profile.
+// sabotage check for oracleBCanonicalFilterDefects itself (review pass 3,
+// carried forward into Oracle B): it proves the Search-filter structural/
+// value check TestWireProfileContract_SearchProfileFixedFieldsSentinel
+// relies on is a real, discriminating check — not a rubber stamp — by
+// reproducing the exact scenario the review named: a committed
+// searchRequest fixture's outer filter tag mutated from AND (0xa0) to OR
+// (0xa1), same shape and length, which independent Oracle B decoding still
+// accepts as well-formed BER (both are `SET OF Filter`) but which must now
+// be rejected as not matching the canonical AND-of-two-equalityMatch
+// profile. The mutation happens only on an in-memory copy of the fixture
+// bytes read for this test — the committed .ber file on disk is never
+// written to.
 func TestWireProfileContract_SearchFilterStructureIsDiscriminating(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -1625,24 +1570,23 @@ func TestWireProfileContract_SearchFilterStructureIsDiscriminating(t *testing.T)
 	// Sanity check: the un-mutated template must itself pass, against its
 	// own actual decoded Bind DN (whatever the fixture's real value is —
 	// this sabotage check does not depend on a hardcoded Bind DN literal).
-	sanityMsg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, searchTemplate))
+	sanityMsg, err := oracleBDecodeLDAPMessage(searchTemplate)
 	if err != nil {
-		t.Fatalf("search template sanity check: independent goldap BER decode failed: %v", err)
+		t.Fatalf("search template sanity check: independent Oracle B decode failed: %v", err)
 	}
-	sanitySearch, ok := sanityMsg.ProtocolOp().(goldapmessage.SearchRequest)
-	if !ok {
-		t.Fatalf("search template sanity check: decoded protocolOp is %T, want SearchRequest", sanityMsg.ProtocolOp())
+	if sanityMsg.Search == nil {
+		t.Fatalf("search template sanity check: decoded protocolOp tag is 0x%02x, want searchRequest", sanityMsg.OpTag)
 	}
-	sanityAnd, ok := sanitySearch.Filter().(goldapmessage.FilterAnd)
-	if !ok || len(sanityAnd) != 2 {
-		t.Fatalf("search template sanity check: filter is not the expected two-term AND shape")
+	var realBindDN string
+	for _, term := range sanityMsg.Search.Filter.Terms {
+		if term.IsEquality && term.Attribute == "member" {
+			realBindDN = term.Value
+		}
 	}
-	memberTerm, ok := sanityAnd[1].(goldapmessage.FilterEqualityMatch)
-	if !ok {
-		t.Fatalf("search template sanity check: AND's second term is not an equalityMatch")
+	if realBindDN == "" {
+		t.Fatalf("search template sanity check: no member equalityMatch term found in the decoded filter")
 	}
-	realBindDN := string(memberTerm.AssertionValue())
-	if defects := canonicalGroupMembershipFilterDefects(sanitySearch.Filter(), realBindDN); len(defects) != 0 {
+	if defects := oracleBCanonicalFilterDefects(sanityMsg.Search.Filter, realBindDN); len(defects) != 0 {
 		t.Fatalf("search template sanity check: expected the un-mutated template to pass against its own decoded Bind DN, got defects: %v", defects)
 	}
 
@@ -1662,16 +1606,15 @@ func TestWireProfileContract_SearchFilterStructureIsDiscriminating(t *testing.T)
 	mutated := append([]byte(nil), searchTemplate...)
 	mutated[idx] = 0xa1 // AND [0] -> OR [1]: same SET OF Filter shape, same length
 
-	mutatedMsg, err := goldapmessage.ReadLDAPMessage(goldapmessage.NewBytes(0, mutated))
+	mutatedMsg, err := oracleBDecodeLDAPMessage(mutated)
 	if err != nil {
-		t.Fatalf("independent goldap decoder rejected the AND->OR mutation as malformed BER, expected it to still decode (same shape/length): %v", err)
+		t.Fatalf("independent Oracle B decoder rejected the AND->OR mutation as malformed BER, expected it to still decode (same shape/length): %v", err)
 	}
-	mutatedSearch, ok := mutatedMsg.ProtocolOp().(goldapmessage.SearchRequest)
-	if !ok {
-		t.Fatalf("mutated fixture: decoded protocolOp is %T, want SearchRequest", mutatedMsg.ProtocolOp())
+	if mutatedMsg.Search == nil {
+		t.Fatalf("mutated fixture: decoded protocolOp tag is 0x%02x, want searchRequest", mutatedMsg.OpTag)
 	}
-	if defects := canonicalGroupMembershipFilterDefects(mutatedSearch.Filter(), realBindDN); len(defects) == 0 {
-		t.Fatalf("canonicalGroupMembershipFilterDefects accepted an AND(0xa0)->OR(0xa1) filter-tag mutation as the canonical shape — the discriminating check is a rubber stamp")
+	if defects := oracleBCanonicalFilterDefects(mutatedMsg.Search.Filter, realBindDN); len(defects) == 0 {
+		t.Fatalf("oracleBCanonicalFilterDefects accepted an AND(0xa0)->OR(0xa1) filter-tag mutation as the canonical shape — the discriminating check is a rubber stamp")
 	}
 }
 
@@ -2022,14 +1965,25 @@ func TestWireProfileContract_Phase3EvidenceMarkerAndPlaceholders(t *testing.T) {
 	}
 }
 
-// TestWireProfileContract_Phase3EvidenceIdentityAndSelector cross-checks
-// §11.5's tested_behavior_head/selector/Dockerfile/production-remains-legacy
-// fields against this repository's own independent ground truth: a real
-// 40-hex commit-ish string, the exact phase3ReplacementTag constant
-// (dependency_contract_test.go), the exact integration Dockerfile path
-// (phase3_selector_contract_test.go), that Dockerfile actually carrying the
-// tag, and the three untagged/publication-path files actually staying
-// untagged.
+// phase3HistoricalSelector and phase3HistoricalIntegrationDockerfileRelPath
+// are locally owned copies of the exact Phase 3 historical facts §11.5
+// recorded — never references to phase3_selector_contract_test.go's
+// selector-contract constants (that file, and the temporary phase3profile
+// selector mechanism it polices, is deleted at cutover), and never a live
+// read of any current Dockerfile. Per issue #33 phase 4's plan, §11.5 is a
+// historical record: once recorded, this test must keep proving it still
+// reads back as the exact certification Phase 3 produced — regardless of
+// what a later cutover does to selectors, tags, or Dockerfiles.
+const phase3HistoricalSelector = "phase3profile"
+const phase3HistoricalIntegrationDockerfileRelPath = "integration/clickhouse/Dockerfile"
+
+// TestWireProfileContract_Phase3EvidenceIdentityAndSelector requires
+// §11.5's tested_behavior_head/selector/Dockerfile/production-remains-
+// legacy fields to still read back exactly as Phase 3 recorded them. It no
+// longer reads any current Dockerfile or depends on any selector-contract
+// constant (both would make this a claim about today's tree, which is
+// exactly what a historical record must not be) — only a real 40-hex
+// commit-ish string shape and the frozen selector/path literals above.
 func TestWireProfileContract_Phase3EvidenceIdentityAndSelector(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -2044,27 +1998,18 @@ func TestWireProfileContract_Phase3EvidenceIdentityAndSelector(t *testing.T) {
 	}
 
 	selector := phase3EvidenceField(t, section, "Selector")
-	if selector != phase3ReplacementTag {
-		t.Fatalf("wire_profile_contract: %s: §11.5 Selector is %q, want exactly %q", wireProfileDocRelPath, selector, phase3ReplacementTag)
+	if selector != phase3HistoricalSelector {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Selector is %q, want exactly the historically recorded %q", wireProfileDocRelPath, selector, phase3HistoricalSelector)
 	}
 
 	dockerfilePath := phase3EvidenceField(t, section, "Integration Dockerfile")
-	if dockerfilePath != phase3IntegrationDockerfileRelPath {
-		t.Fatalf("wire_profile_contract: %s: §11.5 Integration Dockerfile is %q, want exactly %q", wireProfileDocRelPath, dockerfilePath, phase3IntegrationDockerfileRelPath)
-	}
-	if !strings.Contains(readRepoFile(t, dockerfilePath), phase3TaggedBuildMarker) {
-		t.Fatalf("wire_profile_contract: %s: §11.5 claims %s carries the %s selector, but the file does not contain %q", wireProfileDocRelPath, dockerfilePath, phase3ReplacementTag, phase3TaggedBuildMarker)
-	}
-
-	for _, untaggedPath := range []string{phase3ProductionDockerfileRelPath, phase3BuildScriptRelPath, phase3PublicationWorkflowRelPath} {
-		if strings.Contains(readRepoFile(t, untaggedPath), phase3ReplacementTag) {
-			t.Fatalf("wire_profile_contract: %s: §11.5 claims normal production/publication remains untagged, but %s mentions %q", wireProfileDocRelPath, untaggedPath, phase3ReplacementTag)
-		}
+	if dockerfilePath != phase3HistoricalIntegrationDockerfileRelPath {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Integration Dockerfile is %q, want exactly the historically recorded %q", wireProfileDocRelPath, dockerfilePath, phase3HistoricalIntegrationDockerfileRelPath)
 	}
 
 	const productionRemainsLegacyNeedle = "select the legacy `internal/ldap` server"
 	if !strings.Contains(phase3CollapseWhitespace(section), productionRemainsLegacyNeedle) {
-		t.Fatalf("wire_profile_contract: %s: §11.5 must explicitly state that normal production remains on the legacy server", wireProfileDocRelPath)
+		t.Fatalf("wire_profile_contract: %s: §11.5 must still record that normal production remained on the legacy server at the time of Phase 3 certification", wireProfileDocRelPath)
 	}
 }
 
@@ -2095,10 +2040,21 @@ func phase3SplitOnHAHeading(t *testing.T, section string) (matrixPart, haPart st
 	return section[:idx], section[idx:]
 }
 
+// phase3HistoricalImages is the locally owned, frozen Phase 3 §11.5
+// tracked-image set — the exact two images actually certified at
+// tested_behavior_head. It is intentionally NOT derived from
+// auditedProvenanceMatrix (used elsewhere in this file for the CURRENT,
+// mutable tracked-line set): a future tracked-line addition or removal
+// must never silently change what this historical record is checked
+// against (plan: "not a future mutable live matrix").
+var phase3HistoricalImages = []string{
+	"altinity/clickhouse-server:24.8.11.51285.altinitystable",
+	"altinity/clickhouse-server:25.8.28.10001.altinitystable",
+}
+
 // TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA requires §11.5's
-// "Supported ClickHouse matrix" and "HA" tables to name exactly the audited
-// image set (auditedProvenanceMatrix above — the same set every other
-// wire-profile contract in this file derives its expectations from) each
+// "Supported ClickHouse matrix" and "HA" tables to name exactly the
+// historically certified image set (phase3HistoricalImages above) each
 // with a PASS result, and requires a recorded session-probe result.
 //
 // The matrix and HA subsections each contain their own "| Image | Result |"
@@ -2119,10 +2075,7 @@ func TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA(t *testing.T) {
 	section := phase3EvidenceSection(t, doc)
 	matrixPart, haPart := phase3SplitOnHAHeading(t, section)
 
-	wantImages := make([]string, 0, len(auditedProvenanceMatrix))
-	for _, p := range auditedProvenanceMatrix {
-		wantImages = append(wantImages, p.Image)
-	}
+	wantImages := append([]string(nil), phase3HistoricalImages...)
 	sort.Strings(wantImages)
 
 	assertImageResultTable := func(tableName, scopeLabel, scope string) {
@@ -2144,7 +2097,7 @@ func TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA(t *testing.T) {
 		}
 		sort.Strings(gotImages)
 		if !stringSlicesEqual(gotImages, wantImages) {
-			t.Fatalf("wire_profile_contract: %s: §11.5 %s %s table names images %v, want exactly the audited set %v", wireProfileDocRelPath, scopeLabel, tableName, gotImages, wantImages)
+			t.Fatalf("wire_profile_contract: %s: §11.5 %s %s table names images %v, want exactly the historically certified set %v", wireProfileDocRelPath, scopeLabel, tableName, gotImages, wantImages)
 		}
 	}
 
@@ -2193,10 +2146,12 @@ func TestWireProfileContract_Phase3EvidenceWireVerify(t *testing.T) {
 	}
 }
 
-// phase3FuzzTargetNames is the plan's exact five native fuzz-target names
-// (also named in §11.1's existing prose), used both to validate §11.5's
-// fuzz table and, as a bonus structural leg, to confirm each name is a real
-// exported Fuzz func in internal/ldap/profile's non-test-named fuzz files.
+// phase3FuzzTargetNames is the locally owned, frozen Phase 3 §11.5 fuzz
+// table's exact five target names. Historical use only — the live
+// existence check this variable used to also drive (confirming each name
+// is a real declared Fuzz func) now lives independently in
+// TestWireProfileContract_CurrentFuzzTargetsExist below (plan: "Move live
+// target-existence checking into a permanent current-profile contract").
 var phase3FuzzTargetNames = []string{
 	"FuzzLDAPFrame",
 	"FuzzBindRequest",
@@ -2205,6 +2160,12 @@ var phase3FuzzTargetNames = []string{
 	"FuzzMemberAssertionDN",
 }
 
+// TestWireProfileContract_Phase3EvidenceFuzzTable validates §11.5's fuzz
+// table against the frozen historical five-target/20s/PASS record only. It
+// no longer reaches into internal/ldap/profile's current test files —
+// that live check is TestWireProfileContract_CurrentFuzzTargetsExist's job
+// now, so this historical test cannot fail merely because a later phase
+// renamed or moved a fuzz target.
 func TestWireProfileContract_Phase3EvidenceFuzzTable(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -2240,12 +2201,24 @@ func TestWireProfileContract_Phase3EvidenceFuzzTable(t *testing.T) {
 	wantTargets := append([]string(nil), phase3FuzzTargetNames...)
 	sort.Strings(wantTargets)
 	if !stringSlicesEqual(gotTargets, wantTargets) {
-		t.Fatalf("wire_profile_contract: %s: §11.5 fuzz table names targets %v, want exactly %v", wireProfileDocRelPath, gotTargets, wantTargets)
+		t.Fatalf("wire_profile_contract: %s: §11.5 fuzz table names targets %v, want exactly the historically recorded %v", wireProfileDocRelPath, gotTargets, wantTargets)
 	}
+}
 
-	// Bonus structural leg: each named target is a real Fuzz func declared
-	// somewhere in internal/ldap/profile (never proof it was actually run
-	// for 20s — only that the name is not a typo/stale reference).
+// TestWireProfileContract_CurrentFuzzTargetsExist is the permanent,
+// current-profile contract that §11.5's historical fuzz-target check used
+// to also perform inline: each of the five named fuzz targets is a real
+// exported Fuzz func declared somewhere in internal/ldap/profile's test
+// files today (never proof any target was actually run for 20s — only
+// that the name is not a typo or a stale reference). Unlike
+// TestWireProfileContract_Phase3EvidenceFuzzTable, this test has no
+// dependency on §11.5's frozen text and keeps checking the actual current
+// tree even after §11.5 itself stops changing.
+func TestWireProfileContract_CurrentFuzzTargetsExist(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("wire_profile_contract: locate module root: %v", err)
+	}
 	profileDir := filepath.Join(root, filepath.FromSlash("internal/ldap/profile"))
 	entries, err := os.ReadDir(profileDir)
 	if err != nil {
@@ -2271,7 +2244,7 @@ func TestWireProfileContract_Phase3EvidenceFuzzTable(t *testing.T) {
 	}
 	for _, name := range phase3FuzzTargetNames {
 		if !declared[name] {
-			t.Errorf("wire_profile_contract: §11.5 names fuzz target %s, but no such func is declared anywhere in internal/ldap/profile's test files", name)
+			t.Errorf("wire_profile_contract: current-profile contract names fuzz target %s, but no such func is declared anywhere in internal/ldap/profile's test files", name)
 		}
 	}
 }
@@ -2345,12 +2318,24 @@ func TestWireProfileContract_Section113NarrowingDispositions(t *testing.T) {
 	}
 }
 
+// phase3HistoricalNarrowingDispositions is the locally owned, frozen
+// Phase 3 §11.5 record of all eleven narrowing dispositions (every one
+// certified ACCEPT). This test no longer cross-checks §11.5 against §11.3:
+// §11.3 is current engineering prose outside the frozen marker pair and is
+// free to keep evolving after Phase 3 (its own structural shape stays
+// separately enforced by TestWireProfileContract_Section113NarrowingDispositions
+// below) — a historical record must be checked against a frozen fact, not
+// against another document section that can legitimately change later.
+var phase3HistoricalNarrowingDispositions = map[string]string{
+	"1": "ACCEPT", "1a": "ACCEPT", "2": "ACCEPT", "3": "ACCEPT", "4": "ACCEPT",
+	"5": "ACCEPT", "6": "ACCEPT", "7": "ACCEPT", "8": "ACCEPT", "9": "ACCEPT", "10": "ACCEPT",
+}
+
 // TestWireProfileContract_Phase3EvidenceDispositionsMatchSection113 requires
-// §11.5's compact ID/Disposition table to record exactly the same eleven
-// dispositions as §11.3's authoritative table — the plan lists "the eleven
-// narrowing dispositions" among §11.5's own recorded fields, and this cross-
-// check is what prevents that recorded copy from silently drifting away
-// from §11.3's adjudicated one.
+// §11.5's compact ID/Disposition table to still read back exactly the
+// eleven dispositions Phase 3 certified (phase3HistoricalNarrowingDispositions
+// above) — a frozen historical fact, never a live comparison against
+// §11.3's current table.
 func TestWireProfileContract_Phase3EvidenceDispositionsMatchSection113(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -2358,12 +2343,6 @@ func TestWireProfileContract_Phase3EvidenceDispositionsMatchSection113(t *testin
 	}
 	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
 	section := phase3EvidenceSection(t, doc)
-
-	_, section113Rows, err := wireProfileExtractTable(doc, "Evidence / hardening label")
-	if err != nil {
-		t.Fatalf("wire_profile_contract: %s: §11.3 disposition table: %v", wireProfileDocRelPath, err)
-	}
-	section113 := phase3AssertDispositionRows(t, "§11.3", section113Rows, 0, 1)
 
 	_, section115Rows, err := wireProfileExtractTable(section, "ID", "Disposition")
 	if err != nil {
@@ -2377,20 +2356,28 @@ func TestWireProfileContract_Phase3EvidenceDispositionsMatchSection113(t *testin
 	section115 := phase3AssertDispositionRows(t, "§11.5", section115Rows, 0, 1)
 
 	for _, id := range phase3NarrowingIDs {
-		if section113[id] != section115[id] {
-			t.Fatalf("wire_profile_contract: %s: narrowing %s is %q in §11.3 but %q in §11.5 — the two recorded copies must agree exactly", wireProfileDocRelPath, id, section113[id], section115[id])
+		want, ok := phase3HistoricalNarrowingDispositions[id]
+		if !ok {
+			t.Fatalf("wire_profile_contract: internal test error: no historical disposition recorded for narrowing %s", id)
+		}
+		if got := section115[id]; got != want {
+			t.Fatalf("wire_profile_contract: %s: §11.5 narrowing %s is %q, want the historically certified %q", wireProfileDocRelPath, id, got, want)
 		}
 	}
 }
 
-// TestWireProfileContract_Phase3EvidenceLOC requires §11.5's Merged Phase 2
-// baseline field to be exactly "2682" pinned to "e26e30f" (never recomputed
-// against today's tree — that pin is a historical fact about one commit,
-// plan "LOC guardrail and documentation repair"), and requires the recorded
-// final Phase 3 LOC/delta to equal a FRESH, independent recount of the
-// current source tree using the plan's own wc -l definition — never a
-// comparison against the pinned baseline as though the baseline were meant
-// to track today's tree.
+// TestWireProfileContract_Phase3EvidenceLOC requires §11.5's LOC guardrail
+// fields to still read back exactly the historical Phase 3 record: the
+// Merged Phase 2 baseline "2682" pinned to commit "e26e30f", Final Phase 3
+// LOC "2702", and Phase 3 delta "+20". Issue #33 phase 4 removed this
+// test's prior fresh-current-tree recount (which compared the recorded
+// Final Phase 3 LOC against a live git-ls-files count of
+// internal/ldap/profile's non-test .go files): that comparison made a
+// historical §11.5 fact depend on the CURRENT tree, which stops being true
+// the moment phase 4's own LOC accounting changes profile.go's contents or
+// adds cmd/ch-oauth-ldap/ldap_backend.go to what counts as production LDAP
+// LOC. phase3FreshProfileLOC below is kept, unused by this historical
+// test, for Phase 4's own current-tree LOC accounting to reuse.
 func TestWireProfileContract_Phase3EvidenceLOC(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -2401,32 +2388,20 @@ func TestWireProfileContract_Phase3EvidenceLOC(t *testing.T) {
 
 	baseline := phase3EvidenceField(t, section, "Merged Phase 2 baseline")
 	if baseline != "2682" {
-		t.Fatalf("wire_profile_contract: %s: §11.5 Merged Phase 2 baseline is %q, want exactly \"2682\"", wireProfileDocRelPath, baseline)
+		t.Fatalf("wire_profile_contract: %s: §11.5 Merged Phase 2 baseline is %q, want exactly the historically recorded \"2682\"", wireProfileDocRelPath, baseline)
 	}
 	if !strings.Contains(section, "pinned to `e26e30f`") {
 		t.Fatalf("wire_profile_contract: %s: §11.5 must pin the merged Phase 2 baseline to commit `e26e30f`", wireProfileDocRelPath)
 	}
 
 	finalLOCStr := phase3EvidenceField(t, section, "Final Phase 3 LOC")
-	finalLOC, err := strconv.Atoi(finalLOCStr)
-	if err != nil {
-		t.Fatalf("wire_profile_contract: %s: §11.5 Final Phase 3 LOC %q is not an integer: %v", wireProfileDocRelPath, finalLOCStr, err)
+	if finalLOCStr != "2702" {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Final Phase 3 LOC is %q, want exactly the historically recorded \"2702\" — this is a frozen fact about tested_behavior_head, never recomputed against the current tree", wireProfileDocRelPath, finalLOCStr)
 	}
 
-	gotLOC := phase3FreshProfileLOC(t, root)
-	if gotLOC != finalLOC {
-		t.Fatalf("wire_profile_contract: %s: §11.5 records Final Phase 3 LOC %d, but a fresh recount of internal/ldap/profile's current non-test .go files (git ls-files | wc -l, same definition as the plan's Phase 3 final measurement) is %d — this compares the recorded figure only against the CURRENT tree, never against §11.1's pinned historical 2,682 baseline", wireProfileDocRelPath, finalLOC, gotLOC)
-	}
-
-	const baselineLOC = 2682
 	deltaStr := phase3EvidenceField(t, section, "Phase 3 delta")
-	wantDelta := finalLOC - baselineLOC
-	wantDeltaStr := strconv.Itoa(wantDelta)
-	if wantDelta >= 0 {
-		wantDeltaStr = "+" + wantDeltaStr
-	}
-	if deltaStr != wantDeltaStr {
-		t.Fatalf("wire_profile_contract: %s: §11.5 Phase 3 delta is %q, want %q (Final Phase 3 LOC %d minus the pinned 2682 baseline)", wireProfileDocRelPath, deltaStr, wantDeltaStr, finalLOC)
+	if deltaStr != "+20" {
+		t.Fatalf("wire_profile_contract: %s: §11.5 Phase 3 delta is %q, want exactly the historically recorded \"+20\"", wireProfileDocRelPath, deltaStr)
 	}
 }
 
@@ -2435,7 +2410,12 @@ func TestWireProfileContract_Phase3EvidenceLOC(t *testing.T) {
 // `git ls-files 'internal/ldap/profile/*.go' | grep -v '_test.go$' | xargs
 // wc -l`, summed. It reads working-tree bytes (not git blobs) and counts
 // newline bytes, matching `wc -l` for gofmt'd Go source (which always ends
-// in a trailing newline).
+// in a trailing newline). Kept intact, though no longer called by any
+// historical §11.5 test above, so a later Phase 4 task in this same
+// package can reuse it for the current-tree LOC accounting §11.6 records
+// (see docs/clickhouse-ldap-wire-profile.md's Phase 4 plan, "Final LOC
+// accounting": "Do not reuse Phase 3's profile-only helper as the final
+// Phase 4 total" — reuse for the profile-only component is still expected).
 func phase3FreshProfileLOC(t *testing.T, root string) int {
 	t.Helper()
 	cmd := exec.Command("git", "ls-files", "--", "internal/ldap/profile/*.go") //nolint:gosec // fixed argv, no user input
@@ -2503,7 +2483,11 @@ func TestWireProfileContract_Phase3EvidenceRedactionAndReleaseGate(t *testing.T)
 // "Certified-surface anti-drift digest" file-selection list (git pathspec
 // patterns, non-recursive per named directory except where ** is used).
 // Changing this list is changing what the digest certifies — do so only in
-// lockstep with the plan section it implements.
+// lockstep with the plan section it implements. This is the same pathset
+// issue #33 phase 4's plan directs be reused, unchanged, for the Phase 4
+// live digest contract (§11.6) — including keeping "third_party/**" even
+// after that directory is deleted at cutover, so an eventual reintroduction
+// would again alter the digest.
 var certifiedSurfacePatterns = []string{
 	"go.mod",
 	"go.sum",
@@ -2539,8 +2523,12 @@ var certifiedSurfacePatterns = []string{
 // path matching certifiedSurfacePatterns (deduplicated, non-test .go files
 // excluded), sorted byte-wise, stream "<path> NUL <file-bytes> NUL" into one
 // SHA-256. This must never itself compute the verdict a Docker/fuzz command
-// ran — it only proves the CURRENT certification-sensitive source still
-// hashes to what §11.5 recorded at tested_behavior_head.
+// ran — it only proves the source it is pointed at hashes to a given
+// value. No historical §11.5 test above calls this any longer (§11.5 is
+// now checked as a frozen record, never recomputed against a later tree —
+// see TestWireProfileContract_Phase3EvidenceCertifiedSurfaceDigestMatches);
+// it is kept intact for a later Phase 4 task in this package to reuse for
+// §11.6's own current-tree live digest contract.
 func computeCertifiedSurfaceDigest(t *testing.T, root string) (digestHex string, fileCount int) {
 	t.Helper()
 	seen := map[string]bool{}
@@ -2589,13 +2577,27 @@ func computeCertifiedSurfaceDigest(t *testing.T, root string) (digestHex string,
 	return hex.EncodeToString(h.Sum(nil)), len(filtered)
 }
 
+// phase3HistoricalCertifiedSurfaceDigest and
+// phase3HistoricalCertifiedSurfaceFileCount are the locally owned, frozen
+// Phase 3 §11.5 certified-surface digest facts, recorded once at Stage B
+// manual certification and never recomputed thereafter.
+const phase3HistoricalCertifiedSurfaceDigest = "90619015fcb4965888a0e090474f8ed11d7991a7bc24b67e71b7251147b52c48"
+const phase3HistoricalCertifiedSurfaceFileCount = 173
+
 // TestWireProfileContract_Phase3EvidenceCertifiedSurfaceDigestMatches
-// independently recomputes the certified-surface digest and requires it to
-// equal §11.5's recorded value. A mismatch here does not mean "fix the
-// doc" or "fix this test" — per the plan, it means the prior Stage B manual
-// certification is INVALID and a new one is required against a new
-// tested_behavior_head. This test only detects that condition; it never
-// resolves it by adjusting either side.
+// requires §11.5 to still read back exactly the certified-surface digest
+// and tracked-file count Phase 3's Stage B manual certification recorded.
+// Issue #33 phase 4 replaced this test's prior live recomputation
+// (independently reproducing the digest algorithm over the CURRENT tree
+// and requiring equality) with this frozen-record check: the certified
+// surface's own file set (certifiedSurfacePatterns) is expected to change
+// at cutover — that is the whole point of Phase 4 — so a §11.5 test that
+// recomputed against today's tree would necessarily start failing the
+// moment cutover touched any certified-surface path, even though §11.5's
+// recorded bytes describe Phase 3's tested_behavior_head correctly and
+// truthfully. computeCertifiedSurfaceDigest and certifiedSurfacePatterns
+// are kept intact, unused by this historical test, for Phase 4's own
+// current-tree digest contract (§11.6) to reuse.
 func TestWireProfileContract_Phase3EvidenceCertifiedSurfaceDigestMatches(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -2605,12 +2607,13 @@ func TestWireProfileContract_Phase3EvidenceCertifiedSurfaceDigestMatches(t *test
 	section := phase3EvidenceSection(t, doc)
 
 	recorded := phase3EvidenceField(t, section, "Certified-surface digest (SHA-256)")
-	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(recorded) {
-		t.Fatalf("wire_profile_contract: %s: §11.5 certified-surface digest %q is not exactly 64 lowercase hex characters", wireProfileDocRelPath, recorded)
+	if recorded != phase3HistoricalCertifiedSurfaceDigest {
+		t.Fatalf("wire_profile_contract: %s: §11.5 records certified-surface digest %s, want exactly the historically certified %s — this is a frozen fact about tested_behavior_head and must never be edited to match a later tree; a mismatch means §11.5's recorded bytes were altered, which §11.5 forbids", wireProfileDocRelPath, recorded, phase3HistoricalCertifiedSurfaceDigest)
 	}
 
-	got, fileCount := computeCertifiedSurfaceDigest(t, root)
-	if got != recorded {
-		t.Fatalf("wire_profile_contract: %s: §11.5 records certified-surface digest %s, but recomputing the identical algorithm now over %d tracked files yields %s — if this is not a bug in this test's own algorithm, the prior Stage B manual certification is INVALID: stop and report, a new certification against a new tested_behavior_head is required, do not edit either side to force agreement", wireProfileDocRelPath, recorded, fileCount, got)
+	flat := phase3CollapseWhitespace(section)
+	wantFileCountNeedle := fmt.Sprintf("reproduced 3× identically over %d tracked files", phase3HistoricalCertifiedSurfaceFileCount)
+	if !strings.Contains(flat, wantFileCountNeedle) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 must record %q", wireProfileDocRelPath, wantFileCountNeedle)
 	}
 }
