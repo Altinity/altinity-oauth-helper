@@ -5,8 +5,11 @@ name: Build & push ch-oauth-ldap image
 # context rules from the phase-4 plan: the binary is compiled directly into a
 # $RUNNER_TEMP-owned per-arch directory (never into the checkout), and the
 # Docker build context is that owned temp directory (never `.`). Only an
-# immutable `<prefix>-<7-char-sha>` tag is ever pushed; `main`/`latest` are
-# never used as tags.
+# immutable `<prefix>-<7-char-sha>` tag is ever BUILT and pushed; `main` is
+# never used as a tag. A moving `:latest` alias is additionally repointed at
+# that immutable manifest after it is published (see the alias step in the
+# `manifest` job) -- a pointer created with `imagetools create`, never a
+# build, and only on a default-prefix push to `main`.
 #
 # Tag-republication guard: before any per-arch build/push runs, this
 # refuses outright if `<prefix>-<sha>` OR that arch's own
