@@ -21,6 +21,24 @@ package securitytest
 // digest" stop condition (plan stop condition 9): such a change would make
 // §11.6's attestation void, and this is the mechanical proof of that.
 //
+// That live-tree check alone cannot prove the recorded digest corresponds
+// to the recorded tested_behavior_head, only that it corresponds to
+// *some* tree — namely whatever tree happens to be checked out when the
+// test runs. A later commit can edit a certified-surface file, recompute
+// the live digest against its own new tree, and overwrite §11.6's
+// recorded digest field while leaving tested_behavior_head untouched;
+// TestPhase4Evidence_TestedBehaviorHead's plain
+// `^[0-9a-f]{40}$` shape check does not catch this either. Two tests
+// close that specific gap: TestPhase4Evidence_TestedBehaviorHead also
+// requires the recorded head to name a real commit reachable from HEAD
+// (via gitCommitIsReachable), and
+// TestPhase4Evidence_DigestBoundToTestedBehaviorHead independently
+// recomputes the digest from the git objects actually recorded AT that
+// commit (via computeCertifiedSurfaceDigestAtCommit, also owned by
+// wire_profile_contract_test.go) and requires it equal the recorded
+// digest — proving the digest is bound to the named head, not merely to
+// whatever tree the suite happened to run against.
+//
 // This file also owns phase4FreshProductionLDAPLOC, the plan's required
 // mechanical Phase 4 LOC helper (internal/ldap/profile/*.go non-test +
 // cmd/ch-oauth-ldap/ldap_backend.go) — deliberately NOT a reuse of
@@ -155,6 +173,58 @@ func TestPhase4Evidence_TestedBehaviorHead(t *testing.T) {
 	head := phase4EvidenceField(t, section, "tested_behavior_head")
 	if !phase4TestedBehaviorHeadRE.MatchString(head) {
 		t.Fatalf("phase4_evidence_contract: %s: §11.6 tested_behavior_head is %q, want a full 40-character lowercase hex commit SHA", wireProfileDocRelPath, head)
+	}
+
+	// Syntactic SHA shape alone proves nothing about the commit actually
+	// existing: gitCommitIsReachable resolves the object and requires it
+	// be an ancestor of (or equal to) HEAD, so a fabricated, dangling, or
+	// wrong-branch hex string that merely happens to look like a SHA is
+	// rejected here rather than silently accepted.
+	if !gitCommitIsReachable(t, root, head) {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 tested_behavior_head %q does not resolve to a commit reachable from HEAD in this repository", wireProfileDocRelPath, head)
+	}
+}
+
+// TestPhase4Evidence_DigestBoundToTestedBehaviorHead is the mechanical
+// binding the plan's stop condition 9 requires and
+// TestPhase4Evidence_LiveCertifiedSurfaceDigestMatches alone cannot
+// provide: that test recomputes the certified-surface digest against
+// whatever tree the test happens to run against (the current working
+// tree), so a later commit can edit a certified-surface file, recompute
+// the digest to match its own new tree, and overwrite §11.6's recorded
+// digest — all while leaving tested_behavior_head frozen at the older,
+// no-longer-matching commit; nothing catches the resulting decoupling
+// (exactly what happened between commits 76e8bcc/3c12ab7 and 0ccbd43 on
+// this branch). This test closes that gap by recomputing the digest via
+// computeCertifiedSurfaceDigestAtCommit — reading blobs straight out of
+// the git object database at the recorded tested_behavior_head, never the
+// working tree — and requiring it equal §11.6's recorded digest. A commit
+// that changes a certified-surface file without also advancing
+// tested_behavior_head to (at minimum) a commit that contains that change
+// fails this test, regardless of what the live working-tree digest reads.
+func TestPhase4Evidence_DigestBoundToTestedBehaviorHead(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("phase4_evidence_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase4EvidenceSection(t, doc)
+
+	head := phase4EvidenceField(t, section, "tested_behavior_head")
+	if !phase4TestedBehaviorHeadRE.MatchString(head) {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 tested_behavior_head is %q, want a full 40-character lowercase hex commit SHA", wireProfileDocRelPath, head)
+	}
+	recordedDigest := phase4EvidenceField(t, section, "Certified-surface digest (SHA-256)")
+
+	headDigest, headCount := computeCertifiedSurfaceDigestAtCommit(t, root, head)
+	if headDigest != recordedDigest {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 records certified-surface digest %s for tested_behavior_head %s, but recomputing the digest from the git objects actually recorded AT that commit yields %s — the recorded digest does not correspond to the recorded head; per stop condition 9 this attestation is void and must be re-certified (either recompute the digest at the truly attested head, or advance tested_behavior_head to a commit whose tree really does hash to the recorded digest)", wireProfileDocRelPath, recordedDigest, head, headDigest)
+	}
+
+	flat := phase3CollapseWhitespace(section)
+	wantFileCountNeedle := "reproduced 3× identically over " + strconv.Itoa(headCount) + " tracked files"
+	if !strings.Contains(flat, wantFileCountNeedle) {
+		t.Fatalf("phase4_evidence_contract: %s: §11.6 must record %q (the tracked-file count at tested_behavior_head %s)", wireProfileDocRelPath, wantFileCountNeedle, head)
 	}
 }
 

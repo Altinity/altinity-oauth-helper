@@ -2586,6 +2586,90 @@ func computeCertifiedSurfaceDigest(t *testing.T, root string) (digestHex string,
 	return hex.EncodeToString(h.Sum(nil)), len(filtered)
 }
 
+// computeCertifiedSurfaceDigestAtCommit reproduces
+// computeCertifiedSurfaceDigest's exact algorithm, but against the tree
+// recorded in one specific git commit object rather than the current
+// working tree: file listing goes through `git ls-files --with-tree=<sha>`
+// (identical pathspec matching to plain `git ls-files`, just retargeted at
+// a historical tree — plain `git ls-tree` does not accept these glob
+// pathspecs) and file content goes through `git show <sha>:<path>` (a blob
+// read from the object database), so the result depends only on what that
+// commit actually recorded — never on what happens to be checked out when
+// the test runs. This is what binds a §11.x "tested_behavior_head" field
+// to its recorded digest: computeCertifiedSurfaceDigest alone can only
+// prove a digest matches *some* tree (whatever the working tree happens to
+// be when the test runs, which a later commit can silently move); this
+// proves it matches the tree at one specific, named, immutable commit.
+func computeCertifiedSurfaceDigestAtCommit(t *testing.T, root, sha string) (digestHex string, fileCount int) {
+	t.Helper()
+	seen := map[string]bool{}
+	var all []string
+	for _, pat := range certifiedSurfacePatterns {
+		cmd := exec.Command("git", "ls-files", "--with-tree="+sha, "--", pat) //nolint:gosec // fixed argv, no user input
+		cmd.Dir = root
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("wire_profile_contract: certified-surface digest at %s: git ls-files --with-tree=%s -- %q: %v\nstderr:\n%s", sha, sha, pat, err, stderr.String())
+		}
+		for _, line := range strings.Split(stdout.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if !seen[line] {
+				seen[line] = true
+				all = append(all, line)
+			}
+		}
+	}
+
+	var filtered []string
+	for _, p := range all {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	sort.Strings(filtered)
+
+	h := sha256.New()
+	for _, p := range filtered {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+		cmd := exec.Command("git", "show", sha+":"+p) //nolint:gosec // fixed argv, no user input
+		cmd.Dir = root
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("wire_profile_contract: certified-surface digest at %s: git show %s:%s: %v\nstderr:\n%s", sha, sha, p, err, stderr.String())
+		}
+		h.Write(stdout.Bytes())
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), len(filtered)
+}
+
+// gitCommitIsReachable reports whether sha names a real commit object that
+// is an ancestor of (or equal to) the repository's current HEAD — the
+// existence and reachability check a bare `^[0-9a-f]{40}$` regex cannot
+// perform on its own. A recorded tested_behavior_head that fails this
+// cannot be a commit any evidence record's manual certification actually
+// ran against on this branch's history.
+func gitCommitIsReachable(t *testing.T, root, sha string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "cat-file", "-e", sha+"^{commit}") //nolint:gosec // fixed argv, no user input
+	cmd.Dir = root
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	cmd = exec.Command("git", "merge-base", "--is-ancestor", sha, "HEAD") //nolint:gosec // fixed argv, no user input
+	cmd.Dir = root
+	return cmd.Run() == nil
+}
+
 // phase3HistoricalCertifiedSurfaceDigest and
 // phase3HistoricalCertifiedSurfaceFileCount are the locally owned, frozen
 // Phase 3 §11.5 certified-surface digest facts, recorded once at Stage B

@@ -1077,17 +1077,22 @@ This section is the populated evidence record for Phase 4's production
 cutover — replacing the legacy `internal/ldap` server with the ordinary,
 untagged `internal/ldap/profile`-backed production composition — manually
 certified against `tested_behavior_head` below and machine-checked for
-completeness, absence of placeholders, internal consistency, and (unlike
-§11.5) live equality with the current certified-surface source tree by
-`internal/securitytest/phase4_evidence_contract_test.go`. Those checks
-prove this section's shape, self-consistency, and that the recorded
-certified-surface digest still matches the tree they run against — never
-that the Docker/fuzz commands below were actually run. Only the coordinator
-can attest that; see the human-attested list this document's plan carries.
+completeness, absence of placeholders, internal consistency, (unlike
+§11.5) live equality with the current certified-surface source tree, and
+that the recorded digest is actually bound to `tested_behavior_head`
+itself — not merely to whatever tree happens to be checked out when the
+suite runs — by `internal/securitytest/phase4_evidence_contract_test.go`.
+Those checks prove this section's shape, self-consistency, that the
+recorded certified-surface digest matches both the tree they run against
+and the git objects recorded at `tested_behavior_head`, and that
+`tested_behavior_head` names a real commit reachable from this branch's
+history — never that the Docker/fuzz commands below were actually run.
+Only the coordinator can attest that; see the human-attested list this
+document's plan carries.
 
 **Certification identity**
 
-- **tested_behavior_head:** `3c12ab752ba6e00516ea28a7bf24e7085290baac`
+- **tested_behavior_head:** `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`
 - **Selector/composition:** ordinary, untagged production — `cmd/ch-oauth-ldap`
   builds without any build tag and its `newLDAPServer` constructs
   `internal/ldap/profile.Server` unconditionally; there is no
@@ -1105,17 +1110,39 @@ can attest that; see the human-attested list this document's plan carries.
   `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
   constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
 - **Certified-surface digest (SHA-256):** `3510ad40fe1ad910c5041f4f05ea1fc03aa4be4e3224aa1c299c6f2ee17e5390`
-  — computed at `tested_behavior_head` over the same "Certified-surface
-  anti-drift digest" file set §11.5 used (`certifiedSurfacePatterns`,
-  unchanged, `third_party/**` kept even though the directory is now empty),
-  reproduced 3× identically over 89 tracked files. Updated after the
-  attested head for comment-only edits to
-  `internal/ldap/profile/frame.go` and `internal/ldap/profile/bind.go`
-  (historicalizing two stale present-tense references to the
-  since-deleted vendored goldap parser); the behavior surface is
-  unchanged (no code touched, only comments; still 89 tracked files), and
-  the Docker attestation at `76e8bcc` remains valid — only this digest
-  field was refreshed to match the current tree.
+  — computed over the same "Certified-surface anti-drift digest" file set
+  §11.5 used (`certifiedSurfacePatterns`, unchanged, `third_party/**` kept
+  even though the directory is now empty), reproduced 3× identically over
+  89 tracked files. This is not merely computed at `tested_behavior_head`
+  by assertion: `TestPhase4Evidence_DigestBoundToTestedBehaviorHead` reads
+  every certified-surface file straight out of the git object database at
+  the exact commit `tested_behavior_head` names (never the working tree)
+  and requires the two hash equal, so the field above and the head above
+  it are mechanically bound to each other, not merely both individually
+  self-consistent.
+  `tested_behavior_head` was originally `3c12ab752ba6e00516ea28a7bf24e7085290baac`
+  (the head the Docker/fuzz/wire-capture suites below were actually run
+  against, tracing back to the original manual certification at `76e8bcc`);
+  it is now `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`, one commit later,
+  because that commit made a comment-only edit to two certified-surface
+  files (`internal/ldap/profile/frame.go` and
+  `internal/ldap/profile/bind.go`, historicalizing two stale present-tense
+  references to the since-deleted vendored goldap parser — `git diff
+  3c12ab7 0ccbd43 -- internal/ldap/profile/frame.go
+  internal/ldap/profile/bind.go` shows only comment text changed, both
+  files' line counts unchanged, and the tracked-file count unchanged at
+  89). Per the plan's stop condition 9, a certified-surface change after
+  the attested head voids the attestation and is never resolved by
+  prose alone: it is resolved here by advancing `tested_behavior_head`
+  itself to the commit that actually contains the change, so that the
+  digest genuinely is the digest at the recorded head — not by leaving
+  the head frozen at the older commit and only editing the digest field
+  to match a newer, uncorrelated tree (the defect
+  `TestPhase4Evidence_DigestBoundToTestedBehaviorHead` now exists to
+  catch). No production behavior changed between the two heads; the
+  original Docker/fuzz/wire-capture attestation below remains the
+  evidence for both, since neither commit altered anything those suites
+  exercise.
 
 **Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
 
