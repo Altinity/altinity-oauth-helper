@@ -58,7 +58,7 @@ jobs:
             -ldflags="-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
             -o ch-jwt-verify ./cmd/ch-jwt-verify
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: ${{ matrix.arch }}
 
