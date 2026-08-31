@@ -22,8 +22,13 @@ and function name against them, in addition to the plan's own pre-verified
 function-name citations this document had wrong — one in §4, the rest in
 §7 and §8.3 — including one bullet that named the wrong OpenLDAP function
 entirely (§7's Unbind citation); see those sections for the corrected
-values. Commit hashes, blob SHAs, and OpenLDAP pins were all already
-correct and needed no change. No committed fixture and no source citation,
+values. Within the scope of that Phase 1 audit — the `24.8` and `25.8`
+lines, the only ones tracked at the time — commit hashes, blob SHAs and
+OpenLDAP pins were all already correct and needed no change. That scoping
+is load-bearing rather than pedantic: the later `26.3`/`26.8` expansion did
+have to correct a commit hash, because `v26.8.1.2041-lts` is an annotated
+tag and its tag-object SHA was recorded where the peeled commit belonged
+(§2.1, §11.7). No committed fixture and no source citation,
 corrected or otherwise, contradicted the architecture this phase assumes
 (plan §1's stop condition was checked and did not fire), so the evidence
 and the decision below are recorded as final for Phase 1.
@@ -33,14 +38,16 @@ and the decision below are recorded as final for Phase 1.
 "Tracked" means exactly the images listed in
 `integration/clickhouse/run-all-builds.sh`'s `BUILDS` array — nothing
 broader, and nothing added ad hoc by this document. That file is the single
-source of truth for which ClickHouse builds Phase 1 owes fixtures for;
+source of truth for which ClickHouse builds this document owes fixtures for;
 everything else in this document exists to explain and cite evidence *for*
-those two lines, not to extend the set.
+those four lines, not to extend the set.
 
 | Line   | Tracked image (verbatim from `BUILDS`)                     |
 | ------ | ------------------------------------------------------------ |
 | `24.8` | `altinity/clickhouse-server:24.8.11.51285.altinitystable`   |
 | `25.8` | `altinity/clickhouse-server:25.8.28.10001.altinitystable`   |
+| `26.3` | `altinity/clickhouse-server:26.3.16.10001.altinitystable`   |
+| `26.8` | `clickhouse/clickhouse-server:26.8.1.2041`                  |
 
 `internal/securitytest`'s wire-profile contract (`wire_profile_contract_test.go`)
 derives its own expected set from that same runner file and cross-checks it
@@ -52,42 +59,95 @@ against this table, the fixture directories under
 
 ### 2.1 Repository, tag, commit, OpenLDAP pin
 
-The tracked ClickHouse source repository is explicitly **`Altinity/ClickHouse`**,
-not upstream `ClickHouse/ClickHouse` — the two tags below were confirmed to
-resolve to these exact commits in that fork.
+Three of the four tracked lines are built from the Altinity fork,
+**`Altinity/ClickHouse`**. The `26.8` line is the deliberate exception: it
+is built from upstream **`ClickHouse/ClickHouse`**, because no Altinity
+Stable 26.8 build exists — at the time this line was added the newest
+Altinity tags were `26.3.16.10001.altinitystable` and
+`26.6.2.20001.altinityantalya`, and upstream 26.8 had shipped. Tracking it
+upstream is what makes the 26.8 line trackable at all; the alternative was
+to leave the current LTS line uncovered. What `run-all-builds.sh` requires
+of any image is a *tag equal to the server's `version()` string*, which
+both registries satisfy, so this deviation costs the suite nothing. Every
+tag below was confirmed to resolve to the exact commit shown, in the
+repository shown.
+
+The **Commit** column holds commit-object SHAs, never tag-object SHAs. That
+distinction is load-bearing for `26.8` specifically: `v26.8.1.2041-lts` is
+an **annotated** tag, so its ref reports object type `tag` and SHA
+`be4175ff9ba169fe2421dc8c7d06b0e94cfb4594` — the tag object. Peeling it
+(`gh api repos/ClickHouse/ClickHouse/git/tags/be4175ff… --jq .object.sha`)
+gives the commit recorded below. The other three tags are lightweight and
+resolve directly. A tag SHA substituted here would still fetch the right
+file contents — the GitHub contents API peels refs — so §2.2's blob SHAs
+are unaffected by the distinction; what breaks is anyone trying to resolve
+the recorded value as a commit, which is exactly what this table promises.
 
 | Line   | ClickHouse repository | Tag                              | Commit                                     | OpenLDAP repository   | Pin                                        | Version |
 | ------ | ---------------------- | --------------------------------- | ------------------------------------------- | ---------------------- | -------------------------------------------- | ------- |
 | `24.8` | `Altinity/ClickHouse`  | `v24.8.11.51285.altinitystable`  | `351edb1a2ec26940aee4c2d1d332fd280c232964` | `ClickHouse/openldap`  | `5671b80e369df2caf5f34e02924316205a43c895`  | 2.5.16  |
 | `25.8` | `Altinity/ClickHouse`  | `v25.8.28.10001.altinitystable`  | `568824f4327b379e86bce93f12b9cebe0cfd9ff5` | `openldap/openldap`    | `22fe35c6b4098e3ad166469f9574c79832c42952`  | 2.6.10  |
+| `26.3` | `Altinity/ClickHouse`  | `v26.3.16.10001.altinitystable`  | `8de06fed91fa7a6545a72f37c98e81d4cc024bb1` | `openldap/openldap`    | `22fe35c6b4098e3ad166469f9574c79832c42952`  | 2.6.10  |
+| `26.8` | `ClickHouse/ClickHouse` | `v26.8.1.2041-lts`              | `537693a9b20b947a3cf0c4ac90c7c966eee963c9` | `openldap/openldap`    | `22fe35c6b4098e3ad166469f9574c79832c42952`  | 2.6.10  |
 
-Both `build/version.var` files at those exact pins were fetched and read
+Every `build/version.var` at those exact pins was fetched and read
 directly: the 24.8 line's submodule reports `ol_major=2 ol_minor=5
-ol_patch=16`, and the 25.8 line's reports `ol_major=2 ol_minor=6
-ol_patch=10` — matching the table with no interpretation required.
+ol_patch=16`, and the 25.8, 26.3 and 26.8 lines all report `ol_major=2
+ol_minor=6 ol_patch=10` — matching the table with no interpretation
+required. The last three share one OpenLDAP pin
+(`22fe35c6b4098e3ad166469f9574c79832c42952`). For the two lines added
+later, `26.3` and `26.8`, that pin was read from the `contrib/openldap`
+submodule entry at each line's own ClickHouse commit rather than assumed
+to carry forward from `25.8`; the shared pin is a finding, not an
+inheritance.
 
 ### 2.2 Exact ClickHouse source blob SHAs
 
 Full 40-hex git blob SHAs, not truncated prefixes, for every ClickHouse
-source file this document cites. These were independently recomputed with
-`git hash-object` against each file fetched live from
-`Altinity/ClickHouse` at the two commits above, and matched on the first
-attempt — the plan's pre-recorded values are exact.
+source file this document cites. These were read from each tracked line's
+own repository at the commit recorded in §2.1 — `Altinity/ClickHouse` for
+`24.8`/`25.8`/`26.3`, upstream `ClickHouse/ClickHouse` for `26.8`.
 
-| File                                    | 24.8 blob                                   | 25.8 blob                                   |
-| ---------------------------------------- | -------------------------------------------- | -------------------------------------------- |
-| `src/Access/LDAPClient.cpp`              | `3a0b82b9a760e8c0e4f37f422e673a1c5a2228e0`  | `3a0b82b9a760e8c0e4f37f422e673a1c5a2228e0`  |
-| `src/Access/LDAPClient.h`                | `0bbd2c6e9c4662d3d31f83bd8ed457647d436cc6`  | `0bbd2c6e9c4662d3d31f83bd8ed457647d436cc6`  |
-| `src/Access/LDAPAccessStorage.cpp`       | `917ad7cbb922083ab82f85ab25c120a17fd009c7`  | `fc55c6b081b38ecccbf4894a9a5fa223d3cd2bd8`  |
-| `src/Access/ExternalAuthenticators.cpp`  | `77812ac5eb5d0027f081ac43dccc6b89110aeb73`  | `ca61b55dc5dc200353971ff53580b2ee04439334`  |
+| File                                    | 24.8 blob                                   | 25.8 blob                                   | 26.3 blob                                   | 26.8 blob                                   |
+| ---------------------------------------- | -------------------------------------------- | -------------------------------------------- | -------------------------------------------- | -------------------------------------------- |
+| `src/Access/LDAPClient.cpp`              | `3a0b82b9a760e8c0e4f37f422e673a1c5a2228e0`  | `3a0b82b9a760e8c0e4f37f422e673a1c5a2228e0`  | `e76d084f35745778667115865883c910fbdf82a5`  | `7465096b834f789bd8856cc74cc5dbefe6397ded`  |
+| `src/Access/LDAPClient.h`                | `0bbd2c6e9c4662d3d31f83bd8ed457647d436cc6`  | `0bbd2c6e9c4662d3d31f83bd8ed457647d436cc6`  | `558017704e75731fd1b2bb0eb88367c00d40aa69`  | `558017704e75731fd1b2bb0eb88367c00d40aa69`  |
+| `src/Access/LDAPAccessStorage.cpp`       | `917ad7cbb922083ab82f85ab25c120a17fd009c7`  | `fc55c6b081b38ecccbf4894a9a5fa223d3cd2bd8`  | `939b99396c300abd67abbdfa55d97411ec258261`  | `e464d5818b552b4e7623cb34f3e43f6e5302e176`  |
+| `src/Access/ExternalAuthenticators.cpp`  | `77812ac5eb5d0027f081ac43dccc6b89110aeb73`  | `ca61b55dc5dc200353971ff53580b2ee04439334`  | `6fa7c28bc980ce5f639a88b0094e63ca65dd383e`  | `40fc3b719d195fc600961e10059a827c0cd7545e`  |
 
-`LDAPClient.cpp` and `LDAPClient.h` are byte-identical across the two
-tracked commits — every citation into those two files below therefore uses
-one line number that is valid for both lines. `LDAPAccessStorage.cpp` and
-`ExternalAuthenticators.cpp` differ between the two commits (the config
-parsing and role-mapping call path was reshaped between 24.8 and 25.8), so
-citations into those two files are given per-commit where the line numbers
-actually moved.
+`LDAPClient.cpp`/`LDAPClient.h` are byte-identical **within** each pair —
+`24.8` = `25.8`, and `26.3` = `26.8` for the header, with the two `.cpp`
+blobs differing only as described below — but **not across** the pairs. So
+a citation into those two files is valid for a pair, not for all four
+lines. Every `LDAPClient.cpp` citation in this document is therefore given
+in the form `24.8/25.8 → 26.3/26.8` (§4, §5, §6, §8). `LDAPClient.h` is the
+exception that needs no such treatment: its blob differs between the pairs
+and the file grew from 161 to 163 lines, but every line this document cites
+from it (`:96`, `:120`–`:123` — the protocol-version and timeout/limit
+defaults) sits at an unchanged line number in both pairs, verified rather
+than assumed.
+
+Two source deltas separate the pairs, both established by direct diff
+rather than inferred from the differing SHAs:
+
+- **`24.8`/`25.8` → `26.3`: one behavioral change.** 26.3 introduced a
+  `<follow_referrals>` LDAP-server config key. `openConnection()` gained a
+  corresponding `ldap_set_option(handle, LDAP_OPT_REFERRALS,
+  params.follow_referrals ? LDAP_OPT_ON : LDAP_OPT_OFF)` call
+  (`LDAPClient.cpp:250`–`255`, `#ifdef`-guarded), `follow_referrals` joined
+  the connection-params hash, and the search-reference log line became a
+  two-branch `LOG_TRACE` instead of a single `LOG_WARNING`. §5 classifies
+  the new option; it has no wire consequence for this profile.
+- **`26.3` → `26.8`: no behavioral change.** The only `LDAPClient.cpp`
+  delta is value-initialization hygiene — `::timeval operation_timeout{}`,
+  `::timeval network_timeout{}`, `::berval cred{}`, `::berval bv{}` — and
+  `LDAPClient.h` is byte-identical between them. The two lines are treated
+  as one source pair throughout this document for that reason.
+
+`LDAPAccessStorage.cpp` and `ExternalAuthenticators.cpp` differ on all four
+commits (the config parsing and role-mapping call path has been reshaped
+repeatedly), so citations into those two files are given per-commit where
+the line numbers actually moved.
 
 `profile.json` under each tracked-line fixture directory carries this exact
 same repository/tag/commit/blob map, and `wire_profile_contract_test.go`
@@ -129,38 +189,46 @@ becomes a socket write. Each hop below is cited as
 
 1. **`LDAPAccessStorage::authenticateImpl`**
    (`Altinity/ClickHouse@568824f4:src/Access/LDAPAccessStorage.cpp:453`,
-   `@351edb1a:...:456`) calls into
+   `@351edb1a:...:456`, `@8de06fed:...:438`,
+   `ClickHouse/ClickHouse@537693a9:...:439`) calls into
 2. **`LDAPAccessStorage::areLDAPCredentialsValidNoLock`**
-   (`@568824f4:...:347`, `@351edb1a:...:350`), which — for a
+   (`@568824f4:...:347`, `@351edb1a:...:350`, `@8de06fed:...:332`,
+   `@537693a9:...:333`), which — for a
    `BasicCredentials` (the caller's email+JWT repacked as HTTP Basic,
    exactly the shape `cmd/ch-jwt-verify` produces) — calls
 3. **`ExternalAuthenticators::checkLDAPCredentials`**
    (`@568824f4:src/Access/ExternalAuthenticators.cpp:399`,
-   `@351edb1a:...:389`), which constructs an `LDAPSimpleAuthClient` from the
-   parsed `LDAPClient::Params` (built by `parseLDAPServer`, same file,
-   reading the `<ldap_servers><oauth_helper>` block) and calls
+   `@351edb1a:...:389`, and `:403` in both `@8de06fed` and `@537693a9`),
+   which constructs an `LDAPSimpleAuthClient` from the
+   parsed `LDAPClient::Params` (built by `parseLDAPServer`, same file —
+   `:61` in both 26.x commits — reading the `<ldap_servers><oauth_helper>`
+   block) and calls
 4. **`LDAPSimpleAuthClient::authenticate`**
    (`Altinity/ClickHouse@351edb1a2ec26940aee4c2d1d332fd280c232964:src/Access/LDAPClient.cpp::LDAPSimpleAuthClient::authenticate`,
-   line 587 — identical in both commits), which drives the actual libldap
+   line 587 → 600 — identical within each source pair), which drives the
+   actual libldap
    calls:
-   * `LDAPClient::openConnection` (`LDAPClient.cpp:213`) — connection setup
+   * `LDAPClient::openConnection` (`LDAPClient.cpp:213` → `:214`) — connection setup
      and every `ldap_set_option` (§5 below);
    * the simple Bind itself, via `ldap_sasl_bind_s(...,
-     LDAP_SASL_SIMPLE, ...)` (`LDAPClient.cpp:360`);
+     LDAP_SASL_SIMPLE, ...)` (`LDAPClient.cpp:360` → `:368`);
    * for each configured role-mapping entry, `LDAPClient::search`
-     (`LDAPClient.cpp:405`, issuing `ldap_search_ext_s` at `LDAPClient.cpp:445`);
-   * `LDAPClient::closeConnection` (`LDAPClient.cpp:391`, issuing
-     `ldap_unbind_ext_s` at `LDAPClient.cpp:398`) once the `~LDAPClient`
+     (`LDAPClient.cpp:405` → `:413`, issuing `ldap_search_ext_s` at
+     `LDAPClient.cpp:445` → `:453`);
+   * `LDAPClient::closeConnection` (`LDAPClient.cpp:391` → `:399`, issuing
+     `ldap_unbind_ext_s` at `LDAPClient.cpp:398` → `:406`) once the `~LDAPClient`
      destructor runs or the connection is otherwise torn down.
 
 Role-search parameters themselves are parsed by
 `parseLDAPRoleSearchParams` (`ExternalAuthenticators.cpp:259` in the 24.8
-commit, `:269` in the 25.8 commit — the two commits' `checkLDAPCredentials`/
-`parseLDAPServer` bodies differ in length above this function, shifting its
-line number, even though the function itself is otherwise equivalent) and
+commit, `:269` in the 25.8 commit, `:273` in both the 26.3 and 26.8 commits
+— the commits' `checkLDAPCredentials`/`parseLDAPServer` bodies differ in
+length above this function, shifting its line number, even though the
+function itself is otherwise equivalent) and
 threaded through `LDAPAccessStorage`'s own
 `role_search_params` member (`LDAPAccessStorage.cpp`, constructed around
-line 71–84 in both commits), which is what turns the fixture's single
+line 71–84 in the 24.8/25.8 commits and 66–79 in the 26.3/26.8 commits),
+which is what turns the fixture's single
 `<role_mapping>` block into the one `LDAPClient::RoleSearchParams` instance
 `LDAPSimpleAuthClient::authenticate` iterates and searches with.
 
@@ -172,26 +240,31 @@ bookkeeping begins — out of this document's scope.
 
 ## 5. Complete `ldap_set_option` classification
 
-`LDAPClient::openConnection` (`LDAPClient.cpp:213`, identical in both
-commits) sets exactly these options, in this order, every one of them
-before the Bind is issued (`LDAPClient.cpp:246`–`340`):
+`LDAPClient::openConnection` sets exactly these options, in this order,
+every one of them before the Bind is issued. The function is byte-identical
+within each source pair but not across them (§2.2), so line numbers are
+given per pair: `LDAPClient.cpp:213` (`246`–`340`) on the 24.8/25.8 lines,
+`LDAPClient.cpp:214` (`247`–`348`) on the 26.3/26.8 lines. The "Set at"
+column below gives both, as `24.8/25.8 → 26.3/26.8`.
 
 | Option                        | Set at (`LDAPClient.cpp`) | Category                  | Treatment                                                                                       |
 | ------------------------------ | -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------- |
-| `LDAP_OPT_PROTOCOL_VERSION`   | line 246                  | Protocol selection        | Server-visible semantic input; fixes the connection to LDAPv3 (both tracked lines run version 3).|
-| `LDAP_OPT_RESTART`            | line 249                  | Client/socket behavior    | Source fact (auto-retry interrupted syscalls); not a BER request field.                          |
-| `LDAP_OPT_KEEPCONN`           | line 252 (`#ifdef LDAP_OPT_KEEPCONN`) | Client/socket behavior | Source fact; not a BER request field. Guarded by an `#ifdef`, present on both tracked OpenLDAP pins. |
-| `LDAP_OPT_TIMEOUT`            | line 260 (`#ifdef LDAP_OPT_TIMEOUT`) | Operation/network timeout | The overall per-operation timeout (40 s default) — distinct from `SearchRequest.timeLimit`. Guarded by its own `#ifdef`, exactly like `LDAP_OPT_KEEPCONN`; present on both tracked OpenLDAP pins. |
-| `LDAP_OPT_NETWORK_TIMEOUT`    | line 269 (`#ifdef LDAP_OPT_NETWORK_TIMEOUT`) | Operation/network timeout | Connect/network-level timeout (30 s default) — distinct from both the above and `timeLimit`. Likewise its own `#ifdef`-guarded block, present on both tracked OpenLDAP pins. |
-| `LDAP_OPT_TIMELIMIT`          | line 275                  | Search defaults           | Handle-wide default Search time limit (20 s); superseded per-call (§6). Not `#ifdef`-guarded — set unconditionally. |
-| `LDAP_OPT_SIZELIMIT`          | line 280                  | Search defaults           | Handle-wide default Search size limit (256); superseded per-call (§6). Not `#ifdef`-guarded — set unconditionally. |
-| `LDAP_OPT_X_TLS_PROTOCOL_MIN` (line 294), `LDAP_OPT_X_TLS_REQUIRE_CERT` (line 308), `LDAP_OPT_X_TLS_NEWCTX` (line 340) | lines 283–296, 298–309, 337–341 | TLS configuration | Each guarded **only** by its own compile-time `#ifdef` (does the macro exist on this OpenLDAP build) — there is no `params.enable_tls` check and no field-present check on any of these three. They run unconditionally whenever compiled with TLS support, `<enable_tls>no</enable_tls>` notwithstanding. |
-| `LDAP_OPT_X_TLS_CERTFILE`, `LDAP_OPT_X_TLS_KEYFILE`, `LDAP_OPT_X_TLS_CACERTFILE`, `LDAP_OPT_X_TLS_CACERTDIR`, `LDAP_OPT_X_TLS_CIPHER_SUITE` | lines 312–335 | TLS configuration | Each guarded by its own `#ifdef` **and** a field-emptiness check (`if (!params.tls_*.empty())`) — not by `params.enable_tls`. In this fixture's config all five fields are empty, so these five specifically do not fire; the three above still do. |
+| `LDAP_OPT_PROTOCOL_VERSION`   | line 246 → 247            | Protocol selection        | Server-visible semantic input; fixes the connection to LDAPv3 (both tracked lines run version 3).|
+| `LDAP_OPT_REFERRALS`          | — → line 250 (`#ifdef LDAP_OPT_REFERRALS`) | Client-side referral chasing | **26.3/26.8 only.** Set from the `<follow_referrals>` server-config key, which `ExternalAuthenticators.cpp` reads only when `config.has(...)` reports it present; absent from this fixture's config, so the option is set to `LDAP_OPT_OFF`. No wire consequence for this profile either way — `ch-oauth-ldap` never emits a `SearchResultReference` for a client to chase. Recorded because the audit is of what the source SETS. |
+| `LDAP_OPT_RESTART`            | line 249 → 257            | Client/socket behavior    | Source fact (auto-retry interrupted syscalls); not a BER request field.                          |
+| `LDAP_OPT_KEEPCONN`           | line 252 → 260 (`#ifdef LDAP_OPT_KEEPCONN`) | Client/socket behavior | Source fact; not a BER request field. Guarded by an `#ifdef`, present on both tracked OpenLDAP pins. |
+| `LDAP_OPT_TIMEOUT`            | line 260 → 268 (`#ifdef LDAP_OPT_TIMEOUT`) | Operation/network timeout | The overall per-operation timeout (40 s default) — distinct from `SearchRequest.timeLimit`. Guarded by its own `#ifdef`, exactly like `LDAP_OPT_KEEPCONN`; present on both tracked OpenLDAP pins. |
+| `LDAP_OPT_NETWORK_TIMEOUT`    | line 269 → 277 (`#ifdef LDAP_OPT_NETWORK_TIMEOUT`) | Operation/network timeout | Connect/network-level timeout (30 s default) — distinct from both the above and `timeLimit`. Likewise its own `#ifdef`-guarded block, present on both tracked OpenLDAP pins. |
+| `LDAP_OPT_TIMELIMIT`          | line 275 → 283            | Search defaults           | Handle-wide default Search time limit (20 s). This configuration path requests no per-call deadline, so this value is what reaches the wire: every captured `SearchRequest.timeLimit` in the corpus is 20 (BER `02 01 14`), on all four lines. Not `#ifdef`-guarded — set unconditionally. |
+| `LDAP_OPT_SIZELIMIT`          | line 280 → 288            | Search defaults           | Handle-wide default Search size limit, set from this fixture's explicit `<search_limit>256</search_limit>`; reaches the wire as `SearchRequest.sizeLimit` = 256 on all four lines. Not `#ifdef`-guarded — set unconditionally. |
+| `LDAP_OPT_X_TLS_PROTOCOL_MIN` (line 294 → 302), `LDAP_OPT_X_TLS_REQUIRE_CERT` (line 308 → 316), `LDAP_OPT_X_TLS_NEWCTX` (line 340 → 348) | lines 283–296, 298–309, 337–341 → 291–304, 306–317, 345–349 | TLS configuration | Each guarded **only** by its own compile-time `#ifdef` (does the macro exist on this OpenLDAP build) — there is no `params.enable_tls` check and no field-present check on any of these three. They run unconditionally whenever compiled with TLS support, `<enable_tls>no</enable_tls>` notwithstanding. |
+| `LDAP_OPT_X_TLS_CERTFILE`, `LDAP_OPT_X_TLS_KEYFILE`, `LDAP_OPT_X_TLS_CACERTFILE`, `LDAP_OPT_X_TLS_CACERTDIR`, `LDAP_OPT_X_TLS_CIPHER_SUITE` | lines 312–335 → 320–343 | TLS configuration | Each guarded by its own `#ifdef` **and** a field-emptiness check (`if (!params.tls_*.empty())`) — not by `params.enable_tls`. In this fixture's config all five fields are empty, so these five specifically do not fire; the three above still do. |
 
 Recorded for completeness of the source read. **None of these eight options
 gate on `params.enable_tls`** — the fixture's `<enable_tls>no</enable_tls>`
 only controls the later, separately guarded `ldap_start_tls_s` call (line
-344: `if (params.enable_tls == ...::YES_STARTTLS) ldap_start_tls_s(...)`),
+344 → 352: `if (params.enable_tls == ...::YES_STARTTLS)
+ldap_start_tls_s(...)`),
 which is what actually starts TLS on the wire. So while three of these
 eight `ldap_set_option` calls (`PROTOCOL_MIN`, `REQUIRE_CERT`, `NEWCTX`) do
 execute for the captured sessions, none of them causes any TLS wire traffic
@@ -200,9 +273,11 @@ by itself — they only configure OpenLDAP's TLS context object for a
 config never makes, so still no `LDAP_OPT_X_TLS_*` value or TLS byte
 reaches the wire this document characterizes.
 
-The non-TLS options above — the seven this document treats as the complete
-non-TLS inventory — are exactly:
-`LDAP_OPT_PROTOCOL_VERSION`, `LDAP_OPT_RESTART`, `LDAP_OPT_KEEPCONN`,
+The non-TLS options above — the complete non-TLS inventory across every
+tracked line, seven of them on 24.8/25.8 and eight on 26.3/26.8 —
+are exactly:
+`LDAP_OPT_PROTOCOL_VERSION`, `LDAP_OPT_REFERRALS` (26.3/26.8 only),
+`LDAP_OPT_RESTART`, `LDAP_OPT_KEEPCONN`,
 `LDAP_OPT_TIMEOUT`, `LDAP_OPT_NETWORK_TIMEOUT`, `LDAP_OPT_TIMELIMIT`, and
 `LDAP_OPT_SIZELIMIT`. Nothing else appears in `openConnection`'s option
 inventory before the Bind; this is the sentinel list a later mechanical
@@ -223,11 +298,11 @@ fallback/default, or (6) only observable on the wire itself.
 | Protocol version                | 3                      | (2) ClickHouse default (`LDAPClient.h:96`, `ProtocolVersion::V3`) applied via (3) `LDAP_OPT_PROTOCOL_VERSION`   |
 | Operation timeout               | 40 s                   | (2) ClickHouse compiled-in default (`LDAPClient.h:120`) applied via (3) `LDAP_OPT_TIMEOUT` — handle-wide only, no explicit per-call libldap operation-timeout argument exists for this call shape. |
 | Network timeout                 | 30 s                   | (2) ClickHouse compiled-in default (`LDAPClient.h:121`) applied via (3) `LDAP_OPT_NETWORK_TIMEOUT` — handle-wide only, same reasoning as above. |
-| Search time limit                | 20 s                   | (2) ClickHouse compiled-in default (`LDAPClient.h:122`), applied **both** via (3) `LDAP_OPT_TIMELIMIT` at connection-open time **and** (4) as the explicit `&timeout` argument `LDAPClient::search` builds and passes to `ldap_search_ext_s` (`LDAPClient.cpp:434`,`445`) — the handle-wide default is redundant with, not overridden by, the per-call value here, since both derive from the same `params.search_timeout`. |
-| Search size limit ("Search limit")| 256                    | (1) repository XML (`ldap.xml`'s `<search_limit>`, which overwrites (2) ClickHouse's own compiled-in default of 256 — `LDAPClient.h:123` — with the same numeric value, making this line behavior-neutral versus leaving it unset), applied **both** via (3) `LDAP_OPT_SIZELIMIT` and (4) the explicit `params.search_limit` argument to `ldap_search_ext_s` (`LDAPClient.cpp:445`), for the same belt-and-suspenders reason as the Search time limit. |
+| Search time limit                | 20 s                   | (2) ClickHouse compiled-in default (`LDAPClient.h:122`), applied **both** via (3) `LDAP_OPT_TIMELIMIT` at connection-open time **and** (4) as the explicit `&timeout` argument `LDAPClient::search` builds and passes to `ldap_search_ext_s` (`LDAPClient.cpp:434`,`445` → `:442`,`:453`) — the handle-wide default is redundant with, not overridden by, the per-call value here, since both derive from the same `params.search_timeout`. |
+| Search size limit ("Search limit")| 256                    | (1) repository XML (`ldap.xml`'s `<search_limit>`, which overwrites (2) ClickHouse's own compiled-in default of 256 — `LDAPClient.h:123` — with the same numeric value, making this line behavior-neutral versus leaving it unset), applied **both** via (3) `LDAP_OPT_SIZELIMIT` and (4) the explicit `params.search_limit` argument to `ldap_search_ext_s` (`LDAPClient.cpp:445` → `:453`), for the same belt-and-suspenders reason as the Search time limit. |
 | Search base DN                  | `ou=groups,dc=altinity,dc=internal` | (1) repository XML (`ldap.xml`'s `role_mapping/base_dn`)                                    |
-| Search scope                    | subtree                | (1) repository XML (`ldap.xml`'s `role_mapping/scope`), mapped to `LDAP_SCOPE_SUBTREE` (`LDAPClient.cpp:405`ff.) |
-| `derefAliases`                   | `neverDerefAliases` (0) | (5) libldap fallback/default — `LDAPClient::search` calls `ldap_search_ext_s` (`LDAPClient.cpp:445`), whose signature has no `deref` parameter at all; `ldap_search_ext_s` hardcodes `deref = -1` internally when it delegates to `ldap_pvt_search_s` (`search.c:151`, both pins), and `ldap_build_search_req`'s non-UDP branch resolves any negative `deref` to the handle's own `ld_deref` (`search.c:326`, both pins: `(deref < 0) ? ld->ld_deref : deref`). `ld_deref` is a per-handle copy of the process-wide global default options made at handle-creation time (`open.c:150`, inside the `ldap_create` already cited in §7), and that global default is set once by `ldap_int_initialize_global_options` (`init.c:563`, both pins: `gopts->ldo_deref = LDAP_DEREF_NEVER;`, i.e. `0x00` — `ldap.h:795`). ClickHouse never calls `ldap_set_option(..., LDAP_OPT_DEREF, ...)` anywhere in `LDAPClient.cpp`, so nothing overrides this chain. Confirmed on the wire: byte `00` in the `derefAliases` ENUMERATED immediately following the `scope` ENUMERATED in every committed `002-search-request.ber` fixture (24.8 and 25.8, `success` and `timeout-abandon`). |
+| Search scope                    | subtree                | (1) repository XML (`ldap.xml`'s `role_mapping/scope`), mapped to `LDAP_SCOPE_SUBTREE` (`LDAPClient.cpp:405`ff. → `:413`ff.) |
+| `derefAliases`                   | `neverDerefAliases` (0) | (5) libldap fallback/default — `LDAPClient::search` calls `ldap_search_ext_s` (`LDAPClient.cpp:445` → `:453`), whose signature has no `deref` parameter at all; `ldap_search_ext_s` hardcodes `deref = -1` internally when it delegates to `ldap_pvt_search_s` (`search.c:151`, both pins), and `ldap_build_search_req`'s non-UDP branch resolves any negative `deref` to the handle's own `ld_deref` (`search.c:326`, both pins: `(deref < 0) ? ld->ld_deref : deref`). `ld_deref` is a per-handle copy of the process-wide global default options made at handle-creation time (`open.c:150`, inside the `ldap_create` already cited in §7), and that global default is set once by `ldap_int_initialize_global_options` (`init.c:563`, both pins: `gopts->ldo_deref = LDAP_DEREF_NEVER;`, i.e. `0x00` — `ldap.h:795`). ClickHouse never calls `ldap_set_option(..., LDAP_OPT_DEREF, ...)` anywhere in `LDAPClient.cpp`, so nothing overrides this chain. Confirmed on the wire: byte `00` in the `derefAliases` ENUMERATED immediately following the `scope` ENUMERATED in every committed `002-search-request.ber` fixture (all four tracked lines, `success` and `timeout-abandon`). |
 | Search filter                   | `(&(objectClass=groupOfNames)(member={bind_dn}))` | (1) repository XML (`ldap.xml`'s `role_mapping/search_filter`), placeholders substituted per §6.3 below |
 | Requested attribute             | `cn`                   | (1) repository XML (`ldap.xml`'s `role_mapping/attribute`)                                                  |
 | MessageID sequence              | 1, 2, 3, …             | (6) observed wire / (5) libldap fallback — see §6.4; no ClickHouse or repository input chooses these values at all. |
@@ -345,7 +420,7 @@ Every tracked connection issues exactly one `BindRequest` before any
 `LDAPClient.h:96`, and every tracked deployment leaves that default in
 place) and `AuthenticationChoice::simple` — never SASL, never anonymous —
 via `ldap_sasl_bind_s(handle, final_bind_dn.c_str(), LDAP_SASL_SIMPLE,
-&cred, ...)` (`LDAPClient.cpp:360`). The credential (`cred.bv_val`) is the
+&cred, ...)` (`LDAPClient.cpp:360` → `:368`). The credential (`cred.bv_val`) is the
 caller's password field verbatim — in this fixture's deployment, the
 caller-side JWT — with no client-side transformation.
 
@@ -363,8 +438,9 @@ substituted, `sizeLimit` 256, `timeLimit` 20, `typesOnly` false (ClickHouse
 never sets it), and the single requested attribute `cn`. Every request PDU this fixture captures — Bind, Search, Abandon, Unbind
 alike — carries no LDAP Controls: `ldap_sasl_bind_s` and `ldap_search_ext_s`
 are both called from `LDAPClient.cpp` with `nullptr` for both the server-
-and client-controls arguments (`LDAPClient.cpp:360`,`445`); `Unbind` goes
-through `ldap_unbind_ext_s(handle, nullptr, nullptr)` (`LDAPClient.cpp:398`);
+and client-controls arguments (`LDAPClient.cpp:360`,`445` → `:368`,`:453`);
+`Unbind` goes through `ldap_unbind_ext_s(handle, nullptr, nullptr)`
+(`LDAPClient.cpp:398` → `:406`);
 and the client-side-timeout `Abandon` (§8.6) is libldap's own internal
 `ldap_abandon(ld, msgid)` call inside `ldap_result` (§7), which itself
 always passes `NULL, NULL` for controls (`abandon.c:102`, both pins). So
@@ -375,20 +451,20 @@ always passes `NULL, NULL` for controls (`abandon.c:102`, both pins). So
 
 `LDAPClient.cpp`'s anonymous-namespace helpers (identical in both tracked
 commits) do the substitution in two distinct escaping modes, and
-`LDAPClient::search` (`LDAPClient.cpp:420`ff.) is careful to apply the
+`LDAPClient::search` (`LDAPClient.cpp:420`ff. → `:428`ff.) is careful to apply the
 filter-safe one specifically to filter placeholders:
 
-* **`escapeForDN`** (`LDAPClient.cpp:89`): backslash-escapes the RFC 4514
+* **`escapeForDN`** (`LDAPClient.cpp:89` → `:90`): backslash-escapes the RFC 4514
   DN special characters (`, \ # + < > ; "` and `=`) one at a time. Used
   once, on the raw HTTP username, to produce `final_user_name`
-  (`LDAPClient.cpp:347`), which then feeds the Bind DN template's
-  `{user_name}` placeholder (`LDAPClient.cpp:348`) via a plain
-  string-replace helper (`replacePlaceholders`, `LDAPClient.cpp:149`).
-* **`escapeForFilter`** (`LDAPClient.cpp:116`): RFC 4515 filter-escapes
+  (`LDAPClient.cpp:347` → `:355`), which then feeds the Bind DN template's
+  `{user_name}` placeholder (`LDAPClient.cpp:348` → `:356`) via a plain
+  string-replace helper (`replacePlaceholders`, `LDAPClient.cpp:149` → `:150`).
+* **`escapeForFilter`** (`LDAPClient.cpp:116` → `:117`): RFC 4515 filter-escapes
   `*`, `(`, `)`, `\`, and NUL as `\2A`, `\28`, `\29`, `\5C`, `\00`
   respectively. Used when building the Search filter's own placeholders
   (`{user_name}`, `{bind_dn}`, `{user_dn}`, `{base_dn}` —
-  `LDAPClient.cpp:427`–`430`), never for the DN fields themselves — the
+  `LDAPClient.cpp:427`–`430` → `:435`–`:438`), never for the DN fields themselves — the
   same underlying string is escaped differently depending on which BER
   field it is about to land in.
 
@@ -446,7 +522,8 @@ scanner's own committed fixture to trip its own positive-match logic.
 
 Every session ends with exactly one `UnbindRequest` — `SEQUENCE {
 messageID, [APPLICATION 2] NULL }` — issued from `~LDAPClient`'s call to
-`closeConnection` (`LDAPClient.cpp:391`, `ldap_unbind_ext_s` at line 398)
+`closeConnection` (`LDAPClient.cpp:391` → `:399`, `ldap_unbind_ext_s` at
+line 398 → 406)
 with its own freshly allocated MessageID (§7). It carries no credential
 content of any kind.
 
@@ -1092,8 +1169,8 @@ document's plan carries.
 
 **Certification identity**
 
-- **tested_behavior_head:** `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`
-- **manual_verification_head:** `3c12ab752ba6e00516ea28a7bf24e7085290baac` — the
+- **tested_behavior_head:** `16d16142e39c2282594d2134625c86e46bfa7909`
+- **manual_verification_head:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the
   commit the Docker/fuzz/wire-capture suites below (Supported ClickHouse
   matrix, HA, Wire-capture verification, Fuzz smoke) were actually executed
   against, tracing back to the original manual certification at `76e8bcc`.
@@ -1121,41 +1198,45 @@ document's plan carries.
   `scripts/build-ch-oauth-ldap-image.sh`,
   `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
   constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
-- **Certified-surface digest (SHA-256):** `3510ad40fe1ad910c5041f4f05ea1fc03aa4be4e3224aa1c299c6f2ee17e5390`
+- **Certified-surface digest (SHA-256):** `f50f43c0a4d443c5c34c16c8bc701df437c4a8a1d2e1ce853960913bd0b365ab`
   — computed over the same "Certified-surface anti-drift digest" file set
   §11.5 used (`certifiedSurfacePatterns`, unchanged, `third_party/**` kept
   even though the directory is now empty), reproduced 3× identically over
-  89 tracked files. This is not merely computed at `tested_behavior_head`
+  109 tracked files. This is not merely computed at `tested_behavior_head`
   by assertion: `TestPhase4Evidence_DigestBoundToTestedBehaviorHead` reads
   every certified-surface file straight out of the git object database at
   the exact commit `tested_behavior_head` names (never the working tree)
   and requires the two hash equal, so the field above and the head above
   it are mechanically bound to each other, not merely both individually
   self-consistent.
-  `tested_behavior_head` was originally `3c12ab752ba6e00516ea28a7bf24e7085290baac`
-  (recorded above as `manual_verification_head` — the head the
-  Docker/fuzz/wire-capture suites below were actually run against, tracing
-  back to the original manual certification at `76e8bcc`); it is now
-  `0ccbd43275c6b7cb1364e784c7d0d9fd0686c6c9`, one commit later,
-  because that commit made a comment-only edit to two certified-surface
-  files (`internal/ldap/profile/frame.go` and
-  `internal/ldap/profile/bind.go`, historicalizing two stale present-tense
-  references to the since-deleted vendored goldap parser — `git diff
-  3c12ab7 0ccbd43 -- internal/ldap/profile/frame.go
-  internal/ldap/profile/bind.go` shows only comment text changed, both
-  files' line counts unchanged, and the tracked-file count unchanged at
-  89). Per the plan's stop condition 9, a certified-surface change after
-  the attested head voids the attestation and is never resolved by
-  prose alone: it is resolved here by advancing `tested_behavior_head`
-  itself to the commit that actually contains the change, so that the
-  digest genuinely is the digest at the recorded head — not by leaving
-  the head frozen at the older commit and only editing the digest field
-  to match a newer, uncorrelated tree (the defect
-  `TestPhase4Evidence_DigestBoundToTestedBehaviorHead` now exists to
-  catch). No production behavior changed between the two heads; the
-  original Docker/fuzz/wire-capture attestation below remains the
-  evidence for both, since neither commit altered anything those suites
-  exercise.
+  Both head fields, the digest, and the tracked-file count above were
+  advanced together when ClickHouse 26.3 and 26.8 became tracked lines
+  (see §11.7). That change edited certified-surface files — `BUILDS`,
+  `lib/expectations.sh`, `scenarios/65-ldap-search-limits.sh`,
+  `tests/lib-tests.sh`, `capture-ldap-wire.sh` — and added 20 new fixture
+  files under `internal/ldap/testdata/clickhouse-wire/`, taking the tracked
+  count from 89 to 109. Per the plan's stop condition 9, a certified-surface
+  change after the attested head voids the attestation and is never resolved
+  by prose: it is resolved by re-running the manual suites against the new
+  head and advancing both fields to the commit that actually contains the
+  change, so the digest genuinely is the digest at the recorded head. That
+  re-run happened — every image in the tables below was re-certified against
+  `manual_verification_head`, not carried forward from the head before it.
+
+  `tested_behavior_head` has since advanced one commit past
+  `manual_verification_head`, to `16d16142e39c2282594d2134625c86e46bfa7909`.
+  That commit corrects `26.8`'s recorded `clickhouse_commit` from the
+  annotated tag object `v26.8.1.2041-lts` resolves to, to the commit it
+  peels to (§2.1), touching two certified-surface files: the provenance
+  table in `capture-ldap-wire.sh` and the `clickhouse_commit` metadata field
+  in `26.8`'s `profile.json`. No captured byte, no code, and no suite
+  outcome changes — the tracked-file count stays 109, and the corrected
+  value denotes the same tree the tag always peeled to. This is the
+  behavior-preserving case these two fields exist to distinguish: the head
+  advances so the digest is genuinely the digest at the recorded head, while
+  the coordinator attestation keeps citing the commit the Docker/fuzz suites
+  were actually executed against. `--mode verify` was nonetheless re-run
+  after the correction and passed on all four lines.
 
 **Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
 
@@ -1195,9 +1276,11 @@ persistent same-socket session probe — no new probe created)
 - **Command:** `bash integration/clickhouse/capture-ldap-wire.sh --mode verify --fixtures internal/ldap/testdata/clickhouse-wire`
 - **generation: frozen** — zero fixtures were regenerated or promoted;
   `--mode verify` only.
-- **Result:** `PASS` for both tracked lines (`24.8`, `25.8`); every
-  committed session compared byte-for-byte equal against the untagged
-  production build; zero fixture drift; no new request shape observed.
+- **Result:** `PASS` for both tracked lines this section certifies
+  (`24.8`, `25.8`); every committed session compared byte-for-byte equal
+  against the untagged production build; zero fixture drift; no new request
+  shape observed. The verify run at this head covered all four tracked
+  lines and passed on every one — see §11.7 for the `26.3`/`26.8` half.
 - **Search-before-Abandon:** confirmed for both tracked lines' recorded
   timeout-abandon session (`wirecapture: diagnostic — Search precedes
   Abandon as expected`).
@@ -1277,11 +1360,188 @@ partially.
 **Coordinator attestation:** Boris Tyshkevich (`@BorisTyshkevich`) certifies
 that every Docker/fuzz/wire-capture command and script named in this section
 (Supported ClickHouse matrix, HA, Wire-capture verification, Fuzz smoke) was
-run to completion against `3c12ab752ba6e00516ea28a7bf24e7085290baac`
-(`manual_verification_head` above) — not `tested_behavior_head`, which
-advanced one commit later by the comment-only edit recorded above and
-changed no certified behavior — that `git status --porcelain` was unchanged
-by verification, and that `docker ps -a` showed no suite leftovers after
-verification.
+run to completion against `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
+(`manual_verification_head` above — **not** `tested_behavior_head`, which
+has since advanced to `16d16142e39c2282594d2134625c86e46bfa7909` for the
+behavior-preserving provenance correction described above; manual
+verification remains at the earlier commit and this attestation
+deliberately cites that one), that `git status
+--porcelain` was unchanged by verification, and that `docker ps -a` showed
+no suite leftovers after verification.
+
+The two tables immediately above remain this section's own Phase 4
+cutover record and name the two lines tracked at that time. The 26.3 and
+26.8 lines, and the four-image re-certification performed at this head,
+are recorded separately in §11.7.
 
 <!-- phase4-release-gate-evidence:end -->
+
+### 11.7 Tracked-line expansion: ClickHouse 26.3 and 26.8
+
+This section records the evidence for extending the tracked set from two
+lines to four. Unlike §11.5 and §11.6 it carries **no contract of its own**:
+the machinery that would otherwise guard it already does so from elsewhere —
+`wire_profile_contract_test.go` holds the four-way tracked-line set equal
+(BUILDS ↔ this document's §1/§2.1/§2.2 ↔ fixture directories ↔ every
+`profile.json`), and §11.6's live digest and head fields were advanced to
+the commit this work landed in. What is recorded here is the manual,
+Docker-and-fuzz evidence no test can produce.
+
+**Certification identity**
+
+- **Tested at:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the commit
+  §11.6 records as `manual_verification_head`. §11.6's
+  `tested_behavior_head` has since advanced to
+  `16d16142e39c2282594d2134625c86e46bfa7909`, one commit later, for the
+  behavior-preserving provenance correction recorded as finding 3 below;
+  the manual suites in this section were run against the earlier commit and
+  were not re-run for that correction, apart from `--mode verify`.
+- **Composition:** unchanged. Ordinary, untagged production
+  (`cmd/ch-oauth-ldap` → `internal/ldap/profile`); no build tag, no
+  selector, no second backend. Adding tracked lines changes what the suite
+  is *run against*, never what is built.
+
+**Why 26.8 is an upstream image**
+
+No Altinity Stable 26.8 build exists. At the time this line was added the
+newest Altinity tags were `26.3.16.10001.altinitystable` (2026-07-01) and
+`26.6.2.20001.altinityantalya` (2026-08-26), while upstream 26.8 had
+shipped. `run-all-builds.sh` requires only a tag equal to the server's
+`version()` string; both registries satisfy that, confirmed live for both
+new images before any suite ran. §2.1 records the same deviation.
+
+**Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, all four builds)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:26.3.16.10001.altinitystable` | `PASS` |
+| `clickhouse/clickhouse-server:26.8.1.2041` | `PASS` |
+
+All four completed scenarios A–I including G'. The recorded upstream-bug
+expected failures reproduced exactly as recorded: #78791 on 24.8 only, and
+#116840's VIEW `external_roles` drop on every one of the four — that bug is
+still open upstream, so the H' canary stays an expected-fail on 26.8 too.
+
+**HA** (`integration/clickhouse/run-ha.sh`, once per image via `PHASE3_CH_IMAGE`)
+
+| Image | Result |
+| ----- | ------ |
+| `altinity/clickhouse-server:24.8.11.51285.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:25.8.28.10001.altinitystable` | `PASS` |
+| `altinity/clickhouse-server:26.3.16.10001.altinitystable` | `PASS` |
+| `clickhouse/clickhouse-server:26.8.1.2041` | `PASS` |
+
+**Session-probe result:** `PASS` on all four images — the A-bound probe
+confirmed live (heartbeat n=2, freshness bound satisfied), then correctly
+failed within the bound after helper A was killed, on every image. Same
+claim boundary as §11.6: this proves nothing about Kubernetes routing,
+EndpointSlice/CNI convergence, pod-eviction semantics, or a failover SLA.
+
+**Wire capture**
+
+- **Generation:** run once, into a fresh output directory, for the two new
+  lines only. The phase-3 freeze was narrowed, not lifted — see §11.4a.
+- **Committed fixtures were not rewritten.** The generate run re-derived
+  all four lines; `24.8` and `25.8` reproduced every committed `.ber` byte
+  exactly, and only `26.3/` and `26.8/` were promoted. `git status` after
+  promotion showed additions only.
+- **Verify command:** `bash integration/clickhouse/capture-ldap-wire.sh --mode verify --fixtures internal/ldap/testdata/clickhouse-wire`
+- **Verify result:** `PASS` for all four tracked lines, both sessions each;
+  `Search precedes Abandon` confirmed on every `timeout-abandon` session;
+  zero fixture drift.
+- **No new request shape.** Every `26.3` and `26.8` request PDU is
+  byte-identical to the corresponding `25.8` PDU. The bounded compatibility
+  profile therefore covers 26.x with no parser change, and none was made.
+
+**Fuzz smoke** (`-run '^$' -fuzz=<target> -fuzztime=20s`, one target at a time)
+
+| Fuzz target | Duration | Result |
+| ----- | ----- | ----- |
+| `FuzzLDAPFrame` | 20s | `PASS` |
+| `FuzzBindRequest` | 20s | `PASS` |
+| `FuzzSearchRequest` | 20s | `PASS` |
+| `FuzzRestrictedDN` | 20s | `PASS` |
+| `FuzzMemberAssertionDN` | 20s | `PASS` |
+
+One honest note on that table: an earlier `FuzzMemberAssertionDN` run
+failed with `context deadline exceeded` while the machine was still loaded
+from the Docker suites. It was investigated rather than re-run until green.
+No crasher was written, no reproducer exists, the repository stayed clean of
+fuzz artifacts, and the target passed 3/3 at reduced parallelism and again
+on an idle machine — Go's fuzzing coordinator failing to retire workers
+inside its shutdown grace period, not a defect in `decodeMembershipFilter`.
+Recorded because a green table that quietly replaced a red one would be the
+more misleading artifact.
+
+**Source-audit findings**
+
+- **26.3 added one non-TLS `ldap_set_option`.** A new `<follow_referrals>`
+  server-config key introduced
+  `ldap_set_option(handle, LDAP_OPT_REFERRALS, ...)` into
+  `openConnection()` (§5 classifies it). `ExternalAuthenticators.cpp` sets
+  it only when `config.has(...)` finds the key; this fixture does not set
+  it, so the option is `LDAP_OPT_OFF`, and the captured bytes confirm no
+  wire effect.
+- **26.3 → 26.8 is LDAP-behaviorally identical** — value-initialization
+  hygiene only (§2.2).
+
+**Two defects review found in this expansion's own first cut**
+
+3. **`26.8`'s `clickhouse_commit` recorded an annotated tag object, not a
+   commit.** `v26.8.1.2041-lts` is the only annotated tag among the four
+   tracked lines; its ref reports object type `tag` and SHA `be4175ff…`,
+   which was recorded as the commit in all four places provenance lives.
+   The peeled commit is `537693a9…`. Nothing else moved — the GitHub
+   contents API peels refs, so §2.2's blob SHAs and the OpenLDAP pin were
+   already correct and were re-verified directly against the peeled commit.
+   The cause was method drift: three lines were resolved with
+   `git/ref/tags/<tag>` printing `.object.type` (all `commit`), while `26.8`
+   used `git/matching-refs` printing only `.object.sha`, so the `tag` type
+   was never seen. §2.1 and both provenance tables now state the peeling
+   requirement.
+
+   Worth recording precisely because of what could NOT have caught it:
+   `--mode verify` compares the committed `profile.json` against a fresh one
+   derived from `capture-ldap-wire.sh`'s own table, so it agrees whenever
+   those two agree. It validates consistency, not correctness, and passed
+   with the wrong SHA on both sides. No offline contract can check a commit
+   SHA against a remote repository either, so this remains a documented
+   manual step, not a new mechanical guard — an honest gap rather than a
+   check that would only appear to close it.
+
+4. **The §5 TLS-block citations were left at 24.8/25.8 line numbers.** The
+   non-TLS rows were given per-pair numbers when 26.x was added, but the TLS
+   blocks — which the new `LDAP_OPT_REFERRALS` block pushes down by eight
+   lines — were not, and neither were the §4 call-chain, §6 source-of-value
+   and §8 citations. Every `LDAPClient.cpp` citation in this document is now
+   given as `24.8/25.8 → 26.3/26.8`. `LDAPClient.h` is the documented
+   exception (§2.2): its blob differs between pairs, but every cited line is
+   at an unchanged number, verified rather than assumed. Behavior-neutral,
+   but this document's whole purpose is exact source auditing.
+
+**Two defects this expansion surfaced upstream and in the suite**
+
+1. **ClickHouse 26.8 maps `ACCESS_DENIED` to HTTP 403**, where
+   24.8/25.8/26.3 map it to 500. Scenario H's negative control asserted 500
+   outright and so failed on 26.8 even though propagation was correct and
+   the response body was exactly the expected shape (`Code: 497 ... Received
+   from clickhouse-remote:9000 ... (ACCESS_DENIED)`). The status is now a
+   per-line recorded fact (`remote_access_denied_http_status_for`),
+   fail-closed for an unrecorded prefix. Note the cost: on 26.8
+   `ACCESS_DENIED` and `AUTHENTICATION_FAILED` share status 403, so the
+   status no longer discriminates and the two body markers carry that
+   weight — which they always did.
+2. **`search_limit_overflow_wire_tuple` recorded `time_limit=0` on every
+   line; the real value is 20.** The reasoning error was "this path has no
+   `<search_timeout>` XML key, therefore 0"; with no per-call deadline
+   requested, libldap sends the handle-wide `LDAP_OPT_TIMELIMIT` default,
+   which §5 documents as 20s and §8.2 has always recorded as the Search's
+   `timeLimit` outright. Corrected from two further independent directions:
+   decoding `SearchRequest.timeLimit` out of the committed corpus (BER
+   `02 01 14` = 20, identical on all four lines) and the helper's own live
+   T2 telemetry during a real scenario G' run (`time_limit=20`). The field
+   was recorded and logged but never asserted against telemetry, which is
+   exactly how two committed records contradicted each other unnoticed. No
+   behavior changed.

@@ -631,6 +631,63 @@ func TestPhase4Evidence_ManualVerificationHead(t *testing.T) {
 	}
 }
 
+// TestPhase4Evidence_HeadEqualityProseMatchesHeadFields catches the class of
+// defect review found after tested_behavior_head advanced past
+// manual_verification_head for a behavior-preserving correction: the two
+// FIELDS were updated correctly, but two sentences describing them still
+// asserted the heads were the same commit.
+//
+// The existing head contracts cannot see this. They check that each field
+// holds a well-formed, reachable SHA, that the digest corresponds to
+// tested_behavior_head, and that the coordinator attestation's literal SHA
+// equals manual_verification_head — all of which stayed true while the
+// surrounding prose said something false about the relationship between
+// them. This asserts the relationship claim itself: when the two fields
+// differ, no "same commit" phrasing may appear in §11.6 or in the sections
+// after it that describe the same two fields.
+//
+// It is deliberately a phrase ban rather than a prose parser. Prose can
+// always find another way to be wrong, so this is an anti-drift check for
+// the specific sentences that exist today, not a proof of narrative
+// accuracy — the same standing this file's other prose assertions have.
+func TestPhase4Evidence_HeadEqualityProseMatchesHeadFields(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("phase4_evidence_contract: locate module root: %v", err)
+	}
+	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
+	section := phase4EvidenceSection(t, doc)
+
+	tested := phase4EvidenceField(t, section, "tested_behavior_head")
+	manual := phase4EvidenceField(t, section, "manual_verification_head")
+	if tested == manual {
+		// Nothing to police: the heads really are the same commit, so a
+		// sentence saying so would be correct.
+		return
+	}
+
+	// §11.6 is the marked section; everything after its end marker (§11.7
+	// onward) makes the same kind of claim about the same two fields.
+	scopes := map[string]string{"§11.6": section}
+	if idx := strings.Index(doc, phase4EvidenceMarkerEnd); idx >= 0 {
+		scopes["§11.7 and later"] = doc[idx:]
+	}
+
+	banned := []string{
+		"same commit as `tested_behavior_head`",
+		"names as both `tested_behavior_head`",
+		"both `tested_behavior_head` and",
+	}
+	for name, scope := range scopes {
+		flat := phase3CollapseWhitespace(scope)
+		for _, phrase := range banned {
+			if strings.Contains(flat, phrase) {
+				t.Errorf("phase4_evidence_contract: %s: %s asserts %q, but tested_behavior_head (%s) and manual_verification_head (%s) are different commits — the head fields were updated without the prose describing them", wireProfileDocRelPath, name, phrase, tested, manual)
+			}
+		}
+	}
+}
+
 // TestPhase4Evidence_CoordinatorAttestationBoundToManualVerificationHead
 // closes the exact gap pass 3 review found: the Coordinator attestation
 // sentence must name the commit the manual suites were actually run

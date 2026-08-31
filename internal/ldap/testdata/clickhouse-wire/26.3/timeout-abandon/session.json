@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "line": "26.3",
+  "applicability": [
+    "26.3"
+  ],
+  "provenance_class": "captured-redacted",
+  "mode": "timeout-abandon",
+  "connection_count": 1,
+  "sql": "SELECT currentUser()",
+  "token_claim_recipe": "sub=alice@example.com; roles=idp-readers,idp-unprovisioned; fixed-digit iat/exp; no jti",
+  "placeholder_length": 690,
+  "pdus": [
+    {
+      "sequence": 1,
+      "filename": "001-bind-request.ber",
+      "direction": "client-to-server",
+      "operation": "bindRequest",
+      "message_id": 1,
+      "sanitized_sha256": "aead2a41517b0c9e87082fdaf4ce4b50edf08aa5375baa3a44f2a5798a3d58a9",
+      "redaction_status": "redacted",
+      "expected_semantics": "simple Bind, version 3"
+    },
+    {
+      "sequence": 2,
+      "filename": "002-search-request.ber",
+      "direction": "client-to-server",
+      "operation": "searchRequest",
+      "message_id": 2,
+      "sanitized_sha256": "fd08bfb963d4f822a50ba129f9601dba1b22d6f62a8a038d938cbccff6afbb49",
+      "redaction_status": "no-credential-present",
+      "expected_semantics": "role Search, subtree scope"
+    },
+    {
+      "sequence": 3,
+      "filename": "003-abandon-request.ber",
+      "direction": "client-to-server",
+      "operation": "abandonRequest",
+      "message_id": 3,
+      "abandon_target": 2,
+      "sanitized_sha256": "47d61252ffdb9dc913f86ba9c5b77385e44b8584abc549708241605383ec1629",
+      "redaction_status": "no-credential-present",
+      "expected_semantics": "Abandon targeting the Search MessageID"
+    },
+    {
+      "sequence": 4,
+      "filename": "004-unbind-request.ber",
+      "direction": "client-to-server",
+      "operation": "unbindRequest",
+      "message_id": 4,
+      "sanitized_sha256": "58532b62e66c19cc789b006fb0632d3b916dd0070a9c50a2ebbaa240da06056a",
+      "redaction_status": "no-credential-present",
+      "expected_semantics": "Unbind, no credential content"
+    }
+  ]
+}

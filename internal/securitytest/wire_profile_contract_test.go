@@ -62,6 +62,15 @@ import (
 // auditedLineProvenance is one tracked line's independently audited
 // source-provenance record (plan §2.2/§2.3), typed in here rather than
 // read from any file this test also checks against it.
+//
+// ClickHouseCommit is a COMMIT object SHA, never a tag object SHA. Most
+// ClickHouse release tags are lightweight and resolve straight to a commit,
+// but v26.8.1.2041-lts is annotated: its ref reports object type "tag" and
+// must be peeled to the underlying commit before being recorded. A tag SHA
+// silently "works" for fetching file contents — the GitHub contents API
+// peels refs — so the Blobs below are unaffected either way, and nothing
+// here can catch the substitution offline. Check .object.type when
+// resolving a tag.
 type auditedLineProvenance struct {
 	Line                 string
 	Image                string
@@ -111,20 +120,121 @@ var auditedProvenanceMatrix = []auditedLineProvenance{
 		OpenLDAPPin:        "22fe35c6b4098e3ad166469f9574c79832c42952",
 		OpenLDAPVersion:    "2.6.10",
 	},
+	{
+		Line:                 "26.3",
+		Image:                "altinity/clickhouse-server:26.3.16.10001.altinitystable",
+		ClickHouseRepository: "Altinity/ClickHouse",
+		ClickHouseTag:        "v26.3.16.10001.altinitystable",
+		ClickHouseCommit:     "8de06fed91fa7a6545a72f37c98e81d4cc024bb1",
+		Blobs: map[string]string{
+			wirefixture.BlobKeyLDAPClientCPP:             "e76d084f35745778667115865883c910fbdf82a5",
+			wirefixture.BlobKeyLDAPClientH:               "558017704e75731fd1b2bb0eb88367c00d40aa69",
+			wirefixture.BlobKeyLDAPAccessStorageCPP:      "939b99396c300abd67abbdfa55d97411ec258261",
+			wirefixture.BlobKeyExternalAuthenticatorsCPP: "6fa7c28bc980ce5f639a88b0094e63ca65dd383e",
+		},
+		OpenLDAPRepository: "openldap/openldap",
+		OpenLDAPPin:        "22fe35c6b4098e3ad166469f9574c79832c42952",
+		OpenLDAPVersion:    "2.6.10",
+	},
+	{
+		// The one tracked line built from UPSTREAM ClickHouse rather than
+		// the Altinity fork: no Altinity Stable 26.8 build exists. See the
+		// wire doc §2.1, which records the same deviation and why.
+		Line:                 "26.8",
+		Image:                "clickhouse/clickhouse-server:26.8.1.2041",
+		ClickHouseRepository: "ClickHouse/ClickHouse",
+		ClickHouseTag:        "v26.8.1.2041-lts",
+		ClickHouseCommit:     "537693a9b20b947a3cf0c4ac90c7c966eee963c9",
+		Blobs: map[string]string{
+			wirefixture.BlobKeyLDAPClientCPP:             "7465096b834f789bd8856cc74cc5dbefe6397ded",
+			wirefixture.BlobKeyLDAPClientH:               "558017704e75731fd1b2bb0eb88367c00d40aa69",
+			wirefixture.BlobKeyLDAPAccessStorageCPP:      "e464d5818b552b4e7623cb34f3e43f6e5302e176",
+			wirefixture.BlobKeyExternalAuthenticatorsCPP: "40fc3b719d195fc600961e10059a827c0cd7545e",
+		},
+		OpenLDAPRepository: "openldap/openldap",
+		OpenLDAPPin:        "22fe35c6b4098e3ad166469f9574c79832c42952",
+		OpenLDAPVersion:    "2.6.10",
+	},
 }
 
-// auditedLDAPOptions is the plan §3.3/§5 sentinel set of non-TLS
+// auditedLDAPOptionsByLine is the plan §3.3/§5 sentinel set of non-TLS
 // ldap_set_option names the tracked openConnection() source is audited to
-// set, required to appear, exactly, in the wire doc's own sentinel
-// section (see TestWireProfileContract_LDAPOptionSentinelMatchesAuditedSet).
-var auditedLDAPOptions = []string{
-	"LDAP_OPT_PROTOCOL_VERSION",
-	"LDAP_OPT_RESTART",
-	"LDAP_OPT_KEEPCONN",
-	"LDAP_OPT_TIMEOUT",
-	"LDAP_OPT_NETWORK_TIMEOUT",
-	"LDAP_OPT_TIMELIMIT",
-	"LDAP_OPT_SIZELIMIT",
+// set, recorded PER TRACKED LINE because the set is no longer uniform:
+// ClickHouse 26.3 introduced a <follow_referrals> server-config key and
+// added a corresponding ldap_set_option(handle, LDAP_OPT_REFERRALS, ...)
+// call to openConnection(), between LDAP_OPT_PROTOCOL_VERSION and
+// LDAP_OPT_RESTART. The 24.8/25.8 lines predate it.
+//
+// LDAP_OPT_REFERRALS carries no wire consequence for this profile: the
+// option is only ever set to LDAP_OPT_OFF unless <follow_referrals> is
+// present in the server config (ExternalAuthenticators.cpp gates it on
+// config.has(...)), this repo's fixture never sets that key, and
+// ch-oauth-ldap never emits a SearchResultReference for a client to chase
+// either way. It is recorded here because the audit is of what the source
+// SETS, not of what changes the bytes — an option that silently appeared
+// and was never written down is exactly the drift this sentinel exists to
+// catch.
+var auditedLDAPOptionsByLine = map[string][]string{
+	"24.8": {
+		"LDAP_OPT_PROTOCOL_VERSION",
+		"LDAP_OPT_RESTART",
+		"LDAP_OPT_KEEPCONN",
+		"LDAP_OPT_TIMEOUT",
+		"LDAP_OPT_NETWORK_TIMEOUT",
+		"LDAP_OPT_TIMELIMIT",
+		"LDAP_OPT_SIZELIMIT",
+	},
+	"25.8": {
+		"LDAP_OPT_PROTOCOL_VERSION",
+		"LDAP_OPT_RESTART",
+		"LDAP_OPT_KEEPCONN",
+		"LDAP_OPT_TIMEOUT",
+		"LDAP_OPT_NETWORK_TIMEOUT",
+		"LDAP_OPT_TIMELIMIT",
+		"LDAP_OPT_SIZELIMIT",
+	},
+	"26.3": {
+		"LDAP_OPT_PROTOCOL_VERSION",
+		"LDAP_OPT_REFERRALS",
+		"LDAP_OPT_RESTART",
+		"LDAP_OPT_KEEPCONN",
+		"LDAP_OPT_TIMEOUT",
+		"LDAP_OPT_NETWORK_TIMEOUT",
+		"LDAP_OPT_TIMELIMIT",
+		"LDAP_OPT_SIZELIMIT",
+	},
+	"26.8": {
+		"LDAP_OPT_PROTOCOL_VERSION",
+		"LDAP_OPT_REFERRALS",
+		"LDAP_OPT_RESTART",
+		"LDAP_OPT_KEEPCONN",
+		"LDAP_OPT_TIMEOUT",
+		"LDAP_OPT_NETWORK_TIMEOUT",
+		"LDAP_OPT_TIMELIMIT",
+		"LDAP_OPT_SIZELIMIT",
+	},
+}
+
+// auditedLDAPOptions is the UNION of auditedLDAPOptionsByLine across every
+// tracked line — the set the wire doc's own §5 sentinel section must name
+// exactly (see TestWireProfileContract_LDAPOptionSentinelMatchesAuditedSet).
+// Derived rather than typed a second time, so a per-line addition cannot be
+// recorded above while the doc silently keeps the old inventory.
+var auditedLDAPOptions = wireProfileAuditedLDAPOptionUnion()
+
+func wireProfileAuditedLDAPOptionUnion() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, opts := range auditedLDAPOptionsByLine {
+		for _, o := range opts {
+			if !seen[o] {
+				seen[o] = true
+				out = append(out, o)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func wireProfileAuditedLines() []string {
@@ -1228,6 +1338,38 @@ func TestWireProfileContract_EngineeringDocBoundary(t *testing.T) {
 // ---------------------------------------------------------------------
 // LDAP option sentinel
 // ---------------------------------------------------------------------
+
+// TestWireProfileContract_LDAPOptionsByLineCoversTrackedLines binds the
+// per-line option inventory to the tracked-line set itself. Without it,
+// auditedLDAPOptionsByLine could keep a stale key for a removed line, or
+// silently omit a newly added one, while the union-based sentinel check
+// below still passed — the union is insensitive to which line contributed
+// what, which is precisely the fidelity this map was introduced to add.
+func TestWireProfileContract_LDAPOptionsByLineCoversTrackedLines(t *testing.T) {
+	got := make([]string, 0, len(auditedLDAPOptionsByLine))
+	for line := range auditedLDAPOptionsByLine {
+		got = append(got, line)
+	}
+	sort.Strings(got)
+
+	want := wireProfileAuditedLines()
+	if !stringSlicesEqual(got, want) {
+		t.Fatalf("wire_profile_contract: auditedLDAPOptionsByLine covers lines %v, want exactly the tracked set %v", got, want)
+	}
+
+	for line, opts := range auditedLDAPOptionsByLine {
+		if len(opts) == 0 {
+			t.Errorf("wire_profile_contract: auditedLDAPOptionsByLine[%s] is empty — every tracked line's openConnection() sets at least LDAP_OPT_PROTOCOL_VERSION", line)
+		}
+		seen := map[string]bool{}
+		for _, o := range opts {
+			if seen[o] {
+				t.Errorf("wire_profile_contract: auditedLDAPOptionsByLine[%s] lists %s more than once", line, o)
+			}
+			seen[o] = true
+		}
+	}
+}
 
 func TestWireProfileContract_LDAPOptionSentinelMatchesAuditedSet(t *testing.T) {
 	root, err := moduleRoot()
