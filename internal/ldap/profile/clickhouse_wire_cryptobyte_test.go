@@ -1,14 +1,16 @@
-package ldap
+package profile
 
 // This file implements issue #33 phase 1's cryptobyte characterization and
 // primitive-layer decision (plan §32, §33, §31's closure-must-stay-unchanged
-// invariant): it loads every committed ClickHouse/libldap wire-evidence
-// fixture (internal/ldap/testdata/clickhouse-wire — captured-redacted and
-// constructed alike) through internal/wirefixture, characterizes each one
-// with golang.org/x/crypto/cryptobyte plus a handful of fixed first-party
-// checks cryptobyte's tag-fixed high-level readers cannot express on their
-// own, runs a bounded set of invalid-form mutations to prove they are
-// rejected, and computes the plan §32 primitive-layer verdict:
+// invariant), moved into internal/ldap/profile as a permanent test by issue
+// #33 phase 4's Oracle A sub-task: it loads every committed ClickHouse/
+// libldap wire-evidence fixture (internal/ldap/testdata/clickhouse-wire —
+// captured-redacted and constructed alike) through internal/wirefixture,
+// characterizes each one with golang.org/x/crypto/cryptobyte plus a handful
+// of fixed first-party checks cryptobyte's tag-fixed high-level readers
+// cannot express on their own, runs a bounded set of invalid-form mutations
+// to prove they are rejected, and computes the plan §32 primitive-layer
+// verdict:
 //
 //   - "cryptobyte" iff every valid fixture is safely consumable by
 //     cryptobyte plus those fixed checks;
@@ -19,28 +21,29 @@ package ldap
 // justifies "local-ber-cursor" — only a genuine valid-fixture parse failure
 // does (plan §32 "Decision"). "Genuine" is not taken on cryptobyte's own
 // say-so: a cryptobyte characterization failure is corroborated by
-// independentlyWellFormedBER, a second, structurally distinct BER decoder
-// (the vendored, patched github.com/vjeantet/goldap message package — the
-// same decoder internal/ldap's production Bind/Search/Unbind/Abandon
-// handlers already run) before it may flip the verdict. A fixture that
-// BOTH decoders reject is fixture corruption, not evidence for
-// local-ber-cursor, and fails the test outright (see the per-case loop in
-// TestClickHouseWireCryptobyteDecision) — this closes the sabotage path
-// where corrupting a single non-template fixture and updating only its own
-// session.json hash would otherwise flip the computed verdict unnoticed.
+// oracleAWellFormed, a second, structurally independent bounded BER cursor
+// (Oracle A, hand-written for this file — it imports no goldap/BER-tree
+// dependency and shares no decoding helpers with either cryptobyte or this
+// package's own production frame/protocol/bind/search decoders) before it
+// may flip the verdict. A fixture that BOTH decoders reject is fixture
+// corruption, not evidence for local-ber-cursor, and fails the test outright
+// (see the per-case loop in TestClickHouseWireCryptobyteDecision) — this
+// closes the sabotage path where corrupting a single non-template fixture
+// and updating only its own session.json hash would otherwise flip the
+// computed verdict unnoticed.
 //
 // This test is the SOLE owner of the cryptobyte verdict (plan §33):
-// internal/securitytest's wire-profile contract (a separate sub-task) only
-// checks the decision-doc marker's syntax/uniqueness, never recomputes this
-// algorithm.
+// internal/securitytest's wire-profile contract only checks the
+// decision-doc marker's syntax/uniqueness, never recomputes this algorithm.
 //
-// golang.org/x/crypto/cryptobyte is deliberately imported only from this
-// _test.go file. internal/securitytest/dependency_contract_test.go's
-// TestDependencyContract_NoNonStandardCryptobyte proves that import never
-// reaches ./cmd/ch-oauth-ldap's production closure — `go list -deps`
-// against a production package target never follows a dependency's own
-// _test.go imports, so this file's cryptobyte usage cannot leak there
-// regardless of what internal/ldap's non-test files import.
+// golang.org/x/crypto/cryptobyte is this package's own production framing
+// primitive (frame.go/protocol.go/bind.go/search.go/encode.go), so — unlike
+// when this file lived under internal/ldap, a package that otherwise never
+// imported cryptobyte — its use here is not test-only-exceptional; this file
+// simply exercises the same primitive its production neighbors already
+// depend on, against the committed wire-evidence corpus, with an
+// independent oracle standing in for "is this genuinely valid BER" rather
+// than trusting cryptobyte's own verdict about itself.
 //
 // # Scope of the BER forms characterized
 //
@@ -76,21 +79,17 @@ import (
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/cryptobyte/asn1"
 
-	goldapmessage "github.com/vjeantet/goldap/message"
-
 	"github.com/altinity/altinity-oauth-helper/internal/wirefixture"
 )
 
-// BER application/context tags this characterization supports. Named
-// individually, matching wirefixture/constructed.go's own convention,
-// because this is a characterization of one fixed, narrow protocol profile
-// rather than a general BER/LDAP tag table.
+// tagFilterAnd/tagFilterEqualityMatch/tagSimpleAuth are this file's own
+// cryptobyte-side context tags for the Filter CHOICE/AuthenticationChoice
+// shapes the committed fixtures use. The [APPLICATION n] protocolOp tags
+// this file's cryptobyte characterizer switches on (BindRequest,
+// UnbindRequest, SearchRequest, AbandonRequest) are already declared once,
+// package-wide, in protocol.go — this file deliberately does not
+// re-declare them.
 const (
-	tagBindRequest    = asn1.Tag(0x60) // [APPLICATION 0], constructed — BindRequest
-	tagUnbindRequest  = asn1.Tag(0x42) // [APPLICATION 2], primitive — UnbindRequest (NULL)
-	tagSearchRequest  = asn1.Tag(0x63) // [APPLICATION 3], constructed — SearchRequest
-	tagAbandonRequest = asn1.Tag(0x50) // [APPLICATION 16], primitive — AbandonRequest (implicit MessageID)
-
 	tagFilterAnd           = asn1.Tag(0xa0) // [0] SET OF Filter, constructed
 	tagFilterEqualityMatch = asn1.Tag(0xa3) // [3] AttributeValueAssertion, constructed
 )
@@ -180,39 +179,426 @@ func characterizeLDAPMessage(raw []byte) (ldapMessageSummary, error) {
 	return summary, nil
 }
 
-// independentlyWellFormedBER reports whether raw is a complete, well-formed
-// BER LDAPMessage according to a *second, structurally independent* decoder
-// — the vendored, patched github.com/vjeantet/goldap message package
-// (third_party/goldap/message), which internal/ldap's production
-// Bind/Search/Unbind/Abandon handlers already consume via
-// third_party/ldapserver — rather than trusting characterizeLDAPMessage's
-// own verdict about validity. It is the independent-validity gate plan §32
-// requires before a cryptobyte characterization failure may be treated as
-// "a valid form cryptobyte cannot safely consume" (the local-ber-cursor
-// justification) instead of "this fixture is malformed" (which must stay
-// fatal regardless of what cryptobyte made of it).
-//
-// goldap/message's reader is derived from Go's stdlib encoding/asn1 tag/
-// length parser (see third_party/goldap/message/asn1.go's "BEGIN
-// encoding/asn1/asn1.go" block), so it independently enforces DER-style
-// minimal-length and definite-length encoding the same way cryptobyte does,
-// via a completely separate implementation with its own bug surface —
-// exactly the second-implementation property an anti-drift check on a
-// single self-referential hash (internal/securitytest's fixture-corpus
-// check) cannot provide on its own.
-//
-// message.ReadLDAPMessage only checks that its own SEQUENCE content is
-// fully consumed, not that nothing follows that SEQUENCE in raw, so this
-// helper additionally requires the outer *Bytes cursor to have no
-// remaining data afterward — mirroring characterizeLDAPMessage's own
-// "trailing bytes after the outer LDAPMessage" check.
-func independentlyWellFormedBER(raw []byte) error {
-	cursor := goldapmessage.NewBytes(0, raw)
-	if _, err := goldapmessage.ReadLDAPMessage(cursor); err != nil {
-		return fmt.Errorf("goldap BER decoder: %w", err)
+// berCursor is a minimal, hand-written, bounded BER tag/length/value reader
+// used only by oracleAWellFormed and its helpers below (Oracle A, issue #33
+// phase 4). It is a from-scratch byte-cursor implementation: it does not
+// call cryptobyte (no cryptobyte.String, no golang.org/x/crypto/cryptobyte/
+// asn1 helper), it does not call any function in this package's production
+// frame.go/protocol.go/bind.go/search.go, and it imports no goldap or other
+// general BER/ASN.1 tree package. Its only job is to independently answer
+// "is this a complete, well-formed BER encoding of one of this profile's
+// supported LDAPMessage shapes" so a cryptobyte characterization failure can
+// be corroborated (or refuted) by a second, structurally distinct opinion.
+type berCursor struct {
+	buf []byte
+	pos int
+}
+
+func newBERCursor(buf []byte) *berCursor { return &berCursor{buf: buf} }
+
+// remaining returns the number of unconsumed bytes.
+func (c *berCursor) remaining() int { return len(c.buf) - c.pos }
+
+// readByte consumes and returns exactly one byte.
+func (c *berCursor) readByte() (byte, error) {
+	if c.pos >= len(c.buf) {
+		return 0, fmt.Errorf("unexpected end of input")
 	}
-	if cursor.HasMoreData() {
-		return fmt.Errorf("goldap BER decoder: trailing bytes after the outer LDAPMessage")
+	b := c.buf[c.pos]
+	c.pos++
+	return b, nil
+}
+
+// readTLV reads one BER tag-length-value triple and returns the raw tag
+// octet and the content slice (a sub-slice of the cursor's own backing
+// array, never copied). Only single-octet (low-tag-number) tags are
+// accepted — every tag this profile's fixtures use fits in one octet — and
+// only definite-form lengths are accepted: the indefinite-length marker
+// (0x80) is rejected outright, a declared length may never exceed the
+// bytes actually remaining in the cursor (so length is always bounded by
+// the real input, never trusted past it), and a long-form length encoding
+// that could have been expressed in short form, or that carries a
+// redundant leading zero octet, is rejected as non-minimal.
+func (c *berCursor) readTLV() (tag byte, content []byte, err error) {
+	tag, err = c.readByte()
+	if err != nil {
+		return 0, nil, fmt.Errorf("tag: %w", err)
+	}
+	if tag&0x1f == 0x1f {
+		return 0, nil, fmt.Errorf("high-tag-number form is outside this profile's supported scope")
+	}
+
+	lengthByte, err := c.readByte()
+	if err != nil {
+		return 0, nil, fmt.Errorf("length: %w", err)
+	}
+
+	var length int
+	switch {
+	case lengthByte == 0x80:
+		return 0, nil, fmt.Errorf("indefinite length is not permitted")
+	case lengthByte&0x80 == 0:
+		length = int(lengthByte)
+	default:
+		numOctets := int(lengthByte &^ 0x80)
+		if numOctets == 0 || numOctets > 4 {
+			return 0, nil, fmt.Errorf("unsupported long-form length octet count %d", numOctets)
+		}
+		if c.remaining() < numOctets {
+			return 0, nil, fmt.Errorf("truncated long-form length")
+		}
+		var v int
+		for i := 0; i < numOctets; i++ {
+			b, _ := c.readByte()
+			v = v<<8 | int(b)
+		}
+		if v < 0x80 {
+			return 0, nil, fmt.Errorf("non-minimal long-form length encoding (value fits short form)")
+		}
+		if numOctets > 1 && v>>(uint((numOctets-1))*8) == 0 {
+			return 0, nil, fmt.Errorf("non-minimal long-form length encoding (redundant leading zero octet)")
+		}
+		length = v
+	}
+
+	if length < 0 || length > c.remaining() {
+		return 0, nil, fmt.Errorf("declared length %d exceeds %d remaining byte(s)", length, c.remaining())
+	}
+	content = c.buf[c.pos : c.pos+length]
+	c.pos += length
+	return tag, content, nil
+}
+
+// oracleAMaxFilterDepth bounds oracleAFilter's recursion — independently
+// declared from cryptobyte's own filterMaxDepth above, since Oracle A must
+// not share so much as a numeric constant that would make the two
+// implementations less than fully independent by accident.
+const oracleAMaxFilterDepth = 8
+
+// oracleANonNegativeInteger validates content as a minimal, definite-length,
+// non-negative BER/DER INTEGER (or ENUMERATED) content octet string — no
+// redundant leading 0x00 padding octet, high bit of the first octet clear —
+// and returns its value. This independently re-derives the same DER
+// minimality rule cryptobyte's own integer readers enforce, and the one
+// minimalPositiveInt32 in protocol.go enforces for production decode, but
+// shares no code with either: it is Oracle A's own from-scratch
+// implementation, deliberately covering the MessageID 127/128 boundary (a
+// 127 value fits one content octet, 0x7f; 128 requires two, 0x00 0x80, since
+// a single 0x80 octet alone would read as a negative value).
+func oracleANonNegativeInteger(content []byte) (int64, error) {
+	if len(content) == 0 {
+		return 0, fmt.Errorf("empty INTEGER content")
+	}
+	if content[0]&0x80 != 0 {
+		return 0, fmt.Errorf("negative INTEGER not supported by this profile")
+	}
+	if len(content) > 1 && content[0] == 0x00 && content[1]&0x80 == 0 {
+		return 0, fmt.Errorf("non-minimal encoding (redundant leading 0x00)")
+	}
+	if len(content) > 8 {
+		return 0, fmt.Errorf("INTEGER too large")
+	}
+	var v int64
+	for _, b := range content {
+		v = v<<8 | int64(b)
+	}
+	return v, nil
+}
+
+// oracleAPositiveInteger is oracleANonNegativeInteger plus the strictly-
+// positive requirement AbandonRequest's [APPLICATION 16] IMPLICIT target
+// MessageID needs.
+func oracleAPositiveInteger(content []byte) (int64, error) {
+	v, err := oracleANonNegativeInteger(content)
+	if err != nil {
+		return 0, err
+	}
+	if v <= 0 {
+		return 0, fmt.Errorf("value must be positive, got %d", v)
+	}
+	return v, nil
+}
+
+// oracleAWellFormed reports whether raw is a complete, well-formed BER
+// LDAPMessage restricted to exactly this profile's supported operations,
+// according to Oracle A — the hand-written berCursor above — rather than
+// trusting characterizeLDAPMessage's own (cryptobyte-based) verdict about
+// validity. It is the independent-validity gate plan §32 requires before a
+// cryptobyte characterization failure may be treated as "a valid form
+// cryptobyte cannot safely consume" (the local-ber-cursor justification)
+// instead of "this fixture is malformed" (which must stay fatal regardless
+// of what cryptobyte made of it).
+//
+// oracleAWellFormed enforces, independently of cryptobyte: the outer
+// LDAPMessage is one definite-length SEQUENCE with nothing following it; no
+// indefinite length or truncated body anywhere in the structure; MessageID
+// is a minimal non-negative INTEGER (covering the 127/128 minimal-encoding
+// boundary); the protocolOp carries one of the four supported application
+// tags with a complete, correctly shaped body (BindRequest, SearchRequest,
+// UnbindRequest's empty body, AbandonRequest's positive implicit target);
+// and no trailing bytes remain inside the LDAPMessage content after
+// protocolOp.
+func oracleAWellFormed(raw []byte) error {
+	outer := newBERCursor(raw)
+	outerTag, outerContent, err := outer.readTLV()
+	if err != nil {
+		return fmt.Errorf("outer LDAPMessage: %w", err)
+	}
+	if outerTag != 0x30 { // universal, constructed SEQUENCE
+		return fmt.Errorf("outer LDAPMessage: expected a SEQUENCE tag, got 0x%02x", outerTag)
+	}
+	if outer.remaining() != 0 {
+		return fmt.Errorf("trailing bytes after the outer LDAPMessage")
+	}
+
+	msg := newBERCursor(outerContent)
+
+	midTag, midContent, err := msg.readTLV()
+	if err != nil {
+		return fmt.Errorf("MessageID: %w", err)
+	}
+	if midTag != 0x02 { // universal INTEGER
+		return fmt.Errorf("MessageID: expected an INTEGER tag, got 0x%02x", midTag)
+	}
+	if _, err := oracleANonNegativeInteger(midContent); err != nil {
+		return fmt.Errorf("MessageID: %w", err)
+	}
+
+	opTag, opContent, err := msg.readTLV()
+	if err != nil {
+		return fmt.Errorf("protocolOp: %w", err)
+	}
+
+	switch opTag {
+	case 0x60: // [APPLICATION 0] constructed — BindRequest
+		if err := oracleABindRequest(opContent); err != nil {
+			return fmt.Errorf("bindRequest: %w", err)
+		}
+	case 0x63: // [APPLICATION 3] constructed — SearchRequest
+		if err := oracleASearchRequest(opContent); err != nil {
+			return fmt.Errorf("searchRequest: %w", err)
+		}
+	case 0x42: // [APPLICATION 2] primitive — UnbindRequest
+		if len(opContent) != 0 {
+			return fmt.Errorf("unbindRequest: expected empty content, got %d byte(s)", len(opContent))
+		}
+	case 0x50: // [APPLICATION 16] primitive — AbandonRequest (implicit MessageID)
+		if _, err := oracleAPositiveInteger(opContent); err != nil {
+			return fmt.Errorf("abandonRequest: target MessageID: %w", err)
+		}
+	default:
+		return fmt.Errorf("protocolOp: unsupported application tag 0x%02x", opTag)
+	}
+
+	if msg.remaining() != 0 {
+		return fmt.Errorf("trailing bytes after protocolOp inside the LDAPMessage (e.g. an unsupported control)")
+	}
+	return nil
+}
+
+// oracleABindRequest independently checks the BindRequest body: a canonical
+// INTEGER version equal to 3, a non-empty OCTET STRING name (the Bind DN),
+// exactly the supported [0] simple context tag, and nothing following.
+func oracleABindRequest(content []byte) error {
+	cur := newBERCursor(content)
+
+	verTag, verContent, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("version: %w", err)
+	}
+	if verTag != 0x02 {
+		return fmt.Errorf("version: expected an INTEGER tag, got 0x%02x", verTag)
+	}
+	version, err := oracleANonNegativeInteger(verContent)
+	if err != nil {
+		return fmt.Errorf("version: %w", err)
+	}
+	if version != 3 {
+		return fmt.Errorf("version: unsupported Bind version %d (only version 3 is in this profile's scope)", version)
+	}
+
+	nameTag, nameContent, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("name: %w", err)
+	}
+	if nameTag != 0x04 {
+		return fmt.Errorf("name: expected an OCTET STRING tag, got 0x%02x", nameTag)
+	}
+	if len(nameContent) == 0 {
+		return fmt.Errorf("name: empty Bind DN")
+	}
+
+	authTag, _, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("authentication: %w", err)
+	}
+	if authTag != 0x80 { // [0] context-specific primitive — AuthenticationChoice::simple
+		return fmt.Errorf("authentication: expected the supported [0] simple context tag, got 0x%02x", authTag)
+	}
+
+	if cur.remaining() != 0 {
+		return fmt.Errorf("unexpected trailing field after simple authentication (e.g. an unsupported SASL choice)")
+	}
+	return nil
+}
+
+// oracleASearchRequest independently checks the SearchRequest body's fixed
+// fields, the fixed filter shape (via oracleAFilter), and the attributes
+// SEQUENCE.
+func oracleASearchRequest(content []byte) error {
+	cur := newBERCursor(content)
+
+	baseTag, _, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("baseObject: %w", err)
+	}
+	if baseTag != 0x04 {
+		return fmt.Errorf("baseObject: expected an OCTET STRING tag, got 0x%02x", baseTag)
+	}
+
+	scopeTag, scopeContent, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("scope: %w", err)
+	}
+	if scopeTag != 0x0a { // universal ENUMERATED
+		return fmt.Errorf("scope: expected an ENUMERATED tag, got 0x%02x", scopeTag)
+	}
+	scope, err := oracleANonNegativeInteger(scopeContent)
+	if err != nil {
+		return fmt.Errorf("scope: %w", err)
+	}
+	if scope < 0 || scope > 2 {
+		return fmt.Errorf("scope: value %d outside the defined baseObject(0)/singleLevel(1)/wholeSubtree(2) range", scope)
+	}
+
+	derefTag, derefContent, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("derefAliases: %w", err)
+	}
+	if derefTag != 0x0a {
+		return fmt.Errorf("derefAliases: expected an ENUMERATED tag, got 0x%02x", derefTag)
+	}
+	deref, err := oracleANonNegativeInteger(derefContent)
+	if err != nil {
+		return fmt.Errorf("derefAliases: %w", err)
+	}
+	if deref < 0 || deref > 3 {
+		return fmt.Errorf("derefAliases: value %d outside the defined 0..3 range", deref)
+	}
+
+	sizeTag, sizeContent, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("sizeLimit: %w", err)
+	}
+	if sizeTag != 0x02 {
+		return fmt.Errorf("sizeLimit: expected an INTEGER tag, got 0x%02x", sizeTag)
+	}
+	if _, err := oracleANonNegativeInteger(sizeContent); err != nil {
+		return fmt.Errorf("sizeLimit: %w", err)
+	}
+
+	timeTag, timeContent, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("timeLimit: %w", err)
+	}
+	if timeTag != 0x02 {
+		return fmt.Errorf("timeLimit: expected an INTEGER tag, got 0x%02x", timeTag)
+	}
+	if _, err := oracleANonNegativeInteger(timeContent); err != nil {
+		return fmt.Errorf("timeLimit: %w", err)
+	}
+
+	typesTag, typesContent, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("typesOnly: %w", err)
+	}
+	if typesTag != 0x01 { // universal BOOLEAN
+		return fmt.Errorf("typesOnly: expected a BOOLEAN tag, got 0x%02x", typesTag)
+	}
+	if len(typesContent) != 1 || (typesContent[0] != 0x00 && typesContent[0] != 0xff) {
+		return fmt.Errorf("typesOnly: BOOLEAN content byte must be canonical 0x00 or 0xff")
+	}
+
+	if err := oracleAFilter(cur, 0); err != nil {
+		return fmt.Errorf("filter: %w", err)
+	}
+
+	attrsTag, attrsContent, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("attributes: %w", err)
+	}
+	if attrsTag != 0x30 {
+		return fmt.Errorf("attributes: expected a SEQUENCE tag, got 0x%02x", attrsTag)
+	}
+	attrs := newBERCursor(attrsContent)
+	for attrs.remaining() > 0 {
+		attrTag, attrContent, err := attrs.readTLV()
+		if err != nil {
+			return fmt.Errorf("attributes: %w", err)
+		}
+		if attrTag != 0x04 {
+			return fmt.Errorf("attributes: element expected an OCTET STRING tag, got 0x%02x", attrTag)
+		}
+		if len(attrContent) == 0 {
+			return fmt.Errorf("attributes: empty attribute description")
+		}
+	}
+
+	if cur.remaining() != 0 {
+		return fmt.Errorf("unexpected trailing field after attributes")
+	}
+	return nil
+}
+
+// oracleAFilter recursively checks a Filter CHOICE element against exactly
+// the two context tags the phase-1 fixtures use: "and" ([0] SET OF Filter)
+// and "equalityMatch" ([3] AttributeValueAssertion). Any other context tag
+// is rejected by the default case.
+func oracleAFilter(cur *berCursor, depth int) error {
+	if depth > oracleAMaxFilterDepth {
+		return fmt.Errorf("nesting exceeds bound %d", oracleAMaxFilterDepth)
+	}
+
+	tag, content, err := cur.readTLV()
+	if err != nil {
+		return fmt.Errorf("malformed filter element: %w", err)
+	}
+
+	switch tag {
+	case 0xa0: // [0] SET OF Filter, constructed — "and"
+		if len(content) == 0 {
+			return fmt.Errorf("and: empty SET OF Filter")
+		}
+		sub := newBERCursor(content)
+		for sub.remaining() > 0 {
+			if err := oracleAFilter(sub, depth+1); err != nil {
+				return fmt.Errorf("and: %w", err)
+			}
+		}
+	case 0xa3: // [3] AttributeValueAssertion, constructed — "equalityMatch"
+		eq := newBERCursor(content)
+		descTag, descContent, err := eq.readTLV()
+		if err != nil {
+			return fmt.Errorf("equalityMatch: %w", err)
+		}
+		if descTag != 0x04 {
+			return fmt.Errorf("equalityMatch: attribute description expected an OCTET STRING tag, got 0x%02x", descTag)
+		}
+		if len(descContent) == 0 {
+			return fmt.Errorf("equalityMatch: empty attribute description")
+		}
+		valTag, _, err := eq.readTLV()
+		if err != nil {
+			return fmt.Errorf("equalityMatch: %w", err)
+		}
+		if valTag != 0x04 {
+			return fmt.Errorf("equalityMatch: assertion value expected an OCTET STRING tag, got 0x%02x", valTag)
+		}
+		if eq.remaining() != 0 {
+			return fmt.Errorf("equalityMatch: unexpected trailing field")
+		}
+	default:
+		return fmt.Errorf("unsupported filter context tag 0x%02x (only 'and'/'equalityMatch' are in this profile's captured scope)", tag)
 	}
 	return nil
 }
@@ -511,25 +897,25 @@ func TestClickHouseWireCryptobyteDecision(t *testing.T) {
 				// bytes only to a hash stored in the same session.json)
 				// enforces it independently. So a cryptobyte failure is
 				// never, on its own, treated as "cryptobyte cannot
-				// consume this valid form": independentlyWellFormedBER
-				// must first corroborate, with a second, structurally
-				// independent BER decoder, that these bytes really are a
+				// consume this valid form": oracleAWellFormed must first
+				// corroborate, with a second, structurally independent
+				// hand-written BER cursor, that these bytes really are a
 				// complete, well-formed LDAPMessage before that failure
 				// counts as local-ber-cursor evidence. If the independent
-				// decoder rejects it too, this is fixture corruption (or
+				// cursor rejects it too, this is fixture corruption (or
 				// a genuinely malformed committed fixture), not a
 				// primitive-layer decision, and must fail loudly rather
 				// than silently flip the verdict.
-				if wfErr := independentlyWellFormedBER(c.Raw); wfErr != nil {
+				if wfErr := oracleAWellFormed(c.Raw); wfErr != nil {
 					t.Fatalf(
-						"%s: cryptobyte characterization failed (%v), AND the independent goldap BER decoder also rejected it (%v) — "+
+						"%s: cryptobyte characterization failed (%v), AND the independent Oracle A BER cursor also rejected it (%v) — "+
 							"this fixture is not valid, well-formed BER, so its cryptobyte failure cannot be used as local-ber-cursor "+
 							"evidence; treat this as fixture corruption (or a genuinely malformed committed fixture), not a primitive-layer decision",
 						c.Path, err, wfErr,
 					)
 					return
 				}
-				// The independent decoder confirms this is genuinely
+				// The independent cursor confirms this is genuinely
 				// valid, well-formed BER that cryptobyte nonetheless
 				// cannot safely consume — exactly the local-ber-cursor
 				// decision this test exists to compute, not a test
@@ -573,8 +959,8 @@ func TestClickHouseWireCryptobyteDecision(t *testing.T) {
 	for _, c := range cases {
 		c := c
 		t.Run("independently-well-formed/"+c.Label, func(t *testing.T) {
-			if err := independentlyWellFormedBER(c.Raw); err != nil {
-				t.Errorf("%s: independent goldap BER decoder rejects this committed fixture as malformed: %v", c.Path, err)
+			if err := oracleAWellFormed(c.Raw); err != nil {
+				t.Errorf("%s: independent Oracle A BER cursor rejects this committed fixture as malformed: %v", c.Path, err)
 			}
 		})
 	}
@@ -813,10 +1199,10 @@ func assertRejected(t *testing.T, raw []byte, why string) {
 }
 
 // TestIndependentBERDecoderIsDiscriminating is the sabotage check for
-// independentlyWellFormedBER itself: it proves the independent-validity
-// gate added to TestClickHouseWireCryptobyteDecision's per-fixture loop is
-// a real, discriminating second opinion — not a rubber stamp that always
-// returns nil regardless of input, which would silently reopen exactly the
+// oracleAWellFormed itself: it proves the independent-validity gate added
+// to TestClickHouseWireCryptobyteDecision's per-fixture loop is a real,
+// discriminating second opinion — not a rubber stamp that always returns
+// nil regardless of input, which would silently reopen exactly the
 // sabotage path this gate exists to close (corrupting a committed fixture
 // and updating only its own session.json hash must not be able to pass
 // through this check unnoticed).
@@ -825,12 +1211,10 @@ func assertRejected(t *testing.T, raw []byte, why string) {
 // definite-length BER itself — the encoding rule every LDAPMessage on the
 // wire is required to use (RFC 4511 §5.1) — rather than this file's own
 // narrow-profile choices (e.g. "only 'and'/'equalityMatch' filter tags"):
-// third_party/goldap/message is a general LDAP BER decoder, not a
-// characterizer of this narrow ClickHouse/libldap profile, so it is only
-// guaranteed to reject encodings that are malformed BER outright, not every
-// mutation characterizeLDAPMessage's narrower profile checks reject (e.g.
-// a syntactically-valid-but-differently-tagged Filter alternative is not
-// something a general LDAP decoder has any reason to refuse).
+// oracleAWellFormed's berCursor enforces exactly this profile's own
+// supported shapes, not a general LDAP BER decoder's tolerance, so it is
+// only guaranteed to reject encodings that are malformed BER outright (or
+// outside this profile's fixed shape), which is what these cases exercise.
 func TestIndependentBERDecoderIsDiscriminating(t *testing.T) {
 	moduleRoot, err := wirefixture.ModuleRoot()
 	if err != nil {
@@ -863,13 +1247,13 @@ func TestIndependentBERDecoderIsDiscriminating(t *testing.T) {
 		t.Fatalf("template too short to safely mutate byte offset 1")
 	}
 
-	// Sanity check: the independent decoder must accept the real,
+	// Sanity check: the independent cursor must accept the real,
 	// un-mutated templates before we trust its verdict on mutated copies.
-	if err := independentlyWellFormedBER(bindTemplate); err != nil {
-		t.Fatalf("bind template sanity check: expected the independent decoder to accept the un-mutated template, got: %v", err)
+	if err := oracleAWellFormed(bindTemplate); err != nil {
+		t.Fatalf("bind template sanity check: expected the independent cursor to accept the un-mutated template, got: %v", err)
 	}
-	if err := independentlyWellFormedBER(unbindTemplate); err != nil {
-		t.Fatalf("unbind template sanity check: expected the independent decoder to accept the un-mutated template, got: %v", err)
+	if err := oracleAWellFormed(unbindTemplate); err != nil {
+		t.Fatalf("unbind template sanity check: expected the independent cursor to accept the un-mutated template, got: %v", err)
 	}
 
 	t.Run("indefinite-length", func(t *testing.T) {
@@ -878,15 +1262,15 @@ func TestIndependentBERDecoderIsDiscriminating(t *testing.T) {
 		// narrow profile.
 		mutated := append([]byte(nil), bindTemplate...)
 		mutated[1] = 0x80
-		if err := independentlyWellFormedBER(mutated); err == nil {
-			t.Fatalf("independent decoder accepted an indefinite-length outer SEQUENCE as well-formed")
+		if err := oracleAWellFormed(mutated); err == nil {
+			t.Fatalf("independent cursor accepted an indefinite-length outer SEQUENCE as well-formed")
 		}
 	})
 
 	t.Run("truncation", func(t *testing.T) {
 		mutated := bindTemplate[:len(bindTemplate)-10]
-		if err := independentlyWellFormedBER(mutated); err == nil {
-			t.Fatalf("independent decoder accepted a truncated BindRequest as well-formed")
+		if err := oracleAWellFormed(mutated); err == nil {
+			t.Fatalf("independent cursor accepted a truncated BindRequest as well-formed")
 		}
 	})
 
@@ -894,11 +1278,11 @@ func TestIndependentBERDecoderIsDiscriminating(t *testing.T) {
 		// This fixture-corpus convention is "one complete PDU per file,
 		// nothing more" — the same convention characterizeLDAPMessage
 		// enforces via its own outer-SEQUENCE "trailing bytes" check,
-		// which independentlyWellFormedBER mirrors via cursor.HasMoreData
-		// (message.ReadLDAPMessage alone does not check this on its own).
+		// which oracleAWellFormed mirrors via its own outer-cursor
+		// remaining() check.
 		mutated := append(append([]byte(nil), unbindTemplate...), 0xde, 0xad, 0xbe, 0xef)
-		if err := independentlyWellFormedBER(mutated); err == nil {
-			t.Fatalf("independent decoder accepted trailing bytes after a complete LDAPMessage as well-formed")
+		if err := oracleAWellFormed(mutated); err == nil {
+			t.Fatalf("independent cursor accepted trailing bytes after a complete LDAPMessage as well-formed")
 		}
 	})
 }
