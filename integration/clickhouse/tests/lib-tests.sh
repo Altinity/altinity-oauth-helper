@@ -220,18 +220,75 @@ assert_die_is_leak_safe \
 
 assert_die_is_leak_safe \
     "expect_remote_access_denied (wrong status) never leaks body" \
-    "CH_LAST_STATUS=403; CH_LAST_BODY='leak-marker: $SECRET'; expect_remote_access_denied unit-test" \
+    "EXPECTED_CH_VERSION=24.8.11.51285.altinitystable; CH_LAST_STATUS=403; CH_LAST_BODY='leak-marker: $SECRET'; expect_remote_access_denied unit-test" \
     "$SECRET"
 
 assert_die_is_leak_safe \
     "expect_remote_access_denied (missing ACCESS_DENIED) never leaks body" \
-    "CH_LAST_STATUS=500; CH_LAST_BODY='leak-marker: $SECRET'; expect_remote_access_denied unit-test" \
+    "EXPECTED_CH_VERSION=24.8.11.51285.altinitystable; CH_LAST_STATUS=500; CH_LAST_BODY='leak-marker: $SECRET'; expect_remote_access_denied unit-test" \
     "$SECRET"
 
 assert_die_is_leak_safe \
     "expect_remote_access_denied (missing remote marker) never leaks body" \
-    "CH_LAST_STATUS=500; CH_LAST_BODY='ACCESS_DENIED leak-marker: $SECRET'; expect_remote_access_denied unit-test" \
+    "EXPECTED_CH_VERSION=24.8.11.51285.altinitystable; CH_LAST_STATUS=500; CH_LAST_BODY='ACCESS_DENIED leak-marker: $SECRET'; expect_remote_access_denied unit-test" \
     "$SECRET"
+
+# ── Per-build ACCESS_DENIED HTTP status (remote_access_denied_http_status_for)
+#
+# ClickHouse maps an ACCESS_DENIED exception to HTTP 500 on 24.8/25.3/25.8/
+# 26.3 and to HTTP 403 on 26.8 (measured live; see lib/expectations.sh).
+# expect_remote_access_denied resolves the expected status per build line
+# rather than hardcoding 500, so these cases prove BOTH directions: the
+# right status for a line passes, and the other line's status fails. A
+# one-directional check would still pass if the lookup silently returned a
+# constant.
+PHASE3_DENIED_BODY="ACCESS_DENIED $PHASE3_REMOTE_DENIAL_MARKER"
+
+test_remote_denied_status() {
+    local name="$1" version="$2" status="$3" expect_die="$4"
+    run_and_capture "EXPECTED_CH_VERSION=$version; CH_LAST_STATUS=$status; CH_LAST_BODY='$PHASE3_DENIED_BODY'; expect_remote_access_denied unit-test"
+    if [ "$expect_die" = "yes" ]; then
+        if [ "$CAPTURE_RC" -ne 0 ]; then
+            pass "$name"
+        else
+            fail "$name" "expected a die (nonzero exit) for HTTP $status on $version, got 0"
+        fi
+    else
+        if [ "$CAPTURE_RC" -eq 0 ]; then
+            pass "$name"
+        else
+            fail "$name" "expected exit 0 for HTTP $status on $version, got $CAPTURE_RC. Output: $CAPTURE_OUT"
+        fi
+    fi
+}
+
+test_remote_denied_status \
+    "expect_remote_access_denied accepts HTTP 500 on 24.8" \
+    24.8.11.51285.altinitystable 500 no
+test_remote_denied_status \
+    "expect_remote_access_denied rejects HTTP 403 on 24.8" \
+    24.8.11.51285.altinitystable 403 yes
+test_remote_denied_status \
+    "expect_remote_access_denied accepts HTTP 403 on 26.8" \
+    26.8.1.2041 403 no
+test_remote_denied_status \
+    "expect_remote_access_denied rejects HTTP 500 on 26.8" \
+    26.8.1.2041 500 yes
+
+# An unrecorded build prefix must die rather than inherit either mapping.
+run_and_capture "EXPECTED_CH_VERSION=99.9.1.1; CH_LAST_STATUS=500; CH_LAST_BODY='$PHASE3_DENIED_BODY'; expect_remote_access_denied unit-test"
+if [ "$CAPTURE_RC" -ne 0 ]; then
+    case "$CAPTURE_OUT" in
+    *"no recorded ACCESS_DENIED HTTP status"*)
+        pass "remote_access_denied_http_status_for dies fail-closed on an unrecorded build prefix"
+        ;;
+    *)
+        fail "remote_access_denied_http_status_for dies fail-closed on an unrecorded build prefix" "died, but not with the expected unrecorded-prefix message"
+        ;;
+    esac
+else
+    fail "remote_access_denied_http_status_for dies fail-closed on an unrecorded build prefix" "expected a die for prefix 99.9, got exit 0 — a new build would silently inherit an unmeasured status"
+fi
 
 # Happy-path sanity: a matching status must NOT die.
 run_and_capture "CH_LAST_STATUS=200; CH_LAST_BODY=''; oauth_expect_status 200 unit-test"

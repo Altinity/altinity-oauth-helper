@@ -318,6 +318,39 @@ unset wirecap_image wirecap_tag wirecap_line
 [ "${#LINES[@]}" -gt 0 ] || die "run-all-builds.sh's BUILDS yielded zero tracked lines — refusing to run an empty capture"
 log "tracked lines derived from run-all-builds.sh: ${LINES[*]}"
 
+# ── Committed-fixture freeze (issue #33 phase 4, narrowed for the 26.x
+# tracked-line addition) ──────────────────────────────────────────────────
+# The freeze this enforces is NOT "generation never runs again" — it is
+# "no COMMITTED fixture is ever regenerated or promoted". Generation stays
+# available for a tracked line that has no committed fixture directory yet,
+# which is exactly what adding a new line to BUILDS requires; without it,
+# BUILDS could never grow again and the four-way tracked-line equality
+# contract would be unsatisfiable for any new line.
+#
+# Mechanically: in generate mode, refuse up front to promote into an
+# OUTPUT_DIR that already holds a directory for a line this run would
+# capture. Checked ONCE here, before any container starts, rather than
+# inside wirecap_promote_session — that function runs twice per line (once
+# per session mode), so a check there could not tell a directory this run
+# just created from one that was already committed, and would either fire
+# spuriously on the second session or not at all.
+#
+# Capturing into a fresh --output directory (the normal path) never trips
+# this. Pointing --output straight at internal/ldap/testdata/clickhouse-wire
+# does trip it, for exactly the committed lines, which is the intent.
+if [ "$MODE" = "generate" ]; then
+    wirecap_preflight_no_committed_fixture_overwrite() {
+        local line existing=""
+        for line in "${LINES[@]}"; do
+            [ -d "$OUTPUT_DIR/$line" ] || continue
+            existing="$existing $line"
+        done
+        [ -z "$existing" ] || die "refusing to regenerate committed fixture(s) for tracked line(s)${existing} — $OUTPUT_DIR already contains a directory for each. Committed wire fixtures are frozen: they are verified with --mode verify, never regenerated or promoted (see integration/clickhouse/README.md's wire-capture policy and docs/clickhouse-ldap-wire-profile.md §11.4a). Generation is permitted only for a tracked line with no committed fixture directory yet; capture into a fresh --output directory and promote only the new line's directory."
+        log "preflight: no committed fixture would be overwritten by this generate run — proceeding"
+    }
+    wirecap_preflight_no_committed_fixture_overwrite
+fi
+
 # ── Exact ClickHouse/OpenLDAP source provenance per tracked line (plan
 # §2.2/§2.3) — the committed audited matrix, carried into every sanitized
 # session's profile.json via `ldap-wire-recorder sanitize`'s profile flags
@@ -327,42 +360,62 @@ log "tracked lines derived from run-all-builds.sh: ${LINES[*]}"
 declare -A WIRECAP_CH_REPO=(
     ["24.8"]="Altinity/ClickHouse"
     ["25.8"]="Altinity/ClickHouse"
+    ["26.3"]="Altinity/ClickHouse"
+    ["26.8"]="ClickHouse/ClickHouse"
 )
 declare -A WIRECAP_CH_TAG=(
     ["24.8"]="v24.8.11.51285.altinitystable"
     ["25.8"]="v25.8.28.10001.altinitystable"
+    ["26.3"]="v26.3.16.10001.altinitystable"
+    ["26.8"]="v26.8.1.2041-lts"
 )
 declare -A WIRECAP_CH_COMMIT=(
     ["24.8"]="351edb1a2ec26940aee4c2d1d332fd280c232964"
     ["25.8"]="568824f4327b379e86bce93f12b9cebe0cfd9ff5"
+    ["26.3"]="8de06fed91fa7a6545a72f37c98e81d4cc024bb1"
+    ["26.8"]="be4175ff9ba169fe2421dc8c7d06b0e94cfb4594"
 )
 declare -A WIRECAP_BLOB_LDAPCLIENT_CPP=(
     ["24.8"]="3a0b82b9a760e8c0e4f37f422e673a1c5a2228e0"
     ["25.8"]="3a0b82b9a760e8c0e4f37f422e673a1c5a2228e0"
+    ["26.3"]="e76d084f35745778667115865883c910fbdf82a5"
+    ["26.8"]="7465096b834f789bd8856cc74cc5dbefe6397ded"
 )
 declare -A WIRECAP_BLOB_LDAPCLIENT_H=(
     ["24.8"]="0bbd2c6e9c4662d3d31f83bd8ed457647d436cc6"
     ["25.8"]="0bbd2c6e9c4662d3d31f83bd8ed457647d436cc6"
+    ["26.3"]="558017704e75731fd1b2bb0eb88367c00d40aa69"
+    ["26.8"]="558017704e75731fd1b2bb0eb88367c00d40aa69"
 )
 declare -A WIRECAP_BLOB_LDAPACCESSSTORAGE_CPP=(
     ["24.8"]="917ad7cbb922083ab82f85ab25c120a17fd009c7"
     ["25.8"]="fc55c6b081b38ecccbf4894a9a5fa223d3cd2bd8"
+    ["26.3"]="939b99396c300abd67abbdfa55d97411ec258261"
+    ["26.8"]="e464d5818b552b4e7623cb34f3e43f6e5302e176"
 )
 declare -A WIRECAP_BLOB_EXTERNALAUTHENTICATORS_CPP=(
     ["24.8"]="77812ac5eb5d0027f081ac43dccc6b89110aeb73"
     ["25.8"]="ca61b55dc5dc200353971ff53580b2ee04439334"
+    ["26.3"]="6fa7c28bc980ce5f639a88b0094e63ca65dd383e"
+    ["26.8"]="40fc3b719d195fc600961e10059a827c0cd7545e"
 )
 declare -A WIRECAP_OPENLDAP_REPO=(
     ["24.8"]="ClickHouse/openldap"
     ["25.8"]="openldap/openldap"
+    ["26.3"]="openldap/openldap"
+    ["26.8"]="openldap/openldap"
 )
 declare -A WIRECAP_OPENLDAP_PIN=(
     ["24.8"]="5671b80e369df2caf5f34e02924316205a43c895"
     ["25.8"]="22fe35c6b4098e3ad166469f9574c79832c42952"
+    ["26.3"]="22fe35c6b4098e3ad166469f9574c79832c42952"
+    ["26.8"]="22fe35c6b4098e3ad166469f9574c79832c42952"
 )
 declare -A WIRECAP_OPENLDAP_VERSION=(
     ["24.8"]="2.5.16"
     ["25.8"]="2.6.10"
+    ["26.3"]="2.6.10"
+    ["26.8"]="2.6.10"
 )
 
 WIRECAP_CONFIG_PATH="integration/clickhouse/clickhouse/common/config.d/ldap.xml"

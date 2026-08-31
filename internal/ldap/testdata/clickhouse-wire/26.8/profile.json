@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "line": "26.8",
+  "tracked_image": "clickhouse/clickhouse-server:26.8.1.2041",
+  "clickhouse_repository": "ClickHouse/ClickHouse",
+  "clickhouse_tag": "v26.8.1.2041-lts",
+  "clickhouse_commit": "be4175ff9ba169fe2421dc8c7d06b0e94cfb4594",
+  "clickhouse_source_blobs": {
+    "ExternalAuthenticators.cpp": "40fc3b719d195fc600961e10059a827c0cd7545e",
+    "LDAPAccessStorage.cpp": "e464d5818b552b4e7623cb34f3e43f6e5302e176",
+    "LDAPClient.cpp": "7465096b834f789bd8856cc74cc5dbefe6397ded",
+    "LDAPClient.h": "558017704e75731fd1b2bb0eb88367c00d40aa69"
+  },
+  "openldap_repository": "openldap/openldap",
+  "openldap_pin": "22fe35c6b4098e3ad166469f9574c79832c42952",
+  "openldap_version": "2.6.10",
+  "canonical_config_path": "integration/clickhouse/clickhouse/common/config.d/ldap.xml",
+  "clickhouse_config_element_sha256": "898df8b5dca27603ac5234bde65862484a81aa22de7558c3c4b7e030f1901f3f",
+  "capture_tool_schema_version": 1,
+  "session_paths": [
+    "success",
+    "timeout-abandon"
+  ]
+}

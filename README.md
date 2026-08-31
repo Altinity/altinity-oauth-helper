@@ -118,9 +118,12 @@ ClickHouse username travels as the Bind DN's `uid`, and **the JWT travels as
 the simple-Bind password**.
 
 This path is verified end to end by the real-ClickHouse integration suite in
-[`integration/clickhouse/`](integration/clickhouse/) against
-`altinity/clickhouse-server:24.8.11.51285.altinitystable` (the baseline
-target) and `altinity/clickhouse-server:25.8.28.10001.altinitystable`. The
+[`integration/clickhouse/`](integration/clickhouse/) against four tracked
+ClickHouse builds: `altinity/clickhouse-server:24.8.11.51285.altinitystable`
+(the baseline target), `altinity/clickhouse-server:25.8.28.10001.altinitystable`,
+`altinity/clickhouse-server:26.3.16.10001.altinitystable`, and
+`clickhouse/clickhouse-server:26.8.1.2041` (upstream — no Altinity Stable
+26.8 build exists). The
 configuration below is copied verbatim from that working fixture
 (`integration/clickhouse/clickhouse/common/config.d/ldap.xml`) — note that
 `role_mapping` sits **directly under `<ldap>`**, not nested inside a `<roles>`
@@ -174,7 +177,7 @@ What the fixture proves, and what you should expect in production:
   `<search_limit>256</search_limit>` makes ClickHouse's own built-in default
   explicit. Acceptance scenario G' measured, live, that a Search returning
   `sizeLimitExceeded` fails the whole authentication attempt outright on
-  both tested ClickHouse builds (24.8 and 25.8) — see
+  every tracked ClickHouse build (24.8, 25.8, 26.3, 26.8) — see
   [`docs/ch-oauth-ldap-operator-guide.md`](docs/ch-oauth-ldap-operator-guide.md#6-clickhouse-search-limits--measured-not-assumed)
   for the exact measured wire tuple and consequence.
 - **Distributed queries carry the external roles to remote nodes** via
@@ -185,16 +188,17 @@ What the fixture proves, and what you should expect in production:
     24.8 and 25.3 — including every Altinity Stable 24.8 build — the remote
     node logs that the role was received but it never authorizes anything
     ([#78791][ch-78791]);
-  - on **every** current version (through 26.3) the pushed role is lost when
-    the remote table is a normal `VIEW` ([#116840][ch-116840]) — point
-    `Distributed` tables at base tables.
+  - on **every** current version (through 26.8) the pushed role is lost when
+    the remote table is a normal `VIEW` ([#116840][ch-116840], still open
+    upstream) — point `Distributed` tables at base tables.
 
   `integration/clickhouse/lib/expectations.sh` records these per-version
   outcomes and the suite fails loudly if ClickHouse's behavior changes.
 - **The exact byte-level LDAP request wire format is documented and
   evidenced separately.** [`docs/clickhouse-ldap-wire-profile.md`](docs/clickhouse-ldap-wire-profile.md)
   is the issue #33 phase-1 engineering evidence: source-cited ClickHouse
-  (`Altinity/ClickHouse`) and OpenLDAP behavior for both tracked lines, a
+  (`Altinity/ClickHouse`, and upstream `ClickHouse/ClickHouse` for the 26.8
+  line) and OpenLDAP behavior for all four tracked lines, a
   committed non-secret corpus of sanitized captured request PDUs under
   [`internal/ldap/testdata/clickhouse-wire/`](internal/ldap/testdata/clickhouse-wire/),
   and the resulting `cryptobyte`-vs-bounded-first-party-cursor primitive
