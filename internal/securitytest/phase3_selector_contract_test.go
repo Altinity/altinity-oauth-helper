@@ -13,9 +13,13 @@ package securitytest
 //
 //   - TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild:
 //     "integration helper always uses profile" — integration/clickhouse/
-//     Dockerfile's ch-oauth-ldap `go build` line contains -tags=phase3profile,
-//     and that line is the ONLY `go build` invocation in the file carrying
-//     the tag.
+//     Dockerfile contains EXACTLY ONE `./cmd/ch-oauth-ldap` `go build` line
+//     overall (tagged or not — see classifyDockerfileHelperBuildLines'
+//     doc comment for why the total count is checked separately from the
+//     tagged count), that one line contains -tags=phase3profile, and that
+//     line is the ONLY `go build` invocation in the file carrying the tag.
+//     TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild
+//     is this check's sabotage case, against synthetic content.
 //   - TestPhase3SelectorContract_ProductionDockerfileRemainsUntagged:
 //     "publication image remains legacy" — Dockerfile.ch-oauth-ldap never
 //     mentions phase3profile.
@@ -96,38 +100,116 @@ func assertFileNeverMentionsPhase3Tag(t *testing.T, relPath string) {
 }
 
 // TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild
-// requires integration/clickhouse/Dockerfile's ch-oauth-ldap `go build` line
-// to carry -tags=phase3profile, and requires that line to be the ONLY
+// requires integration/clickhouse/Dockerfile to contain EXACTLY ONE
+// `./cmd/ch-oauth-ldap` `go build` invocation overall, and requires that one
+// line to carry -tags=phase3profile, and requires that line to be the ONLY
 // `go build` invocation in the file carrying that tag (plan "Integration
 // selection contract": "the integration Dockerfile's ch-oauth-ldap build to
 // contain -tags=phase3profile; exactly that binary's build to receive the
 // tag"). synthetic-idp, ldap-session-probe, and ldap-wire-recorder must stay
 // untagged.
+//
+// The total-count check on allHelperBuildLines is deliberate, not
+// redundant with the tagged-count check below: a bucketing scheme that only
+// classifies "helper AND tagged" versus "not-helper AND tagged" silently
+// drops a THIRD, unbucketed case — an untagged `./cmd/ch-oauth-ldap` build
+// line appended anywhere in the file. Docker executes RUN instructions in
+// file order and each writes to the same /out/ch-oauth-ldap path, so a
+// second, untagged helper build placed after the tagged one would silently
+// overwrite the profile binary with the legacy one before the final COPY —
+// while a bucketing scheme with no default case would stay green throughout,
+// since that line is neither "helper && tagged" nor "!helper && tagged".
+// Asserting len(allHelperBuildLines) == 1 up front closes that hole: it
+// forces every `./cmd/ch-oauth-ldap` build line, tagged or not, to be
+// counted, so a second build of any kind fails this test immediately.
 func TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild(t *testing.T) {
 	content := readRepoFile(t, phase3IntegrationDockerfileRelPath)
+	allHelperBuildLines, taggedHelperBuildLines, otherTaggedBuildLines := classifyDockerfileHelperBuildLines(content)
 
-	var helperBuildLines, otherTaggedBuildLines []string
+	if len(allHelperBuildLines) != 1 {
+		t.Fatalf("phase3_selector_contract: expected exactly one `./cmd/ch-oauth-ldap` `go build` line in %s (tagged or not — a second, untagged build would silently overwrite the tagged binary), found %d: %v",
+			phase3IntegrationDockerfileRelPath, len(allHelperBuildLines), allHelperBuildLines)
+	}
+	if len(taggedHelperBuildLines) != 1 {
+		t.Fatalf("phase3_selector_contract: expected the one ch-oauth-ldap `go build` line in %s to carry %s, found %d matching line(s): %v",
+			phase3IntegrationDockerfileRelPath, phase3TaggedBuildMarker, len(taggedHelperBuildLines), taggedHelperBuildLines)
+	}
+	if len(otherTaggedBuildLines) != 0 {
+		t.Fatalf("phase3_selector_contract: %s must be the ONLY build in %s carrying %s, but it also appears on non-ch-oauth-ldap build line(s): %v",
+			phase3TaggedBuildMarker, phase3IntegrationDockerfileRelPath, phase3TaggedBuildMarker, otherTaggedBuildLines)
+	}
+}
+
+// classifyDockerfileHelperBuildLines scans every `go build` line in a
+// Dockerfile's content and buckets it three ways: allHelperBuildLines is
+// EVERY `./cmd/ch-oauth-ldap` build line regardless of tag (the total-count
+// proof), taggedHelperBuildLines is the subset of those that also carry
+// -tags=phase3profile, and otherTaggedBuildLines is every tagged build line
+// for a DIFFERENT binary. Extracted from
+// TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild so
+// TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild can
+// exercise it directly against synthetic content, without needing a second
+// checked-in Dockerfile fixture.
+func classifyDockerfileHelperBuildLines(content string) (allHelperBuildLines, taggedHelperBuildLines, otherTaggedBuildLines []string) {
 	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// Skip comment lines: this Dockerfile's own prose explicitly quotes
+		// "`go build ./cmd/ch-oauth-ldap`" inside a `#`-comment explaining
+		// why the tag exists, which would otherwise false-positive-match
+		// both the "go build" and "./cmd/ch-oauth-ldap" substrings below and
+		// be miscounted as a second, untagged build line.
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
 		if !strings.Contains(line, "go build") {
 			continue
 		}
 		tagged := strings.Contains(line, phase3TaggedBuildMarker)
 		isHelperBuild := strings.Contains(line, "./cmd/ch-oauth-ldap")
+		if isHelperBuild {
+			allHelperBuildLines = append(allHelperBuildLines, line)
+		}
 		switch {
 		case isHelperBuild && tagged:
-			helperBuildLines = append(helperBuildLines, line)
+			taggedHelperBuildLines = append(taggedHelperBuildLines, line)
 		case !isHelperBuild && tagged:
 			otherTaggedBuildLines = append(otherTaggedBuildLines, line)
 		}
 	}
+	return allHelperBuildLines, taggedHelperBuildLines, otherTaggedBuildLines
+}
 
-	if len(helperBuildLines) != 1 {
-		t.Fatalf("phase3_selector_contract: expected exactly one ch-oauth-ldap `go build` line in %s carrying %s, found %d: %v",
-			phase3IntegrationDockerfileRelPath, phase3TaggedBuildMarker, len(helperBuildLines), helperBuildLines)
+// TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild is
+// the sabotage case for the total-count check added above: it reproduces,
+// against synthetic Dockerfile content, the exact regression the prior
+// two-bucket classifier missed — a second, untagged `./cmd/ch-oauth-ldap`
+// build line appended after the tagged one (e.g. Docker overwriting
+// /out/ch-oauth-ldap with the legacy binary before the final COPY). Under
+// the old classifier (only "helper && tagged" vs "!helper && tagged"
+// buckets, no default case) that second line was silently dropped and both
+// buckets stayed exactly as they were with a single build — this test fails
+// if that regression is ever reintroduced.
+func TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild(t *testing.T) {
+	const sabotaged = `RUN CGO_ENABLED=0 go build -tags=phase3profile -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap
+RUN CGO_ENABLED=0 go build -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap
+`
+	all, tagged, other := classifyDockerfileHelperBuildLines(sabotaged)
+	if len(all) != 2 {
+		t.Fatalf("classifyDockerfileHelperBuildLines: expected the sabotaged content's two `./cmd/ch-oauth-ldap` build lines to both be counted, got %d: %v", len(all), all)
 	}
-	if len(otherTaggedBuildLines) != 0 {
-		t.Fatalf("phase3_selector_contract: %s must be the ONLY build in %s carrying %s, but it also appears on non-ch-oauth-ldap build line(s): %v",
-			phase3TaggedBuildMarker, phase3IntegrationDockerfileRelPath, phase3TaggedBuildMarker, otherTaggedBuildLines)
+	if len(tagged) != 1 {
+		t.Fatalf("classifyDockerfileHelperBuildLines: expected exactly one tagged helper build line, got %d: %v", len(tagged), tagged)
+	}
+	if len(other) != 0 {
+		t.Fatalf("classifyDockerfileHelperBuildLines: expected no other-binary tagged build lines, got %d: %v", len(other), other)
+	}
+
+	// The invariant this test exists to protect: a caller that only checks
+	// len(all) == 1 (as the real contract test above does) must reject this
+	// synthetic content, even though len(tagged) == 1 and len(other) == 0
+	// both look clean on their own.
+	if len(all) == 1 {
+		t.Fatalf("classifyDockerfileHelperBuildLines: sabotage case must produce more than one helper build line, got exactly one — the sabotage failed to reproduce the regression")
 	}
 }
 

@@ -53,6 +53,12 @@ package securitytest
 //     deterministic `go build -tags=phase3profile ./cmd/ch-oauth-ldap`,
 //     because `go list -deps` alone proves closure membership, not that the
 //     tagged function bodies still type-check.
+//   - TestDependencyContract_Phase3ReplacementCommandTests: a real
+//     deterministic `go test -tags=phase3profile ./cmd/ch-oauth-ldap`,
+//     because compiling the tagged composition proves nothing about the
+//     tagged test files' own assertions, and the Required PR gate's
+//     untagged `go test -race ./...` step never adds -tags=phase3profile on
+//     its own.
 //
 // The five-prefix denylist and its prefix matcher (generalLDAPDenylistPrefixes,
 // matchesGeneralLDAPPrefix, isGeneralLDAPDependency) are defined once, here,
@@ -572,5 +578,54 @@ func TestDependencyContract_Phase3ReplacementCommandBuilds(t *testing.T) {
 	}
 	if info, err := os.Stat(outBin); err != nil || info.IsDir() {
 		t.Fatalf("dependency_contract: expected a built binary at %s after a successful build, stat: %v", outBin, err)
+	}
+}
+
+// TestDependencyContract_Phase3ReplacementCommandTests closes the gap left
+// by TestDependencyContract_Phase3ReplacementCommandBuilds: a real
+// deterministic `go build -tags=phase3profile` proves the tagged
+// composition compiles, but the Required PR gate's own `go test -race
+// ./...` step never adds `-tags=phase3profile`, so it never executes
+// cmd/ch-oauth-ldap/config_phase3profile_test.go or
+// cmd/ch-oauth-ldap/main_phase3profile_test.go (both `//go:build
+// phase3profile`) — a logic regression confined to those tagged test files
+// (e.g. newLDAPServer silently selecting the wrong backend, or a broken
+// tagged config-narrowing rule) could pass every required check while the
+// tagged tests themselves fail. This test is deliberately untagged, exactly
+// like TestDependencyContract_Phase3ReplacementCommandBuilds, so the
+// Required PR gate's untagged `go test -race ./...` step runs it on every
+// pull request and every push to main, without touching
+// .github/workflows/pr-gate.yml's pinned five-command contract.
+func TestDependencyContract_Phase3ReplacementCommandTests(t *testing.T) {
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatalf("dependency_contract: resolve module root: %v", err)
+	}
+
+	goBin := resolveGoBin(t)
+
+	cmd := exec.Command(goBin, //nolint:gosec // fixed, deterministically-resolved go tool binary; fixed argv below
+		"test",
+		"-mod=readonly",
+		"-tags="+phase3ReplacementTag,
+		productionClosureTarget)
+	cmd.Dir = root
+	// Deliberately NOT deterministicGoListEnv(): that pins GOOS=linux/
+	// GOARCH=amd64 for the host-independent `go list -deps` TEXT OUTPUT
+	// comparisons elsewhere in this file, which never execute anything. This
+	// test's whole point is to actually RUN the tagged test binary, so it
+	// must build for (and run on) the current host — cross-compiling it to
+	// linux/amd64 on a non-Linux/amd64 machine (e.g. darwin/arm64 in local
+	// dev) would produce a binary `go test` cannot execute at all
+	// ("exec format error"), a false failure unrelated to the tagged tests
+	// themselves. Inheriting the ambient environment is correct here.
+	cmd.Env = os.Environ()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dependency_contract: %s test -tags=%s %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			filepath.Base(goBin), phase3ReplacementTag, productionClosureTarget, err, stdout.String(), stderr.String())
 	}
 }

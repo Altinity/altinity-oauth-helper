@@ -2068,11 +2068,48 @@ func TestWireProfileContract_Phase3EvidenceIdentityAndSelector(t *testing.T) {
 	}
 }
 
+// phase3EvidenceHAMarker is the exact heading text that opens §11.5's "HA"
+// subsection, used to split the section into a matrix-only prefix and an
+// HA-only suffix so each "| Image | Result |" table can be located and
+// asserted independently. Without this split, wireProfileExtractTable's
+// documented "first line containing every needle" semantics make a single
+// call against the whole section find only the FIRST such table (the
+// Supported ClickHouse matrix) and never reach the second (HA) — see
+// TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA's doc comment.
+const phase3EvidenceHAMarker = "**HA**"
+
+// phase3SplitOnHAHeading splits section into everything before
+// phase3EvidenceHAMarker (the Supported ClickHouse matrix subsection) and
+// everything from the marker onward (the HA subsection), failing the test
+// if the marker is missing or not unique — both tables must exist exactly
+// once each, in that order, for the two halves to be well-defined.
+func phase3SplitOnHAHeading(t *testing.T, section string) (matrixPart, haPart string) {
+	t.Helper()
+	idx := strings.Index(section, phase3EvidenceHAMarker)
+	if idx < 0 {
+		t.Fatalf("wire_profile_contract: %s: §11.5 has no %q heading to split the Supported ClickHouse matrix from the HA subsection", wireProfileDocRelPath, phase3EvidenceHAMarker)
+	}
+	if strings.Count(section, phase3EvidenceHAMarker) != 1 {
+		t.Fatalf("wire_profile_contract: %s: §11.5 must contain exactly one %q heading, found %d", wireProfileDocRelPath, phase3EvidenceHAMarker, strings.Count(section, phase3EvidenceHAMarker))
+	}
+	return section[:idx], section[idx:]
+}
+
 // TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA requires §11.5's
 // "Supported ClickHouse matrix" and "HA" tables to name exactly the audited
 // image set (auditedProvenanceMatrix above — the same set every other
 // wire-profile contract in this file derives its expectations from) each
 // with a PASS result, and requires a recorded session-probe result.
+//
+// The matrix and HA subsections each contain their own "| Image | Result |"
+// table. wireProfileExtractTable documents (and implements) "locate the
+// FIRST line containing every needle" — calling it once against the whole
+// section with the single needle "Image" therefore only ever reaches the
+// matrix table; the HA table's images and results were never independently
+// parsed or asserted. This test scopes the extraction to each subsection
+// separately (via phase3SplitOnHAHeading) so a wrong image set or a
+// non-PASS result in the HA table fails this test, not just a wrong value
+// in the matrix table.
 func TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -2080,6 +2117,7 @@ func TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA(t *testing.T) {
 	}
 	doc := string(wireProfileReadFile(t, root, wireProfileDocRelPath))
 	section := phase3EvidenceSection(t, doc)
+	matrixPart, haPart := phase3SplitOnHAHeading(t, section)
 
 	wantImages := make([]string, 0, len(auditedProvenanceMatrix))
 	for _, p := range auditedProvenanceMatrix {
@@ -2087,41 +2125,47 @@ func TestWireProfileContract_Phase3EvidenceSupportedMatrixAndHA(t *testing.T) {
 	}
 	sort.Strings(wantImages)
 
-	assertImageResultTable := func(tableName string) {
-		_, rows, err := wireProfileExtractTable(section, tableName)
+	assertImageResultTable := func(tableName, scopeLabel, scope string) {
+		_, rows, err := wireProfileExtractTable(scope, tableName)
 		if err != nil {
-			t.Fatalf("wire_profile_contract: %s: §11.5 %s table: %v", wireProfileDocRelPath, tableName, err)
+			t.Fatalf("wire_profile_contract: %s: §11.5 %s %s table: %v", wireProfileDocRelPath, scopeLabel, tableName, err)
 		}
 		var gotImages []string
 		for _, row := range rows {
 			if len(row) != 2 {
-				t.Fatalf("wire_profile_contract: %s: §11.5 %s table row %v has %d cells, want 2", wireProfileDocRelPath, tableName, row, len(row))
+				t.Fatalf("wire_profile_contract: %s: §11.5 %s %s table row %v has %d cells, want 2", wireProfileDocRelPath, scopeLabel, tableName, row, len(row))
 			}
 			image := wireProfileStripCell(row[0])
 			result := wireProfileStripCell(row[1])
 			if result != "PASS" {
-				t.Fatalf("wire_profile_contract: %s: §11.5 %s table: image %s has result %q, want exactly PASS", wireProfileDocRelPath, tableName, image, result)
+				t.Fatalf("wire_profile_contract: %s: §11.5 %s %s table: image %s has result %q, want exactly PASS", wireProfileDocRelPath, scopeLabel, tableName, image, result)
 			}
 			gotImages = append(gotImages, image)
 		}
 		sort.Strings(gotImages)
 		if !stringSlicesEqual(gotImages, wantImages) {
-			t.Fatalf("wire_profile_contract: %s: §11.5 %s table names images %v, want exactly the audited set %v", wireProfileDocRelPath, tableName, gotImages, wantImages)
+			t.Fatalf("wire_profile_contract: %s: §11.5 %s %s table names images %v, want exactly the audited set %v", wireProfileDocRelPath, scopeLabel, tableName, gotImages, wantImages)
 		}
 	}
 
-	assertImageResultTable("Image")
+	assertImageResultTable("Image", "Supported ClickHouse matrix", matrixPart)
+	assertImageResultTable("Image", "HA", haPart)
 
 	const sessionProbeNeedle = "**Session-probe result:** `PASS`"
-	if !strings.Contains(phase3CollapseWhitespace(section), sessionProbeNeedle) {
+	if !strings.Contains(phase3CollapseWhitespace(haPart), sessionProbeNeedle) {
 		t.Fatalf("wire_profile_contract: %s: §11.5 must record a session-probe result", wireProfileDocRelPath)
 	}
 }
 
 // TestWireProfileContract_Phase3EvidenceWireVerify requires §11.5 to record
 // the wire-capture Phase 3 policy ("generation: frozen", never new
-// provenance) and a verify result, per the plan's "Wire-capture fixture
-// disposition" and "Recorded fields" sections.
+// provenance), a verify command, and an explicit PASS result, per the
+// plan's "Wire-capture fixture disposition" and "Recorded fields" sections.
+// A prior version of this test stopped short of the PASS check: it
+// confirmed the command and "generation: frozen" were recorded but never
+// looked for "**Result:** `PASS`" under "Wire-capture verification", so a
+// recorded FAIL (or a missing Result line entirely) would have passed this
+// test just as cleanly as the doc's actual, correct PASS.
 func TestWireProfileContract_Phase3EvidenceWireVerify(t *testing.T) {
 	root, err := moduleRoot()
 	if err != nil {
@@ -2136,6 +2180,16 @@ func TestWireProfileContract_Phase3EvidenceWireVerify(t *testing.T) {
 	}
 	if !strings.Contains(flat, "capture-ldap-wire.sh") || !strings.Contains(flat, "--mode verify") {
 		t.Fatalf("wire_profile_contract: %s: §11.5 must record the --mode verify capture-ldap-wire.sh command", wireProfileDocRelPath)
+	}
+
+	const wireVerifyHeading = "**Wire-capture verification**"
+	verifyIdx := strings.Index(section, wireVerifyHeading)
+	if verifyIdx < 0 {
+		t.Fatalf("wire_profile_contract: %s: §11.5 has no %q subsection", wireProfileDocRelPath, wireVerifyHeading)
+	}
+	const wireVerifyResultNeedle = "**Result:** `PASS`"
+	if !strings.Contains(phase3CollapseWhitespace(section[verifyIdx:]), wireVerifyResultNeedle) {
+		t.Fatalf("wire_profile_contract: %s: §11.5 %q subsection must explicitly record %q", wireProfileDocRelPath, wireVerifyHeading, wireVerifyResultNeedle)
 	}
 }
 
