@@ -36,17 +36,25 @@ package securitytest
 //     shell command at all) overwriting the artifact by destination alone.
 //     This is still a textual, non-path-resolving check, not a Dockerfile
 //     semantics interpreter: it recognizes a COPY/ADD destination of exactly
-//     /out/ch-oauth-ldap or exactly the bare directory /out/, but does not
+//     /out/ch-oauth-ldap or exactly the bare directory /out/, in either
+//     Dockerfile's ordinary shell form or its JSON-array ("exec") form (e.g.
+//     `COPY --from=legacy ["/legacy/ch-oauth-ldap", "/out/ch-oauth-ldap"]` —
+//     a shape a naive last-whitespace-token split cannot see, since the
+//     token comes out as `"/out/ch-oauth-ldap"]` with the quote and bracket
+//     still attached; a JSON-array destination that fails to decode is
+//     treated as a writer unconditionally, fail closed), but does not
 //     resolve any other directory-destination form (e.g. a multi-level
 //     subdirectory, a `--chown`-only rewrite, or a later RUN `mv`/symlink
-//     retargeting the file after the COPY lands) — see copyOrAddWritesTo's
-//     doc comment for the exact boundary.
+//     retargeting the file after the COPY lands) — see
+//     copyOrAddDestination's and copyOrAddWritesTo's doc comments for the
+//     exact boundary.
 //     TestPhase3SelectorContract_ClassifierCatchesSecondUntaggedHelperBuild,
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCompoundRunOverwrite,
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesNonGoBuildOverwrite,
 //     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesGoInstallOverwrite,
+//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCopyOverwrite,
 //     and
-//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCopyOverwrite
+//     TestPhase3SelectorContract_ArtifactWriterDetectionCatchesJSONArrayCopyOverwrite
 //     are this check's sabotage cases, against synthetic content;
 //     TestPhase3SelectorContract_RealDockerfileHasNoCopyOrAddArtifactWriters
 //     is its negative control against the real, checked-in Dockerfile.
@@ -85,6 +93,7 @@ package securitytest
 // selects is the one that actually reaches the shipped image.
 
 import (
+	"encoding/json"
 	"os"
 	"path"
 	"path/filepath"
@@ -430,45 +439,91 @@ func dockerfileArtifactWriters(content, outputPath string) []string {
 	return writers
 }
 
-// copyOrAddWritesTo reports whether a single COPY or ADD Dockerfile
-// instruction writes to outputPath. Its destination is the instruction's
-// last whitespace-separated field (COPY/ADD's own syntax always puts the
-// destination last, after any `--from=`/`--chown=` flags and every source
-// argument), and this recognizes exactly two destination shapes: outputPath
-// itself, or outputPath's parent directory written in trailing-slash
-// directory-destination form (e.g. `COPY --from=legacy /legacy/ch-oauth-ldap
-// /out/`). The second shape is deliberately coarse, not a path resolver: it
-// flags ANY COPY/ADD landing directly in outputPath's parent directory,
-// regardless of what the source is actually named, rather than computing the
-// resulting filename from the source's basename (which real Dockerfile COPY
-// semantics would require, and which the surgical fix this function exists
-// for explicitly does not attempt to build). A COPY/ADD into any deeper
-// subdirectory, or one whose effect on outputPath depends on a later RUN
-// `mv`/symlink, is out of scope — see this file's header comment for that
-// boundary stated in full.
-func copyOrAddWritesTo(instr, outputPath string) bool {
+// copyOrAddDestination extracts a single COPY or ADD instruction's
+// destination argument, handling both of Dockerfile's instruction forms.
+// isCopyOrAdd is false when instr is not a COPY/ADD instruction at all.
+//
+// In the ordinary shell form, the destination is the instruction's last
+// whitespace-separated field (COPY/ADD's own syntax always puts it last,
+// after any `--from=`/`--chown=` flags and every source argument).
+//
+// In Dockerfile's JSON-array ("exec") form — `COPY ["<src>", ...,
+// "<dest>"]`, with the same optional flags preceding the bracket —
+// whitespace-splitting is meaningless: for
+// `COPY --from=legacy ["/legacy/ch-oauth-ldap", "/out/ch-oauth-ldap"]` the
+// last whitespace-separated token is `"/out/ch-oauth-ldap"]`, quote and
+// bracket still attached, which matches neither comparison a caller would
+// make against a bare path. This form is detected by the presence of `[`
+// anywhere in the instruction and decoded as JSON. malformed is true when
+// the JSON-array form is present but fails to decode as a non-empty JSON
+// string array: callers must treat that as "destination unknown, assume the
+// worst" (a writer / a match) rather than silently reporting no destination
+// — an unparseable-but-present exec-form array is exactly the shape that
+// would otherwise let a COPY/ADD sabotage go undetected by this checker.
+func copyOrAddDestination(instr string) (dest string, isCopyOrAdd, malformed bool) {
 	if !strings.HasPrefix(instr, "COPY ") && !strings.HasPrefix(instr, "ADD ") {
-		return false
+		return "", false, false
+	}
+	if idx := strings.IndexByte(instr, '['); idx >= 0 {
+		var elems []string
+		if err := json.Unmarshal([]byte(instr[idx:]), &elems); err != nil || len(elems) == 0 {
+			return "", true, true
+		}
+		return elems[len(elems)-1], true, false
 	}
 	fields := strings.Fields(instr)
 	if len(fields) < 3 {
 		// keyword + at least one source + one destination.
+		return "", true, false
+	}
+	return fields[len(fields)-1], true, false
+}
+
+// copyOrAddWritesTo reports whether a single COPY or ADD Dockerfile
+// instruction writes to outputPath — in either the shell form or the
+// JSON-array ("exec") form; see copyOrAddDestination. Given a destination,
+// this recognizes exactly two shapes: outputPath itself, or outputPath's
+// parent directory written in trailing-slash directory-destination form
+// (e.g. `COPY --from=legacy /legacy/ch-oauth-ldap /out/`). The second shape
+// is deliberately coarse, not a path resolver: it flags ANY COPY/ADD landing
+// directly in outputPath's parent directory, regardless of what the source
+// is actually named, rather than computing the resulting filename from the
+// source's basename (which real Dockerfile COPY semantics would require,
+// and which the surgical fix this function exists for explicitly does not
+// attempt to build). A COPY/ADD into any deeper subdirectory, or one whose
+// effect on outputPath depends on a later RUN `mv`/symlink, is out of scope
+// — see this file's header comment for that boundary stated in full. A
+// JSON-array form that fails to parse is treated as a writer unconditionally
+// (fail closed), regardless of outputPath.
+func copyOrAddWritesTo(instr, outputPath string) bool {
+	dest, isCopyOrAdd, malformed := copyOrAddDestination(instr)
+	if !isCopyOrAdd {
 		return false
 	}
-	dest := fields[len(fields)-1]
+	if malformed {
+		return true
+	}
 	return dest == outputPath || dest == path.Dir(outputPath)+"/"
 }
 
 // dockerfileCopyInstructionsInto returns every COPY instruction in content
-// whose destination (its last field) is exactly destPath.
+// whose destination is exactly destPath — recognizing both the shell form
+// and the JSON-array form (see copyOrAddDestination). A COPY whose
+// JSON-array destination fails to parse is included unconditionally (fail
+// closed): this function backs the runtime-stage "exactly one COPY writes
+// here" check, so an unparseable exec-form COPY must count as a possible
+// second writer rather than being silently invisible to it.
 func dockerfileCopyInstructionsInto(content, destPath string) []string {
 	var matches []string
 	for _, instr := range dockerfileInstructions(content) {
 		if !strings.HasPrefix(instr, "COPY ") {
 			continue
 		}
-		fields := strings.Fields(instr)
-		if len(fields) > 0 && fields[len(fields)-1] == destPath {
+		dest, isCopyOrAdd, malformed := copyOrAddDestination(instr)
+		if !isCopyOrAdd {
+			continue
+		}
+		if malformed || dest == destPath {
 			matches = append(matches, instr)
 		}
 	}
@@ -650,10 +705,48 @@ func TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCopyOverwrite(t *t
 	}
 }
 
+// TestPhase3SelectorContract_ArtifactWriterDetectionCatchesJSONArrayCopyOverwrite
+// reproduces the accepted review finding exactly: a COPY (an ADD is
+// equivalent) written in Dockerfile's JSON-array ("exec") form —
+// `COPY --from=legacy ["/legacy/ch-oauth-ldap", "/out/ch-oauth-ldap"]` —
+// placed after the canonical tagged `go build`. Before copyOrAddDestination
+// parsed the JSON-array form, copyOrAddWritesTo's `strings.Fields(instr)`
+// last-token logic computed `"/out/ch-oauth-ldap"]` (quote and closing
+// bracket still attached) for this instruction, which matched neither
+// outputPath nor its trailing-slash directory form, so this exact sabotage
+// shape was silently invisible to dockerfileArtifactWriters and
+// TestPhase3SelectorContract_IntegrationDockerfileTagsOnlyTheHelperBuild
+// would have reported exactly one writer despite the integration image
+// containing an overwritten artifact. dockerfileArtifactWriters must now
+// report both writers, exactly as it does for the shell-form COPY sabotage
+// in TestPhase3SelectorContract_ArtifactWriterDetectionCatchesCopyOverwrite.
+func TestPhase3SelectorContract_ArtifactWriterDetectionCatchesJSONArrayCopyOverwrite(t *testing.T) {
+	const sabotaged = "RUN CGO_ENABLED=0 go build -tags=phase3profile -o /out/ch-oauth-ldap ./cmd/ch-oauth-ldap\n" +
+		`COPY --from=legacy ["/legacy/ch-oauth-ldap", "/out/ch-oauth-ldap"]` + "\n"
+	writers := dockerfileArtifactWriters(sabotaged, phase3HelperArtifactPath)
+	if len(writers) != 2 {
+		t.Fatalf("dockerfileArtifactWriters: expected both the tagged go build and the trailing JSON-array COPY overwrite of %s to be detected, got %d: %v", phase3HelperArtifactPath, len(writers), writers)
+	}
+	sawGoBuild, sawCopy := false, false
+	for _, w := range writers {
+		switch {
+		case strings.Contains(w, "go build"):
+			sawGoBuild = true
+		case strings.HasPrefix(w, "COPY "):
+			sawCopy = true
+		}
+	}
+	if !sawGoBuild || !sawCopy {
+		t.Fatalf("dockerfileArtifactWriters: expected one go-build writer and one JSON-array COPY writer, got: %v", writers)
+	}
+}
+
 // TestCopyOrAddWritesTo unit-tests copyOrAddWritesTo's destination matching
 // directly, including the ADD form, the trailing-slash directory-destination
-// form, and the negative cases that prove it does not over-match a COPY/ADD
-// that does not target /out/ch-oauth-ldap at all.
+// form, the JSON-array ("exec") form (with and without a preceding
+// `--from=` flag), the fail-closed behavior for a malformed JSON-array
+// instruction, and the negative cases that prove it does not over-match a
+// COPY/ADD that does not target /out/ch-oauth-ldap at all.
 func TestCopyOrAddWritesTo(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -667,6 +760,12 @@ func TestCopyOrAddWritesTo(t *testing.T) {
 		{"COPY into an unrelated directory does not match", "COPY --from=legacy /legacy/ch-oauth-ldap /elsewhere/ch-oauth-ldap", false},
 		{"COPY into a deeper subdirectory of /out does not match (out of scope by design)", "COPY --from=legacy /legacy/ch-oauth-ldap /out/nested/ch-oauth-ldap", false},
 		{"a RUN instruction is not a COPY/ADD at all", phase3ExpectedHelperBuildCommand, false},
+		{"JSON-array COPY with --from= exact destination match", `COPY --from=legacy ["/legacy/ch-oauth-ldap", "/out/ch-oauth-ldap"]`, true},
+		{"JSON-array ADD exact destination match", `ADD ["/legacy/ch-oauth-ldap", "/out/ch-oauth-ldap"]`, true},
+		{"JSON-array COPY trailing-slash directory destination match", `COPY --from=legacy ["/legacy/ch-oauth-ldap", "/out/"]`, true},
+		{"JSON-array COPY into an unrelated directory does not match", `COPY --from=legacy ["/legacy/ch-oauth-ldap", "/elsewhere/ch-oauth-ldap"]`, false},
+		{"malformed JSON-array COPY fails closed (reported as a writer)", `COPY --from=legacy ["/legacy/ch-oauth-ldap", "/out/ch-oauth-ldap"`, true},
+		{"empty JSON-array COPY fails closed (reported as a writer)", `COPY []`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -731,6 +830,25 @@ func TestPhase3SelectorContract_RuntimeCopyDetectionCatchesDuplicate(t *testing.
 	copies := dockerfileCopyInstructionsInto(sabotaged, phase3HelperRuntimePath)
 	if len(copies) != 2 {
 		t.Fatalf("dockerfileCopyInstructionsInto: expected both duplicate COPY instructions into %s to be detected, got %d: %v", phase3HelperRuntimePath, len(copies), copies)
+	}
+}
+
+// TestPhase3SelectorContract_RuntimeCopyDetectionCatchesJSONArrayDuplicate
+// reproduces the accepted review finding's second half: the same
+// fields[-1]-on-whitespace bypass that let a JSON-array COPY hide from the
+// build-stage artifact-writer check (see
+// TestPhase3SelectorContract_ArtifactWriterDetectionCatchesJSONArrayCopyOverwrite)
+// also defeated dockerfileCopyInstructionsInto, which backs the final-image
+// "exactly one COPY writes /bin/ch-oauth-ldap" check. A second COPY written
+// in JSON-array form must be detected as a duplicate destination writer, not
+// silently dropped for having its destination arrive as `"/bin/
+// ch-oauth-ldap"]` instead of a bare path.
+func TestPhase3SelectorContract_RuntimeCopyDetectionCatchesJSONArrayDuplicate(t *testing.T) {
+	const sabotaged = "COPY --from=build /out/ch-oauth-ldap /bin/ch-oauth-ldap\n" +
+		`COPY --from=build ["/out/ch-oauth-ldap-legacy", "/bin/ch-oauth-ldap"]` + "\n"
+	copies := dockerfileCopyInstructionsInto(sabotaged, phase3HelperRuntimePath)
+	if len(copies) != 2 {
+		t.Fatalf("dockerfileCopyInstructionsInto: expected both the shell-form and JSON-array-form COPY instructions into %s to be detected, got %d: %v", phase3HelperRuntimePath, len(copies), copies)
 	}
 }
 

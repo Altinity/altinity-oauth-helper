@@ -73,6 +73,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -374,6 +375,51 @@ var generalLDAPDenylistPrefixes = []string{
 	"github.com/go-ldap/ldap/v3",
 	"github.com/go-asn1-ber/asn1-ber",
 	"github.com/Azure/go-ntlmssp",
+}
+
+// TestGeneralLDAPDenylistPrefixes_ExactlyTheRequiredFive guards
+// generalLDAPDenylistPrefixes itself, independent of any of its three real
+// consumers (TestDependencyContract_ProductionClosureHasNoGeneralLDAP's
+// legacyUntilPhase4 loop below, isGeneralLDAPDependency, and — through
+// isGeneralLDAPDependency — TestDependencyContract_
+// Phase3ReplacementClosureHasNoGeneralLDAP and profile_dependency_contract_
+// test.go's TestDependencyContract_ProfileClosureHasRequiredPrimitiveAndNoGeneralLDAP).
+// All three derive their entire check from ranging over this one mutable
+// package-level slice, so a one-line edit shortening or emptying it would
+// silently defang every one of them with no compile error: an emptied slice
+// makes the legacyUntilPhase4 loop's body never execute (vacuously
+// passing — checking nothing) and makes isGeneralLDAPDependency
+// unconditionally return false (recognizing nothing). This test is the
+// independent assertion that closes that gap by comparing the literal
+// against a separately declared want-list, non-emptiness, and uniqueness —
+// not by re-deriving expectations from generalLDAPDenylistPrefixes itself,
+// which could never detect a change to it.
+func TestGeneralLDAPDenylistPrefixes_ExactlyTheRequiredFive(t *testing.T) {
+	want := []string{
+		"github.com/vjeantet/ldapserver",
+		"github.com/vjeantet/goldap",
+		"github.com/go-ldap/ldap/v3",
+		"github.com/go-asn1-ber/asn1-ber",
+		"github.com/Azure/go-ntlmssp",
+	}
+	if len(generalLDAPDenylistPrefixes) != len(want) {
+		t.Fatalf("generalLDAPDenylistPrefixes: expected exactly %d prefixes, got %d: %v",
+			len(want), len(generalLDAPDenylistPrefixes), generalLDAPDenylistPrefixes)
+	}
+	if !reflect.DeepEqual(generalLDAPDenylistPrefixes, want) {
+		t.Fatalf("generalLDAPDenylistPrefixes: expected exactly %v (in this order), got %v",
+			want, generalLDAPDenylistPrefixes)
+	}
+	seen := make(map[string]bool, len(generalLDAPDenylistPrefixes))
+	for _, prefix := range generalLDAPDenylistPrefixes {
+		if prefix == "" {
+			t.Fatalf("generalLDAPDenylistPrefixes: contains an empty prefix, which would match every non-empty dependency string via matchesGeneralLDAPPrefix's HasPrefix(dep, \"\"+\"/\") branch")
+		}
+		if seen[prefix] {
+			t.Fatalf("generalLDAPDenylistPrefixes: prefix %q is duplicated — every entry must be unique", prefix)
+		}
+		seen[prefix] = true
+	}
 }
 
 // matchesGeneralLDAPPrefix reports whether dep is prefix itself or one of
