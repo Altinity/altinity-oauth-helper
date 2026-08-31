@@ -823,27 +823,53 @@ returns to ADR #32 for reconsideration.
 | 9  | `ACCEPT` | hardening: resource (deliberate 64 KiB outbound bound; not a legacy-parity claim — legacy has none) | New 64 KiB outbound PDU cap fails closed using `adminLimitExceeded`. |
 | 10 | `ACCEPT` | hardening: config (deliberate operator-config check; not a legacy-parity claim — legacy only rejects empty/whitespace) | Startup `UserRDNAttribute` descriptor check is consistent with the restricted structural DN model. |
 
-### 11.4 Phase 4's bounded test-only cursor supersedes this document's oracle
+### 11.4 The two permanent bounded test-only cursors that own independent-decoder evidence
 
 §10's `TestClickHouseWireCryptobyteDecision` characterizes each fixture with
 `cryptobyte` itself, but a cryptobyte characterization failure only counts
 as evidence (the local-ber-cursor justification) once it is corroborated by
-`independentlyWellFormedBER` — the vendored, patched goldap decoder — as a
-*second, structurally independent* decoder proving fixture well-formedness
-(see `internal/ldap/clickhouse_wire_cryptobyte_test.go`'s own doc comments).
-Phase 2's plan deliberately selects, for Phase 4, a **bounded test-only
-cursor** as *that independent goldap oracle's* replacement — not cryptobyte,
-and not the Phase 2 `profile` decoder — because using the eventual
-production decoder to prove fixture well-formedness for itself would be
-self-referential. Phase 4 must therefore: delete
-`internal/ldap/profile/differential_test.go`; replace this
-document's/`internal/ldap`'s independent goldap fixture decoder with a small,
-bounded, test-only definite-length structural cursor; preserve the
-well-formedness/filter-structure anti-drift assertions the current oracle
-provides; and never use the production `profile` package as that
-independent oracle. This explicitly supersedes the alternative the Phase 1
-ship log left open (replacing the oracle with the production decoder
-itself).
+a *second, structurally independent* decoder proving fixture
+well-formedness. Through Phase 3 that second decoder was
+`independentlyWellFormedBER`, the vendored, patched goldap decoder. Phase 4
+deleted the vendored `third_party/goldap`/`third_party/ldapserver` forks
+along with every production and test dependency on them, and replaced that
+single goldap-backed oracle with two separately hand-written, bounded,
+test-only BER cursors that share no decoding helpers with each other, with
+cryptobyte, or with the production `internal/ldap/profile` decoder — using
+the eventual production decoder to prove fixture well-formedness for itself
+would be self-referential, which is exactly what both cursors exist to
+avoid.
+
+**Oracle A** — fixture well-formedness / primitive-selection evidence —
+lives permanently at
+`internal/ldap/profile/clickhouse_wire_cryptobyte_test.go` (moved there,
+package `profile`, from this document's Phase 1 location under
+`internal/ldap`). Its `oracleAWellFormed` cursor independently checks
+exactly the supported fixture shapes named in §10's own scope (outer
+LDAPMessage sequence, bounded definite lengths, the minimal non-negative
+MessageID encoding including the 127/128 boundary, the four supported
+operations, Bind, the fixed Search fields/filter/attributes, empty Unbind,
+a valid positive Abandon target, no trailing bytes) and preserves the same
+three-way cryptobyte/local-ber-cursor/malformed verdict `§10` always used,
+including the mutation proving the cursor rejects malformed input rather
+than rubber-stamping it.
+
+**Oracle B** — wire-profile semantic decoder evidence — lives permanently
+at `internal/securitytest/wire_oracle_b_test.go`. It decodes only what
+`wire_profile_contract_test.go`'s own assertions need — Bind DN,
+`derefAliases`, the Controls presence/criticality sentinel, and the outer
+Search filter's operator and its two `equalityMatch` children — and
+requires the fixed `AND(objectClass==groupOfNames, member==<Bind DN>)`
+shape (either child order), retaining the AND→OR, `derefAliases`, and
+Controls sabotage cases that used to run against goldap.
+
+`internal/ldap/profile/differential_test.go`, the old/new differential
+oracle against the vendored goldap decoder, is deleted along with the
+vendored forks it depended on; its permanent successors are Oracle A,
+Oracle B, the committed frozen ClickHouse corpus, profile replay, the
+profile unit/adversarial/fuzz suites, real ClickHouse integration, HA, and
+wire verify — not a second general BER dependency and not the production
+`profile` package standing in as its own oracle.
 
 ### 11.4a Wire-capture verification policy (Phase 3)
 
@@ -880,6 +906,25 @@ unchanged. Phase 3's policy toward it is deliberately narrow:
 
 This distinction is also recorded in
 `integration/clickhouse/README.md`'s own "Wire capture" section.
+
+### §11.5 is historical; §11.6 is the current production certification
+
+§11.5 immediately below is preserved exactly as Phase 3's Stage B manual
+certification recorded it, byte-for-byte, between its own marker pair. It
+is not, and after Phase 4 must never again be read as, a live assertion
+about the current tree: the certified surface it describes (the
+`phase3profile`-tagged, dual-adapter composition) no longer exists.
+`internal/securitytest/wire_profile_contract_test.go`'s `Phase3Evidence*`
+tests check only that §11.5's recorded facts remain unchanged from what
+Phase 3 attested — never that today's tree still matches them.
+
+§11.6, added below after Phase 4's own manual certification completes, is
+the current production certification of record: it describes the ordinary,
+untagged `internal/ldap/profile`-backed production composition this
+document's earlier sections now describe as shipped, and its own live
+digest contract binds that section's recorded facts to the exact source
+tree certified — the same role §11.5 played for Phase 3, for the tree
+Phase 3 actually certified.
 
 <!-- phase3-release-gate-evidence:start -->
 ### 11.5 Phase 3 replacement release-gate evidence
