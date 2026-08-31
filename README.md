@@ -401,7 +401,7 @@ access.
 
 **CI (default):** [`.github/workflows/build-ch-oauth-ldap.yml`](.github/workflows/build-ch-oauth-ldap.yml)
 builds and pushes automatically on every push to `main` that touches
-`cmd/ch-oauth-ldap/**`, `internal/**`, `third_party/**`, `go.mod`/`go.sum`,
+`cmd/ch-oauth-ldap/**`, `internal/**`, `go.mod`/`go.sum`,
 or `Dockerfile.ch-oauth-ldap` — tag `ldap-<short-sha>`, multi-arch
 (amd64+arm64), pushed to `ghcr.io/altinity/ch-oauth-ldap` using the repo's
 own `GITHUB_TOKEN`. Trigger a one-off build with a custom tag prefix (default

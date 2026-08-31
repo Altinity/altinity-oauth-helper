@@ -137,7 +137,7 @@
 #     - .github/workflows/build-ch-oauth-ldap.yml (plan sections 51, A7):
 #       image path, `main`-only push plus workflow_dispatch with
 #       tag_prefix reaching the shell only through `env:` (never inlined in
-#       `run:`), no pull_request trigger, all seven path filters, the
+#       `run:`), no pull_request trigger, all six path filters, the
 #       main.version stamp, amd64/arm64, immutable-tag-only (no `:main` /
 #       `:latest`), per-arch $RUNNER_TEMP/runner.temp context and Docker
 #       build `context:` that is never checkout root, the binary chmod
@@ -1680,10 +1680,9 @@ _ia_workflow_assertions() {
     # (COPY preserves mode; the image runs as UID 65532).
     assert_match "$workflow" 'chmod 0755 "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/ch-oauth-ldap"'
 
-    # All seven path filters (plan section 25).
+    # All six path filters (plan section 25).
     assert_match "$workflow" 'cmd/ch-oauth-ldap/**'
     assert_match "$workflow" 'internal/**'
-    assert_match "$workflow" 'third_party/**'
     assert_match "$workflow" 'go.mod'
     assert_match "$workflow" 'go.sum'
     assert_match "$workflow" 'Dockerfile.ch-oauth-ldap'
