@@ -50,7 +50,16 @@
 # 24.8/25.3 (both predate #79099) and passes on 25.8/26.3 (both contain
 # it), while the view-context-copy defect (case 2) reproduces on every one
 # of the four, including 25.8/26.3 where the base-table oracle already
-# passes.
+# passes. 26.8 was measured live when it became a tracked line and matches
+# 25.8/26.3 exactly: base-table propagation passes, the VIEW canary still
+# fails (#116840 remains open upstream), so five lines now agree.
+#
+# Adding 26.8 did surface one genuinely NEW upstream change, unrelated to
+# either bug: ClickHouse's HTTP interface maps an ACCESS_DENIED exception
+# to HTTP 403 on 26.8, where 24.8/25.8/26.3 map it to HTTP 500. That is a
+# status-code mapping change, not a propagation regression — the response
+# body is byte-for-byte the shape scenario H's negative control expects.
+# See remote_access_denied_http_status_for below.
 #
 # Both are real ClickHouse defects, not fixture misconfiguration — manually
 # granting the exact privilege the error names, directly to the role, does
@@ -192,7 +201,7 @@
 # "ClickHouse overflow consequence is empirical" in that plan. The two
 # functions below were populated by running acceptance scenario G'
 # (integration/clickhouse/scenarios/65-ldap-search-limits.sh) in a
-# temporary, permissive characterization mode against both required
+# temporary, permissive characterization mode against the two then-required
 # Altinity Stable images, recording what was actually observed, and only
 # then flipping the scenario to enforce it (see that scenario file's own
 # header for the exact recorded observations this file encodes).
@@ -212,7 +221,7 @@
 #                                    prints the exact decoded Search-request
 #                                    tuple ClickHouse's own LDAP client sent
 #                                    for scenario G', as measured live
-#                                    against both required images from the
+#                                    against each tracked image from the
 #                                    helper's own T2 telemetry (size_limit /
 #                                    time_limit / types_only) —
 #                                    "size_limit=N time_limit=N
@@ -275,18 +284,21 @@ expectation_for() {
     prefix="$(ch_build_prefix "$EXPECTED_CH_VERSION")"
     case "${key}:${prefix}" in
     # Full matrix confirmed live: 24.8 and 25.3 predate ClickHouse #79099
-    # (base-table propagation fails on both); 25.8 and 26.3 contain the fix
-    # (base-table propagation passes on both). The view-context-copy defect
-    # (H_view_propagation) reproduces on every one of these four lines,
-    # including 25.8/26.3 where the base-table oracle already passes.
+    # (base-table propagation fails on both); 25.8, 26.3 and 26.8 contain
+    # the fix (base-table propagation passes on all three). The
+    # view-context-copy defect (H_view_propagation) reproduces on every one
+    # of these five lines, including the three where the base-table oracle
+    # already passes — ClickHouse/ClickHouse#116840 is still open upstream.
     H_base_table_propagation:24.8) printf 'expected_fail' ;;
     H_base_table_propagation:25.3) printf 'expected_fail' ;;
     H_base_table_propagation:25.8) printf 'must_pass' ;;
     H_base_table_propagation:26.3) printf 'must_pass' ;;
+    H_base_table_propagation:26.8) printf 'must_pass' ;;
     H_view_propagation:24.8) printf 'expected_fail' ;;
     H_view_propagation:25.3) printf 'expected_fail' ;;
     H_view_propagation:25.8) printf 'expected_fail' ;;
     H_view_propagation:26.3) printf 'expected_fail' ;;
+    H_view_propagation:26.8) printf 'expected_fail' ;;
     *)
         die "expectation_for: no recorded expectation for scenario key '$key' against ClickHouse build prefix '$prefix' (full version: $EXPECTED_CH_VERSION) — add one to integration/clickhouse/lib/expectations.sh before running this suite against this build"
         ;;
@@ -301,7 +313,7 @@ expectation_reason() {
         printf 'ClickHouse #78791, fixed upstream by #79099 ("Fix passing of external roles in interserver query", not backported to this build — confirmed on both 24.8 and 25.3): a pushed external role is stored in current_roles and filtered against the ephemeral users own (empty) local grants, so it never authorizes anything'
         ;;
     H_view_propagation)
-        printf 'ContextData copy constructor omits external_roles when StorageView clones the query context for a normal view; the subsequent setSettings() call forces access-rights recalculation with no external_roles to reconstruct the pushed role from — reproduces on every build tested (24.8, 25.3, 25.8, 26.3), including ones where the base-table oracle already passes. Filed upstream as ClickHouse/ClickHouse#116840'
+        printf 'ContextData copy constructor omits external_roles when StorageView clones the query context for a normal view; the subsequent setSettings() call forces access-rights recalculation with no external_roles to reconstruct the pushed role from — reproduces on every build tested (24.8, 25.3, 25.8, 26.3, 26.8), including ones where the base-table oracle already passes. Filed upstream as ClickHouse/ClickHouse#116840'
         ;;
     *)
         die "expectation_reason: no reason text recorded for key '$key'"
@@ -352,8 +364,58 @@ oauth_run_retry_transient() {
 PHASE3_REMOTE_DENIAL_MARKER="Received from clickhouse-remote:9000"
 
 # expect_remote_access_denied LABEL — see contract above.
+# remote_access_denied_http_status_for — the HTTP status ClickHouse's own
+# HTTP interface maps an ACCESS_DENIED (error code 497) exception to, per
+# build prefix. Measured live, never assumed, and keyed per line for the
+# same reason every other table in this file is: it is a property of the
+# ClickHouse version, and a build with no recorded entry must die rather
+# than inherit one.
+#
+# This exists because the mapping CHANGED upstream. 24.8, 25.8 and 26.3 all
+# return HTTP 500 for a remote ACCESS_DENIED; 26.8 returns HTTP 403. Both
+# were confirmed live against real containers by capturing the actual
+# response body, which on 26.8 reads:
+#
+#   Code: 497. DB::Exception: Received from clickhouse-remote:9000.
+#   DB::Exception: alice@example.com: Not enough privileges. ...
+#   (ACCESS_DENIED) (version 26.8.1.2041 (official build))
+#
+# — i.e. the negative control behaves EXACTLY as designed on 26.8; only the
+# status code differs. Hardcoding 500 would have mis-reported an upstream
+# status-mapping change as a role-propagation regression.
+#
+# Note what this costs and why the body checks below carry the real weight.
+# On 26.8, ACCESS_DENIED (403) and AUTHENTICATION_FAILED (516, which G'
+# already observes as 403 on every line) share a status, so the status
+# alone no longer separates "the remote denied the read" from "the caller
+# never authenticated". It never really did the discriminating work: the
+# two body requirements — an ACCESS_DENIED marker AND the remote-origin
+# marker — are what prove the property, and an AUTHENTICATION_FAILED body
+# carries neither. The status stays asserted, per line, so a genuinely new
+# failure shape still stops the suite instead of sliding through.
+remote_access_denied_http_status_for() {
+    local prefix
+    prefix="$(ch_build_prefix "$EXPECTED_CH_VERSION")"
+    case "$prefix" in
+    24.8) printf '500' ;;
+    25.3) printf '500' ;;
+    25.8) printf '500' ;;
+    26.3) printf '500' ;;
+    26.8) printf '403' ;;
+    *)
+        die "remote_access_denied_http_status_for: no recorded ACCESS_DENIED HTTP status for ClickHouse build prefix '$prefix' (full version: $EXPECTED_CH_VERSION) — measure it live (run the scenario H negative control and read the actual status) and add it to integration/clickhouse/lib/expectations.sh before running this suite against this build"
+        ;;
+    esac
+}
+
 expect_remote_access_denied() {
     local label="$1"
+    local want_status
+    # Assigned as its own statement so a die() inside the command
+    # substitution aborts THIS shell rather than only the subshell — the
+    # same hazard search_limit_overflow_wire_tuple's call site documents.
+    want_status="$(remote_access_denied_http_status_for)" \
+        || die "$label: remote_access_denied_http_status_for failed for build $EXPECTED_CH_VERSION"
     # Uses oauth_body_diagnostics (lib/oauth.sh, sourced before this file by
     # every scenario file that needs both — see that function's own
     # contract) instead of interpolating $CH_LAST_BODY directly: die()'s
@@ -361,8 +423,8 @@ expect_remote_access_denied() {
     # run.sh, a stream that survives this run's cleanup and that scenario
     # I's leak scan never gets a chance to check once a die() has aborted
     # the suite.
-    [ "$CH_LAST_STATUS" = "500" ] \
-        || die "$label: expected a remote ACCESS_DENIED failure shape (HTTP 500), got HTTP $CH_LAST_STATUS ($(oauth_body_diagnostics))"
+    [ "$CH_LAST_STATUS" = "$want_status" ] \
+        || die "$label: expected a remote ACCESS_DENIED failure shape (HTTP $want_status for this build), got HTTP $CH_LAST_STATUS ($(oauth_body_diagnostics))"
     case "$CH_LAST_BODY" in
     *ACCESS_DENIED*) : ;;
     *) die "$label: expected body to contain ACCESS_DENIED ($(oauth_body_diagnostics))" ;;
@@ -404,8 +466,8 @@ assert_propagation_outcome() {
 }
 
 # search_limit_overflow_expectation_for — see contract above. Populated by
-# running scenario G' against both required Altinity Stable images and
-# recording what was actually observed live (see
+# running scenario G' against every tracked image and recording what was
+# actually observed live (see
 # integration/clickhouse/scenarios/65-ldap-search-limits.sh's own header):
 # on BOTH 24.8 and 25.8, a Search returning sizeLimitExceeded (result 4)
 # fails the whole LDAP simple-Bind authentication attempt outright (HTTP
@@ -426,28 +488,64 @@ search_limit_overflow_expectation_for() {
     case "$prefix" in
     24.8) printf 'auth_fails_on_size_limit_exceeded' ;;
     25.8) printf 'auth_fails_on_size_limit_exceeded' ;;
+    # 26.3/26.8 measured the same way, live, when those lines were added:
+    # both fail the whole authentication attempt (HTTP 403,
+    # AUTHENTICATION_FAILED) on a sizeLimitExceeded Search, exactly like
+    # 24.8/25.8. Four lines now share this behavior; it is still recorded
+    # per line rather than defaulted, so a fifth cannot inherit it.
+    26.3) printf 'auth_fails_on_size_limit_exceeded' ;;
+    26.8) printf 'auth_fails_on_size_limit_exceeded' ;;
     *)
         die "search_limit_overflow_expectation_for: no recorded Search-limit-overflow expectation for ClickHouse build prefix '$prefix' (full version: $EXPECTED_CH_VERSION) — add one to integration/clickhouse/lib/expectations.sh (measured live against a real container running scenario G' in characterization mode, per the phase-5 plan's process) before running scenario G' against this build"
         ;;
     esac
 }
 
-# search_limit_overflow_wire_tuple — see contract above. Both required
+# search_limit_overflow_wire_tuple — see contract above. All four tracked
 # images were observed, live, to send the identical decoded Search-request
 # tuple for scenario G' (the fixture's LDAP-directory configuration — not
-# the roles_mapping/count — governs sizeLimit/timeLimit/typesOnly, and both
-# builds share the same fixture config): sizeLimit=256 (from this fixture's
-# explicit <search_limit>256</search_limit>), timeLimit=0 (no
-# client-requested Search deadline — the examined 24.8 parser has no
-# corresponding <search_timeout> key; see ldap.xml's own header), and
-# typesOnly=false (a normal attribute-and-value Search, not a
-# names-only one).
+# the roles_mapping/count — governs sizeLimit/timeLimit/typesOnly, and all
+# four share the same fixture config): sizeLimit=256 (from this fixture's
+# explicit <search_limit>256</search_limit>), timeLimit=20, and
+# typesOnly=false (a normal attribute-and-value Search, not a names-only
+# one).
+#
+# ── timeLimit was recorded as 0 here until the 26.x lines were added; that
+# was wrong, on every line, and is corrected above ────────────────────────
+# The original entries read timeLimit=0, reasoned from the fact that this
+# configuration path has no <search_timeout> XML key for an operator to
+# set (true — do not add one, it is not read). But "no XML key" does not
+# mean "zero on the wire": with no per-call deadline requested, libldap
+# sends the HANDLE-WIDE default that LDAPClient::openConnection() already
+# installed via ldap_set_option(LDAP_OPT_TIMELIMIT, ...) — 20 seconds,
+# which docs/clickhouse-ldap-wire-profile.md §5 has documented as that
+# option's value all along — and whose §8.2 has always recorded the Search's
+# timeLimit as 20 outright. This file and that document simply contradicted
+# each other, and nothing compared them.
+#
+# Corrected from two independent directions, not one:
+#   1. the committed wire corpus — decoding SearchRequest.timeLimit
+#      straight out of internal/ldap/testdata/clickhouse-wire/<line>/
+#      success/002-search-request.ber yields the BER bytes `02 01 14`,
+#      i.e. 20, identically on all four lines (these are real captures
+#      from real ClickHouse, so this is ClickHouse's own request, not a
+#      reconstruction);
+#   2. the helper's own live T2 telemetry during a real scenario G' run,
+#      which logs `time_limit=20` — the value it decoded from the wire.
+#
+# Nothing about the suite's behavior changes: this field was recorded and
+# logged, never asserted against the telemetry, which is exactly why the
+# discrepancy survived. It is corrected rather than left alone because a
+# recorded "measurement" that contradicts the committed evidence is worse
+# than no record at all.
 search_limit_overflow_wire_tuple() {
     local prefix
     prefix="$(ch_build_prefix "$EXPECTED_CH_VERSION")"
     case "$prefix" in
-    24.8) printf 'size_limit=256 time_limit=0 types_only=false' ;;
-    25.8) printf 'size_limit=256 time_limit=0 types_only=false' ;;
+    24.8) printf 'size_limit=256 time_limit=20 types_only=false' ;;
+    25.8) printf 'size_limit=256 time_limit=20 types_only=false' ;;
+    26.3) printf 'size_limit=256 time_limit=20 types_only=false' ;;
+    26.8) printf 'size_limit=256 time_limit=20 types_only=false' ;;
     *)
         die "search_limit_overflow_wire_tuple: no recorded wire tuple for ClickHouse build prefix '$prefix' (full version: $EXPECTED_CH_VERSION) — add one to integration/clickhouse/lib/expectations.sh (measured live from the helper's own T2 Search telemetry) before running scenario G' against this build"
         ;;

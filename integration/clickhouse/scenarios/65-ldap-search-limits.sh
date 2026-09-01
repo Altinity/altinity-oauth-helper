@@ -25,7 +25,9 @@
 #      lib/expectations.sh's search_limit_overflow_expectation_for) — never
 #      assumed. Per the phase-5 plan's "Per-build outcome, not assumption"
 #      process, this scenario was FIRST run in a temporary, permissive
-#      characterization form against both required Altinity Stable images
+#      characterization form against the two Altinity Stable images
+#      tracked at the time (26.3/26.8 were measured the same way when
+#      they were added as tracked lines)
 #      to OBSERVE what each build actually does with a sizeLimitExceeded
 #      Search result, before lib/expectations.sh's two dedicated functions
 #      were populated with those measured outcomes and this file was
