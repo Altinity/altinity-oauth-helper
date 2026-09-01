@@ -1169,7 +1169,7 @@ document's plan carries.
 
 **Certification identity**
 
-- **tested_behavior_head:** `16d16142e39c2282594d2134625c86e46bfa7909`
+- **tested_behavior_head:** `fbb83ac21ef4553e429bf8d710e0382f82147db2`
 - **manual_verification_head:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the
   commit the Docker/fuzz/wire-capture suites below (Supported ClickHouse
   matrix, HA, Wire-capture verification, Fuzz smoke) were actually executed
@@ -1198,7 +1198,7 @@ document's plan carries.
   `scripts/build-ch-oauth-ldap-image.sh`,
   `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
   constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
-- **Certified-surface digest (SHA-256):** `f50f43c0a4d443c5c34c16c8bc701df437c4a8a1d2e1ce853960913bd0b365ab`
+- **Certified-surface digest (SHA-256):** `82d78be760a84047414701d92b0c10660de650795b4ab9554cf216a11f0163da`
   — computed over the same "Certified-surface anti-drift digest" file set
   §11.5 used (`certifiedSurfacePatterns`, unchanged, `third_party/**` kept
   even though the directory is now empty), reproduced 3× identically over
@@ -1223,20 +1223,57 @@ document's plan carries.
   re-run happened — every image in the tables below was re-certified against
   `manual_verification_head`, not carried forward from the head before it.
 
-  `tested_behavior_head` has since advanced one commit past
-  `manual_verification_head`, to `16d16142e39c2282594d2134625c86e46bfa7909`.
-  That commit corrects `26.8`'s recorded `clickhouse_commit` from the
-  annotated tag object `v26.8.1.2041-lts` resolves to, to the commit it
-  peels to (§2.1), touching two certified-surface files: the provenance
-  table in `capture-ldap-wire.sh` and the `clickhouse_commit` metadata field
-  in `26.8`'s `profile.json`. No captured byte, no code, and no suite
-  outcome changes — the tracked-file count stays 109, and the corrected
-  value denotes the same tree the tag always peeled to. This is the
-  behavior-preserving case these two fields exist to distinguish: the head
-  advances so the digest is genuinely the digest at the recorded head, while
-  the coordinator attestation keeps citing the commit the Docker/fuzz suites
-  were actually executed against. `--mode verify` was nonetheless re-run
-  after the correction and passed on all four lines.
+  `tested_behavior_head` has since advanced twice past
+  `manual_verification_head` — each time for a behavior-preserving
+  certified-surface edit — and now names
+  `fbb83ac21ef4553e429bf8d710e0382f82147db2`. This is the case these
+  two fields exist to distinguish: the head advances so the digest is
+  genuinely the digest at the recorded head, while the coordinator
+  attestation keeps citing the commit the Docker/fuzz suites were actually
+  executed against.
+
+  The first advance, `16d16142e39c2282594d2134625c86e46bfa7909`, corrects
+  `26.8`'s recorded `clickhouse_commit` from the annotated tag object
+  `v26.8.1.2041-lts` resolves to, to the commit it peels to (§2.1), touching
+  two certified-surface files: the provenance table in
+  `capture-ldap-wire.sh` and the `clickhouse_commit` metadata field in
+  `26.8`'s `profile.json`. No captured byte, no code, and no suite outcome
+  changes — the tracked-file count stays 109, and the corrected value
+  denotes the same tree the tag always peeled to. `--mode verify` was
+  nonetheless re-run after the correction and passed on all four lines.
+
+  The second advance, `fbb83ac21ef4553e429bf8d710e0382f82147db2`, is the
+  Dependabot module bump `golang.org/x/crypto v0.54.0 → v0.55.0` and
+  `github.com/urfave/cli/v3 v3.10.1 → v3.11.0` (Dependabot PRs #52 and #53,
+  landed as one change). It touches `go.mod` and `go.sum` only, so the
+  tracked-file count stays 109. It is behavior-preserving on evidence, not
+  on assertion:
+
+  - `golang.org/x/crypto` reaches the production closure only as
+    `cryptobyte` and `cryptobyte/asn1` — the profile decoder's BER
+    primitive — and those packages' sources are **byte-identical** between
+    v0.54.0 and v0.55.0 (`diff -r` over the two module-cache trees reports
+    no difference anywhere under `cryptobyte/`; the release's actual changes
+    are in `ssh`, `acme`, `ocsp`, and `internal/poly1305`, none of which
+    this repository imports). The parser's inputs did not change at all.
+  - `github.com/urfave/cli/v3` v3.11.0's non-test source changes are
+    confined to help/completion rendering, `MutuallyExclusiveFlags`,
+    `BoolWithInverseFlag.GetDefaultText`, a nil-`reflect.Type` guard for
+    interface-typed flag values, and an empty-`os.Args` guard. Both commands
+    use only `cli.Command`, `cli.StringFlag`, and `cli.EnvVars`; a
+    `StringFlag`'s `f.Value` is a `string`, so `reflect.TypeOf` is never nil
+    and the guarded branch is the one taken before and after.
+
+  The manual matrix was **not** re-run in full for this bump, which is why
+  `manual_verification_head` and the coordinator attestation below still
+  cite the earlier commit. What was re-run against it, and passed: the
+  ClickHouse `25.8` acceptance suite (`run.sh`, scenarios A–I including G',
+  with both recorded upstream-bug expectations reproducing unchanged), the
+  Docker HA harness on `25.8`, `capture-ldap-wire.sh --mode verify` across
+  all four tracked lines (zero fixture drift, `Search precedes Abandon`
+  confirmed on every `timeout-abandon` session), and all five fuzz targets
+  at `-fuzztime=20s`. `git status --porcelain` showed only `go.mod`/`go.sum`
+  after every one of those runs, and `docker ps -a` showed no leftovers.
 
 **Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
 
@@ -1362,8 +1399,8 @@ that every Docker/fuzz/wire-capture command and script named in this section
 (Supported ClickHouse matrix, HA, Wire-capture verification, Fuzz smoke) was
 run to completion against `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
 (`manual_verification_head` above — **not** `tested_behavior_head`, which
-has since advanced to `16d16142e39c2282594d2134625c86e46bfa7909` for the
-behavior-preserving provenance correction described above; manual
+has since advanced to `fbb83ac21ef4553e429bf8d710e0382f82147db2` for the two
+behavior-preserving certified-surface edits described above; manual
 verification remains at the earlier commit and this attestation
 deliberately cites that one), that `git status
 --porcelain` was unchanged by verification, and that `docker ps -a` showed
@@ -1392,10 +1429,12 @@ Docker-and-fuzz evidence no test can produce.
 - **Tested at:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the commit
   §11.6 records as `manual_verification_head`. §11.6's
   `tested_behavior_head` has since advanced to
-  `16d16142e39c2282594d2134625c86e46bfa7909`, one commit later, for the
-  behavior-preserving provenance correction recorded as finding 3 below;
-  the manual suites in this section were run against the earlier commit and
-  were not re-run for that correction, apart from `--mode verify`.
+  `fbb83ac21ef4553e429bf8d710e0382f82147db2`, through the behavior-preserving
+  provenance correction recorded as finding 3 below and then the
+  behavior-preserving Dependabot module bump §11.6 describes; the manual
+  suites in this section were run against the earlier commit and were not
+  re-run in full for either edit — see §11.6 for exactly what was re-run
+  after each.
 - **Composition:** unchanged. Ordinary, untagged production
   (`cmd/ch-oauth-ldap` → `internal/ldap/profile`); no build tag, no
   selector, no second backend. Adding tracked lines changes what the suite
