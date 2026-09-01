@@ -1,8 +1,10 @@
 name: Build & push ch-jwt-verify image
 
-# Mirrors scripts/build-image.sh: cross-compile a static Go binary per arch,
-# build+push a per-arch image, then assemble a multi-arch manifest under the
-# same ghcr.io/altinity/ch-jwt-verify repo so existing Helm values keep working.
+# Immutable sidecar publication. Each matrix job rejects a pre-existing final
+# or per-arch tag, compiles only an archive of HEAD in a runner-owned context,
+# then rechecks immediately before its push. The manifest job performs the
+# corresponding final-tag recheck. Registry inspect errors are fail-closed:
+# only an explicit not-found response permits publication.
 
 on:
   push:
@@ -14,6 +16,7 @@ on:
       - "go.mod"
       - "go.sum"
       - "Dockerfile"
+      - "scripts/build-image.sh"
       - ".github/workflows/build-ch-jwt-verify.yml"
   workflow_dispatch:
     inputs:
@@ -46,19 +49,55 @@ jobs:
       - uses: actions/checkout@v7
 
       - id: vars
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
         run: |
-          prefix="${{ inputs.tag_prefix }}"
-          echo "tag=${prefix:-sidecar}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          prefix="${TAG_PREFIX:-sidecar}"
+          if ! [[ "$prefix" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}$ ]]; then
+            echo "invalid tag_prefix" >&2
+            exit 1
+          fi
+          echo "tag=${prefix}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      - name: Cross-compile static binary
+      - id: context
+        name: Export HEAD into an owned build context
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build \
-            -ldflags="-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
-            -o ch-jwt-verify ./cmd/ch-jwt-verify
+          set -euo pipefail
+          # This status check is only better feedback for a surprising local
+          # runner checkout. git archive below, rather than this result,
+          # decides exactly which source bytes are compiled.
+          if dirty="$(git status --porcelain --untracked-files=all)"; [ -n "$dirty" ]; then
+            echo "refusing dirty checkout (fast-fail convenience):" >&2
+            printf '%s\n' "$dirty" >&2
+            exit 1
+          fi
+          context="$(mktemp -d "$RUNNER_TEMP/ch-jwt-verify-${ARCH}.XXXXXX")"
+          mkdir -m 700 "$context/src"
+          git archive --format=tar HEAD | tar -x -C "$context/src"
+          echo "path=$context" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile static binary from exported HEAD
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+          CONTEXT: ${{ steps.context.outputs.path }}
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build \
+            -ldflags="-s -w -X main.version=${TAG}" \
+            -o "$CONTEXT/ch-jwt-verify" ./cmd/ch-jwt-verify
+          chmod 0755 "$CONTEXT/ch-jwt-verify"
+          cp "$CONTEXT/src/Dockerfile" "$CONTEXT/Dockerfile"
+          chmod 0644 "$CONTEXT/Dockerfile"
+          # The command's working directory remains the checkout by default;
+          # change it explicitly so go build cannot see the live tree.
+        working-directory: ${{ steps.context.outputs.path }}/src
 
       - uses: docker/setup-qemu-action@v4
         with:
@@ -72,14 +111,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push per-arch image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/${{ matrix.arch }}
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.tag }}-${{ matrix.arch }}
+      - name: Refuse pre-existing final or per-arch tags
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          FULL="${REGISTRY}/${IMAGE}"
+          NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
+          # Every matrix job checks the complete publication set. This means
+          # an existing arm64 sub-tag also prevents an amd64 job from pushing
+          # a new partial publication while its peer is still starting.
+          for CANDIDATE in "${FULL}:${TAG}" "${FULL}:${TAG}-amd64" "${FULL}:${TAG}-arm64"; do
+            if OUT=$(docker buildx imagetools inspect "$CANDIDATE" 2>&1); then
+              RC=0
+            else
+              RC=$?
+            fi
+            if [ "$RC" -eq 0 ]; then
+              echo "refusing to publish: ${CANDIDATE} already exists; there is no force override" >&2
+              exit 1
+            fi
+            if ! printf '%s' "$OUT" | grep -qiE "$NOT_FOUND_PATTERN"; then
+              echo "refusing to publish: cannot prove ${CANDIDATE} is absent; inspect exited ${RC} without an unambiguous not-found response. Raw output:" >&2
+              printf '%s\n' "$OUT" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build per-arch image from owned context
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+          CONTEXT: ${{ steps.context.outputs.path }}
+        run: |
+          set -euo pipefail
+          docker buildx build --platform "linux/${ARCH}" --load \
+            -t "${REGISTRY}/${IMAGE}:${TAG}-${ARCH}" \
+            -f "$CONTEXT/Dockerfile" "$CONTEXT"
+
+      - name: Recheck and push per-arch image
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          CANDIDATE="${REGISTRY}/${IMAGE}:${TAG}-${ARCH}"
+          NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
+          if OUT=$(docker buildx imagetools inspect "$CANDIDATE" 2>&1); then
+            RC=0
+          else
+            RC=$?
+          fi
+          if [ "$RC" -eq 0 ]; then
+            echo "refusing to publish: ${CANDIDATE} appeared while this build ran" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$OUT" | grep -qiE "$NOT_FOUND_PATTERN"; then
+            echo "refusing to publish: cannot prove ${CANDIDATE} is absent; inspect exited ${RC} without an unambiguous not-found response. Raw output:" >&2
+            printf '%s\n' "$OUT" >&2
+            exit 1
+          fi
+          docker push "$CANDIDATE"
 
   manifest:
     needs: build
@@ -93,10 +186,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Assemble multi-arch manifest
+      - name: Recheck and publish multi-arch manifest
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          FULL: ${{ env.REGISTRY }}/${{ env.IMAGE }}
         run: |
-          TAG="${{ needs.build.outputs.tag }}"
-          FULL="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          set -euo pipefail
+          NOT_FOUND_PATTERN='no such manifest|manifest unknown|name unknown|not found|404'
+          if OUT=$(docker buildx imagetools inspect "${FULL}:${TAG}" 2>&1); then
+            RC=0
+          else
+            RC=$?
+          fi
+          if [ "$RC" -eq 0 ]; then
+            echo "refusing to publish: ${FULL}:${TAG} already exists; there is no force override" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$OUT" | grep -qiE "$NOT_FOUND_PATTERN"; then
+            echo "refusing to publish: cannot prove ${FULL}:${TAG} is absent; inspect exited ${RC} without an unambiguous not-found response. Raw output:" >&2
+            printf '%s\n' "$OUT" >&2
+            exit 1
+          fi
           docker buildx imagetools create -t "${FULL}:${TAG}" \
             "${FULL}:${TAG}-amd64" \
             "${FULL}:${TAG}-arm64"
