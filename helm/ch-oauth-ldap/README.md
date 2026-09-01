@@ -56,14 +56,30 @@ Published to `ghcr.io/altinity/ch-oauth-ldap`. The automatic tag scheme is:
 ldap-<7-character-git-sha>
 ```
 
-There is no mutable `main`/`latest` alias — `image.tag` is required
-precisely so nobody accidentally floats on a moving tag, and both
-publication paths (the manual `scripts/build-ch-oauth-ldap-image.sh` and
-the `.github/workflows/build-ch-oauth-ldap.yml` workflow) **refuse to
+There is no mutable `main` alias. A mutable **`:latest`** alias does exist,
+but **do not deploy it** — `image.tag` is deliberately required, with no
+default, precisely so nobody accidentally floats on a moving tag. `:latest`
+is published for humans pulling the image to try it
+(`docker pull ghcr.io/altinity/ch-oauth-ldap:latest`); a Kubernetes rollout
+pinned to it is not reproducible and cannot be rolled back to a known
+build. The chart's own gate enforces that a rendered workload pins an
+immutable tag.
+
+`:latest` is a pointer, never a build: the workflow repoints it at the
+immutable `ldap-<sha>` manifest the same run just published, so it can only
+ever name a manifest that already passed every build and republication
+guard below. It never introduces a manifest of its own.
+
+Those guards apply to the immutable tags, which are the artifacts of
+record. Both publication paths (the manual
+`scripts/build-ch-oauth-ldap-image.sh` and the
+`.github/workflows/build-ch-oauth-ldap.yml` workflow) **refuse to
 republish** a `ldap-<sha>` tag — or any of its per-arch `-amd64`/`-arm64`
 sub-tags — that already exists in the registry. There is no force
 override: re-running either path against the same commit fails loudly
-rather than silently moving the tag to a different manifest.
+rather than silently moving the tag to a different manifest. `:latest` is
+exempt from that refusal because moving it is its entire purpose — but it
+can only move *between* manifests that each passed it.
 
 That refusal is what you actually get, and it is **not** the same as
 byte-for-byte reproducibility. Rebuilding the exact same commit is not
