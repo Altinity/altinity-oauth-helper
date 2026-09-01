@@ -48,7 +48,7 @@ jobs:
           prefix="${{ inputs.tag_prefix }}"
           echo "tag=${prefix:-sidecar}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
