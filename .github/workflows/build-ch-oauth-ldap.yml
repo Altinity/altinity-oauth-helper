@@ -5,8 +5,11 @@ name: Build & push ch-oauth-ldap image
 # context rules from the phase-4 plan: the binary is compiled directly into a
 # $RUNNER_TEMP-owned per-arch directory (never into the checkout), and the
 # Docker build context is that owned temp directory (never `.`). Only an
-# immutable `<prefix>-<7-char-sha>` tag is ever pushed; `main`/`latest` are
-# never used as tags.
+# immutable `<prefix>-<7-char-sha>` tag is ever BUILT and pushed; `main` is
+# never used as a tag. A moving `:latest` alias is additionally repointed at
+# that immutable manifest after it is published (see the alias step in the
+# `manifest` job) -- a pointer created with `imagetools create`, never a
+# build, and only on a default-prefix push to `main`.
 #
 # Tag-republication guard: before any per-arch build/push runs, this
 # refuses outright if `<prefix>-<sha>` OR that arch's own
@@ -91,6 +94,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.vars.outputs.tag }}
+      # Exposed so the manifest job can decide whether this run may move the
+      # `:latest` alias -- only a default-prefix build may.
+      tag_prefix: ${{ steps.vars.outputs.tag_prefix }}
     steps:
       - uses: actions/checkout@v4
 
@@ -106,6 +112,7 @@ jobs:
             exit 1
           fi
           echo "tag=${prefix}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag_prefix=${prefix}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
         with:
@@ -135,7 +142,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -204,7 +211,7 @@ jobs:
     steps:
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -258,3 +265,44 @@ jobs:
             "${FULL}:${TAG}-amd64" \
             "${FULL}:${TAG}-arm64"
           echo "Pushed ${FULL}:${TAG} (amd64+arm64)"
+
+      # ── Moving `:latest` alias ────────────────────────────────────────
+      # `:latest` is a POINTER, never a build. It is repointed at the
+      # immutable `<prefix>-<sha>` manifest this run just published, by
+      # digest, so it can only ever name a manifest that already went
+      # through the per-arch build guards and the republication recheck
+      # above. Nothing is compiled, and no new manifest content is created,
+      # for `:latest` specifically.
+      #
+      # This is why adding it does not reopen what the immutable-tag rule
+      # protects. That rule exists because a rebuild of the same commit is
+      # NOT byte-reproducible (`alpine:3.24` floats within its minor
+      # version, `apk add ca-certificates` is unpinned, the toolchain
+      # drifts), so republishing an existing immutable tag could silently
+      # move it to a different manifest. `:latest` is not subject to the
+      # republication guard because moving it is its entire purpose — but
+      # it can only move BETWEEN manifests that were each published under
+      # the full guard, never to an unreviewed one.
+      #
+      # Deliberately restricted to a push to `main` with the default `ldap`
+      # prefix. A `workflow_dispatch` with a custom `tag_prefix` is an
+      # out-of-band build (see the header's tag_prefix rationale) and must
+      # not move the alias every ordinary consumer resolves.
+      #
+      # `:latest` is for humans pulling the image to try it. It is NOT for
+      # deployments: helm/ch-oauth-ldap still refuses a `:latest` image tag
+      # in its values, and helm/ch-oauth-ldap/ci/lib/image-assertions.sh
+      # still enforces that a rendered workload pins an immutable tag. A
+      # Kubernetes rollout pinned to a moving alias is not reproducible and
+      # cannot be rolled back to a known artifact.
+      - name: Repoint :latest at the published immutable manifest
+        if: github.event_name == 'push' && needs.build.outputs.tag_prefix == 'ldap'
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          FULL="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          docker buildx imagetools create -t "${FULL}:latest" "${FULL}:${TAG}"
+          # Report the digest both tags now resolve to, so the moving alias
+          # is always traceable back to one immutable tag in the run log.
+          DIGEST="$(docker buildx imagetools inspect "${FULL}:${TAG}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "Repointed ${FULL}:latest -> ${FULL}:${TAG} (${DIGEST})"
