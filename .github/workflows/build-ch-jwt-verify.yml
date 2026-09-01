@@ -9,6 +9,8 @@ on:
     branches: [main]
     paths:
       - "cmd/ch-jwt-verify/**"
+      - "internal/identity/**"
+      - "internal/verification/**"
       - "go.mod"
       - "go.sum"
       - "Dockerfile"
