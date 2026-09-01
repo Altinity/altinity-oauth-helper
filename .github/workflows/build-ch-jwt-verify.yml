@@ -41,7 +41,7 @@ jobs:
     outputs:
       tag: ${{ steps.vars.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: vars
         run: |
@@ -58,7 +58,7 @@ jobs:
             -ldflags="-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
             -o ch-jwt-verify ./cmd/ch-jwt-verify
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: ${{ matrix.arch }}
 
@@ -71,7 +71,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & push per-arch image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile

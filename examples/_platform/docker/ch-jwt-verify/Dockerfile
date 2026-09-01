@@ -3,7 +3,7 @@
 # published image. Build context is the repo root (../..) so the
 # multi-stage build sees go.mod + cmd/. pkg/oauth was extracted to
 # github.com/altinity/go-mcp-oauth-sdk; go mod download fetches it.
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
