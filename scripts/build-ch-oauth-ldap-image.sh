@@ -11,7 +11,12 @@
 #     tag-prefix defaults to "ldap". Final tag: <tag-prefix>-<short-sha>,
 #     e.g. ldap-49ecb42. Per-arch tags get -amd64 / -arm64 suffix. Only ever
 #     immutable <prefix>-<sha> tags are published — never a mutable "main"
-#     or "latest" alias.
+#     or "latest" alias. That is a property of THIS script specifically:
+#     the CI workflow (.github/workflows/build-ch-oauth-ldap.yml) does
+#     additionally repoint a ":latest" alias at the immutable manifest it
+#     just published, but this manual path deliberately does not, so a
+#     local or out-of-band build can never move the alias that ordinary
+#     consumers resolve.
 #
 #     The tag is derived from `git rev-parse HEAD`, and the build compiles
 #     an EXPORTED copy of exactly that HEAD commit (via `git archive HEAD`

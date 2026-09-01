@@ -26,9 +26,11 @@ from either source silently.
 Copied verbatim from the `<clickhouse>...</clickhouse>` element of
 [`integration/clickhouse/clickhouse/common/config.d/ldap.xml`](../integration/clickhouse/clickhouse/common/config.d/ldap.xml),
 the fixture the real-ClickHouse acceptance suite in
-`integration/clickhouse/` runs against
-`altinity/clickhouse-server:24.8.11.51285.altinitystable` and
-`altinity/clickhouse-server:25.8.28.10001.altinitystable`:
+`integration/clickhouse/` runs against all four tracked builds —
+`altinity/clickhouse-server:24.8.11.51285.altinitystable`,
+`altinity/clickhouse-server:25.8.28.10001.altinitystable`,
+`altinity/clickhouse-server:26.3.16.10001.altinitystable` and
+`clickhouse/clickhouse-server:26.8.1.2041`:
 
 <!-- config-source: integration/clickhouse/clickhouse/common/config.d/ldap.xml -->
 ```xml
@@ -60,8 +62,8 @@ the fixture the real-ClickHouse acceptance suite in
 ```
 
 `role_mapping` sits **directly under `<ldap>`**, not nested inside an
-illustrative `<roles>` element — the real 24.8/25.8 LDAP-directory parser
-reads it there. `verification_cooldown` must be `0` so every authentication
+illustrative `<roles>` element — the real LDAP-directory parser reads it
+there on every tracked line (24.8 through 26.8). `verification_cooldown` must be `0` so every authentication
 reaches the helper and sees the current token-derived roles (a nonzero value
 lets ClickHouse skip re-authentication for the cooldown window on reconnect,
 serving a stale role snapshot). `enable_tls=no` reflects the trust boundary
@@ -90,8 +92,9 @@ the fixture — it just isn't identical to the chart's templated output.
 (fixed upstream by [ClickHouse #79099](https://github.com/ClickHouse/ClickHouse/pull/79099));
 on 24.8 and 25.3 the pushed role never authorizes anything even though the
 remote node's own log claims it was applied, and on every version through
-26.3 the role is additionally lost across a normal `VIEW`
-([#116840](https://github.com/ClickHouse/ClickHouse/issues/116840)). This is
+26.8 the role is additionally lost across a normal `VIEW`
+([#116840](https://github.com/ClickHouse/ClickHouse/issues/116840), still
+open upstream). This is
 a recorded ClickHouse limitation, not a `ch-oauth-ldap` defect — see the
 root README's [ClickHouse compatibility caveats][root-caveats] for the full
 two-bug write-up and `integration/clickhouse/lib/expectations.sh` for the
@@ -271,30 +274,44 @@ long-standing built-in default for this LDAP-directory setting, now made
 explicit. Acceptance scenario **G'**
 (`integration/clickhouse/scenarios/65-ldap-search-limits.sh`) mints a token
 carrying 257 mapped role names — one more than this limit — and measures,
-live against both required Altinity Stable images, what actually happens.
+live against every tracked ClickHouse image, what actually happens.
 
 **The measured wire tuple, decoded from ClickHouse's real Search request
-against the helper, is identical on both tested builds:**
+against the helper, is identical on all four tracked builds:**
 
 ```text
-size_limit=256 time_limit=0 types_only=false
+size_limit=256 time_limit=20 types_only=false
 ```
 
-`time_limit=0` because the examined 24.8 LDAP-directory parser has no
-corresponding `<search_timeout>` XML key for this configuration path — do
-not add one; it is not read. 25.8 was not source-examined the same way, but
-the identical `time_limit=0` was independently measured live against it
-(see `lib/expectations.sh`'s `search_limit_overflow_wire_tuple`), so the
-same absence holds in practice on both tested builds.
+`time_limit=20` is ClickHouse's compiled-in handle-wide Search time limit,
+installed by `LDAPClient::openConnection()` via
+`ldap_set_option(LDAP_OPT_TIMELIMIT, ...)` and sent on every Search because
+this configuration path requests no per-call deadline of its own. There is
+no `<search_timeout>` XML key for this path — do not add one; it is not
+read — but that absence yields the handle default on the wire, not zero.
+
+> **Correction.** This tuple was recorded here and in
+> `lib/expectations.sh` as `time_limit=0` until the 26.3/26.8 lines were
+> added, reasoning from the missing XML key. That was wrong on every line —
+> and it contradicted this repository's own wire-profile document, whose
+> §8.2 has always recorded `timeLimit` 20 for the same Search. Two further
+> independent sources confirm 20: decoding `SearchRequest.timeLimit`
+> out of the committed capture corpus
+> (`internal/ldap/testdata/clickhouse-wire/<line>/success/002-search-request.ber`
+> — BER `02 01 14`, identical on all four lines), and the helper's own live
+> telemetry during a real scenario G' run, which logs `time_limit=20`. No
+> behavior changed; the field was recorded and logged but never asserted
+> against the telemetry, which is how the two records contradicted each
+> other unnoticed.
 
 **The measured consequence of the resulting `sizeLimitExceeded` (LDAP result
-4) Search response is also identical on both tested builds:**
+4) Search response is also identical on all four tracked builds:**
 `ch-oauth-ldap` correctly emits exactly 256 entries and returns result 4 (its
 own `ldap search size limit exceeded` log line records
 `size_limit=256 entries=256 result=4`), and **ClickHouse's LDAP-directory
 login path treats that non-success Search result as fatal — the whole
 authentication attempt fails** (a non-200 response at the ClickHouse HTTP
-interface — measured as HTTP 403 on both tested builds, though
+interface — measured as HTTP 403 on all four tracked builds, though
 `assert_search_limit_overflow_outcome` in `lib/expectations.sh` only asserts
 `CH_LAST_STATUS != 200`, not that specific code, matching this suite's
 elsewhere-documented discipline of never asserting a specific error
@@ -303,7 +320,7 @@ contract; the query behind the request never runs) rather than
 authenticating with a truncated 256-of-257 role set. This was an open
 question the phase-5 plan explicitly required measuring rather than
 assuming for 25.8 — it turned out to share 24.8's behavior rather than
-differ from it.
+differ from it, and 26.3/26.8 later matched both.
 
 **Operational consequence: `search_limit` must be sized to cover the maximum
 legitimate mapped-role count for any one user**, or that user's

@@ -32,18 +32,38 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The two Altinity Stable images this suite is actually run against: the
-# issue's pinned 24.8 baseline and the 25.8 build on which distributed
-# external-role propagation is proven to work. lib/expectations.sh also
-# records per-build outcomes for the 25.3 and 26.3 lines (from a one-off
-# LTS sweep, see its header and integration/clickhouse/README.md), so a
-# 25.3/26.3 image can be run ad hoc via PHASE3_CH_IMAGE without adding it
-# here. A build added here (or run ad hoc) WITHOUT a matching expectation
-# entry makes run.sh die loudly at the first expectation lookup, never
-# silently pass.
+# The four images this suite is actually run against: the issue's pinned
+# 24.8 baseline, the 25.8 build on which distributed external-role
+# propagation is proven to work, and the 26.3/26.8 lines added when the
+# tracked set was extended.
+#
+# This array is the tracked-line AUTHORITY, not just a convenience list.
+# docs/clickhouse-ldap-wire-profile.md §1 defines "tracked" as exactly the
+# images here, and internal/securitytest/wire_profile_contract_test.go's
+# TestWireProfileContract_TrackedLineFourWayEquality holds four sources
+# equal to it: this array, the wire doc's §1/§2.1/§2.2 tables, the fixture
+# directories under internal/ldap/testdata/clickhouse-wire/, and every
+# committed profile.json's "line" field. Adding an image here therefore
+# also requires audited source provenance and a captured wire corpus for
+# its line — it is never a one-line edit.
+#
+# 26.8 is deliberately the UPSTREAM clickhouse/clickhouse-server image:
+# no Altinity Stable 26.8 build exists (see the wire doc §2.1). Every
+# other tracked line is an Altinity Stable build. What this array requires
+# is a TAGGED image whose tag equals the server's version() string, which
+# both registries satisfy — run.sh enforces that pin itself.
+#
+# lib/expectations.sh additionally records per-build outcomes for the 25.3
+# line (from a one-off LTS sweep, see its header and
+# integration/clickhouse/README.md), so a 25.3 image can be run ad hoc via
+# PHASE3_CH_IMAGE without adding it here. A build added here (or run ad
+# hoc) WITHOUT a matching expectation entry makes run.sh die loudly at the
+# first expectation lookup, never silently pass.
 BUILDS=(
     "altinity/clickhouse-server:24.8.11.51285.altinitystable"
     "altinity/clickhouse-server:25.8.28.10001.altinitystable"
+    "altinity/clickhouse-server:26.3.16.10001.altinitystable"
+    "clickhouse/clickhouse-server:26.8.1.2041"
 )
 
 declare -A RESULTS
