@@ -136,7 +136,7 @@ jobs:
       - name: Copy Dockerfile into owned temp context
         run: cp Dockerfile.ch-oauth-ldap "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/Dockerfile"
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: ${{ matrix.arch }}
 
