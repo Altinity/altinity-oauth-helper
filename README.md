@@ -396,10 +396,14 @@ scripts/build-image.sh feature-strict-iss
 The script cross-compiles statically-linked binaries for amd64+arm64, builds
 with legacy `DOCKER_BUILDKIT=0`, pushes per-arch, and assembles the multi-arch
 manifest. Image name stays at `ghcr.io/altinity/ch-jwt-verify` so existing
-Helm values continue to work. The CI workflow does the same thing (buildx +
-QEMU instead of Docker Desktop's built-in emulation) — use this locally when
-you need a build from an unmerged branch or a sandbox without registry push
-access.
+Helm values continue to work. Both publication paths refuse a final or
+per-architecture tag that already exists (there is no force override), fail
+closed if registry inspection is ambiguous, and recheck just before every
+push. They compile only a `git archive HEAD` export in a private temporary
+directory; the dirty-tree check is fast-fail feedback, not the provenance
+guarantee. The CI workflow does the same thing (buildx + QEMU instead of
+Docker Desktop's built-in emulation) — use this locally when you need a build
+from an unmerged branch or a sandbox without registry push access.
 
 ### `ch-oauth-ldap`
 
