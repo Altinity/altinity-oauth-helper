@@ -114,7 +114,7 @@ jobs:
           echo "tag=${prefix}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
           echo "tag_prefix=${prefix}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -136,7 +136,7 @@ jobs:
       - name: Copy Dockerfile into owned temp context
         run: cp Dockerfile.ch-oauth-ldap "$RUNNER_TEMP/ch-oauth-ldap-${{ matrix.arch }}/Dockerfile"
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: ${{ matrix.arch }}
 
@@ -197,7 +197,7 @@ jobs:
           done
 
       - name: Build & push per-arch image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ runner.temp }}/ch-oauth-ldap-${{ matrix.arch }}
           file: ${{ runner.temp }}/ch-oauth-ldap-${{ matrix.arch }}/Dockerfile
