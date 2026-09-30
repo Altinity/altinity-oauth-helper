@@ -1169,14 +1169,15 @@ document's plan carries.
 
 **Certification identity**
 
-- **tested_behavior_head:** `5f125406ce44ae058424e13f14915677da54cf22`
-- **manual_verification_head:** `5f125406ce44ae058424e13f14915677da54cf22` — the
+- **tested_behavior_head:** `807a0c6127cd36872c15d0a43a301c0c2b6182f1`
+- **manual_verification_head:** `807a0c6127cd36872c15d0a43a301c0c2b6182f1` — the
   commit the Docker/fuzz/wire-capture suites below (Supported ClickHouse
   matrix, HA, Wire-capture verification, Fuzz smoke) were actually executed
-  against for issue #67's re-certification (§11.8), tracing back to the
-  original manual certification at `76e8bcc`. The prior four-line manual
-  certification remains recorded at `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
-  in §11.7.
+  against for the dependency re-certification (§11.9), with the checkout-head
+  qualification in the coordinator attestation below, tracing back to the
+  original manual certification at `76e8bcc`. Earlier four-line manual
+  certifications remain recorded at `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
+  in §11.7 and `5f125406ce44ae058424e13f14915677da54cf22` in §11.8.
   Kept as its own field, distinct from `tested_behavior_head` above, because
   the two are not always the same commit: `tested_behavior_head` is free to
   advance past `manual_verification_head` for a comment-only or otherwise
@@ -1201,7 +1202,7 @@ document's plan carries.
   `scripts/build-ch-oauth-ldap-image.sh`,
   `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
   constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
-- **Certified-surface digest (SHA-256):** `d134440f9c0c908e09348f01da091f1cbd73cfae2e399036e6a77cb43fa94fda`
+- **Certified-surface digest (SHA-256):** `cd7d4e8d950cab2e1f03f0a9e7d8c76b2108d20b50c4ea21428a622dd3bea373`
   — computed over the same "Certified-surface anti-drift digest" file set
   §11.5 used (`certifiedSurfacePatterns`, unchanged, `third_party/**` kept
   even though the directory is now empty), reproduced 3× identically over
@@ -1286,7 +1287,10 @@ document's plan carries.
   re-run to completion against that production source. The tracked-file
   count remains 109; the new LDAP regression is a test file and is excluded
   by the unchanged certified-surface hashing rule. See §11.8 for the new
-  security regression and verification record.
+  security regression and verification record. The subsequent combined
+  dependency updates advanced both fields to
+  `807a0c6127cd36872c15d0a43a301c0c2b6182f1` after another complete manual
+  certification; see §11.9.
 
 **Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
 
@@ -1329,8 +1333,9 @@ persistent same-socket session probe — no new probe created)
 - **Result:** `PASS` for both tracked lines this section certifies
   (`24.8`, `25.8`); every committed session compared byte-for-byte equal
   against the untagged production build; zero fixture drift; no new request
-  shape observed. The verify run at this head covered all four tracked
-  lines and passed on every one — see §11.8 for the current four-line run
+  shape observed. The verify run on the identical certified source surface
+  covered all four tracked
+  lines and passed on every one — see §11.9 for the current four-line run
   and §11.7 for the original tracked-line expansion.
 - **Search-before-Abandon:** confirmed for both tracked lines' recorded
   timeout-abandon session (`wirecapture: diagnostic — Search precedes
@@ -1412,21 +1417,30 @@ partially.
 requested by Boris Tyshkevich (`@BorisTyshkevich`), records
 that every Docker/fuzz/wire-capture command and script named in this section
 (Supported ClickHouse matrix, HA, Wire-capture verification, Fuzz smoke) was
-run to completion against `5f125406ce44ae058424e13f14915677da54cf22`
-(`manual_verification_head` above). The scripts did not modify committed
-source or wire fixtures; `git status --porcelain` showed only the separate
-review follow-ups in a test and operator prose, outside the certified
-production surface. `docker ps -a` showed no suite leftovers after
+run to completion against `807a0c6127cd36872c15d0a43a301c0c2b6182f1`
+(`manual_verification_head` above). Here "against" identifies the identical
+certified source surface, not a single checkout HEAD shared by every command:
+the matrix, fuzz runs, and HA/wire driver were launched at that commit;
+the checkout advanced during execution to
+`83bac73aa202fae19398ac7cd93f8bc3c115cb45`, where wire verification ran.
+The sole intervening edit corrected the excluded Grafana example README;
+all 109 certified files and their digest remained identical. Individual HA
+checkout heads were not recorded. The scripts did not modify committed
+source or wire fixtures; the post-run `git status --porcelain` showed only
+this evidence document. `git diff --name-only 807a0c6 83bac73` listed only
+the Grafana README. `docker ps -a` showed no suite leftovers after
 verification. This is an automated execution record, not a claim that
 Boris personally ran these checks. The earlier manual certification at
-`e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` remains historical evidence in §11.7.
+`e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` remains historical evidence in §11.7,
+and the immediately preceding certification is preserved in §11.8.
 
 The two tables immediately above remain this section's own Phase 4
 cutover record and name the two lines tracked at that time. The original
 26.3/26.8 expansion and four-image certification at
 `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` are recorded separately in §11.7;
 issue #67's fresh four-image results at
-`5f125406ce44ae058424e13f14915677da54cf22` are recorded in §11.8.
+`5f125406ce44ae058424e13f14915677da54cf22` are recorded in §11.8. The current
+combined dependency certification is recorded in §11.9.
 
 <!-- phase4-release-gate-evidence:end -->
 
@@ -1453,7 +1467,8 @@ Docker-and-fuzz evidence no test can produce.
   re-run in full for either edit — see §11.6 for exactly what was re-run
   after each.
   Issue #67 later re-ran the full manual suites and advanced §11.6's
-  current fields to `5f125406ce44ae058424e13f14915677da54cf22` (§11.8).
+  then-recorded fields to `5f125406ce44ae058424e13f14915677da54cf22` (§11.8).
+  The next dependency certification advanced them again (§11.9).
 - **Composition:** unchanged. Ordinary, untagged production
   (`cmd/ch-oauth-ldap` → `internal/ldap/profile`); no build tag, no
   selector, no second backend. Adding tracked lines changes what the suite
@@ -1646,3 +1661,47 @@ policy, ambiguity, disabled verification, unchanged claims, and the generic
 HTTP failure response. Review follow-ups strengthen whole-claims
 immutability checks and document the intentional upgrade behavior; they
 do not change the certified production bytes.
+
+### 11.9 Combined dependency updates
+
+The dependency integration preserves the original heads of PRs #60, #63,
+#64, and #66 as merge parents. It updates `go-jose/v4` from `v4.1.4` to
+`v4.1.5`, `golang.org/x/crypto` from `v0.55.0` to `v0.57.0`,
+`golang.org/x/sys` from `v0.47.0` to `v0.48.0`, `urfave/cli/v3` from
+`v3.11.0` to `v3.13.0`, and the Grafana example base from `13.2.0` to
+`13.2.2`. The Go directive is normalized to `1.26.0`; the OAuth SDK pin,
+LDAP composition, security contracts, and fixture corpus are unchanged.
+Because the JOSE update includes authentication behavior hardening, this
+is a fresh manual certification rather than a declaration that the module
+updates are behavior-preserving.
+
+**Certified source commit:** `807a0c6127cd36872c15d0a43a301c0c2b6182f1`.
+The checkout-head qualification in §11.6's coordinator attestation applies:
+an excluded Grafana README correction was committed during the run, with
+no change to any certified source byte. The unchanged hashing algorithm
+reproduced `cd7d4e8d950cab2e1f03f0a9e7d8c76b2108d20b50c4ea21428a622dd3bea373`
+three times over 109 tracked files.
+
+| ClickHouse line | Acceptance A–I/G' | HA | Wire verification |
+| --- | --- | --- | --- |
+| `24.8.11.51285.altinitystable` | `PASS` | `PASS` | `PASS` |
+| `25.8.28.10001.altinitystable` | `PASS` | `PASS` | `PASS` |
+| `26.3.16.10001.altinitystable` | `PASS` | `PASS` | `PASS` |
+| `26.8.1.2041` | `PASS` | `PASS` | `PASS` |
+
+These results were produced by `run-all-builds.sh`, `run-ha.sh` with each
+tracked image, and `capture-ldap-wire.sh --mode verify`. All five native
+profile fuzz targets passed separate 20-second runs with two workers.
+No committed wire fixture was regenerated or promoted; stable metadata and
+sanitized PDUs matched the corpus, including Search-before-Abandon ordering.
+`go mod verify` passed and `go mod tidy -diff` produced no changes.
+The complete local mandatory PR gate passed on the identical certified
+source surface with the evidence update, including `go test -race ./...`
+and the strict `phase5release` security tests. Ordinary `go test ./...`
+and tagged security-test vet also passed. This includes issue #67's signed
+LDAP and HTTP regressions; it is not a claim of hosted CI at the source commit.
+
+The Grafana example README's older base-version reference was corrected to
+match its Dockerfile. Registry inspection confirmed `grafana/grafana:13.2.2`
+is available for `linux/amd64` and `linux/arm64`; this is not a claim of a
+Grafana end-to-end run or a Grafana publication workflow.
