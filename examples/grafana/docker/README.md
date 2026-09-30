@@ -138,7 +138,7 @@ browser session, which the manual walkthrough below covers.
 
 | Service   | Image (built locally)                                            | Role                                                                                  |
 |-----------|------------------------------------------------------------------|---------------------------------------------------------------------------------------|
-| `grafana` | `grafana/grafana:11.4.0` + patched `vertamedia-clickhouse-datasource` | Browser-facing app, generic-OAuth wired to Dex, ClickHouse datasource pre-provisioned. |
+| `grafana` | `grafana/grafana:13.2.2` + patched `vertamedia-clickhouse-datasource` | Browser-facing app, generic-OAuth wired to Dex, ClickHouse datasource pre-provisioned. |
 
 Everything else (postgres, dex, clickhouse, ch-jwt-verify) is shared
 with the Superset overlay via `../../_platform/docker/compose.yml`.
