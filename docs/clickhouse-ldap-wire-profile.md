@@ -1635,12 +1635,14 @@ The unchanged certified-surface algorithm reproduced
 three times over 109 tracked files.
 
 The new signed-RS256/JWKS real-TCP LDAP regression was also run on the
-pre-fix identity implementation: all four rejection cases incorrectly
+pre-fix identity implementation with its four original rejection cases: all incorrectly
 returned Bind success (`0`) rather than invalid credentials (`49`). On
 the fixed implementation they reject, correctly paired verification
 allows Bind and role Search, and a rejected rebind removes prior Search
-access. Unit and HTTP tests additionally cover domain policy, ambiguity,
-disabled verification, unchanged claims, cache outcomes, and the generic
+access. The LDAP regression exercises repeated-Bind cache outcomes; its
+fifth rejection case, ambiguous fallbacks, was added during review and run
+on the fixed implementation. Unit and HTTP tests additionally cover domain
+policy, ambiguity, disabled verification, unchanged claims, and the generic
 HTTP failure response. Review follow-ups strengthen whole-claims
 immutability checks and document the intentional upgrade behavior; they
 do not change the certified production bytes.
