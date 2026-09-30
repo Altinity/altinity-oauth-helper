@@ -21,7 +21,7 @@ Produce it before touching code. State:
 - **files and subsystem boundaries** — sidecar behavior in `cmd/ch-jwt-verify/`, the
   synthetic test IdP in `cmd/synthetic-idp/`, chart changes in `helm/ch-jwt-verify/`,
   consumer recipes in `examples/`; JWKS/JWT/identity-policy logic stays in the upstream
-  `go-mcp-oauth-sdk` module, never forked into this repo (`CLAUDE.md`);
+  `go-mcp-oauth-sdk` module, never forked into this repo (`AGENTS.md`);
 - **production entrypoints and state transitions** the change flows through;
 - **tests mapped to contract items**;
 - **migration order** — for a subtractive unit, what gets deleted before what gets built;
@@ -30,7 +30,7 @@ Produce it before touching code. State:
 - **invariant map** for medium- and high-risk work (below).
 
 If the unit is ambiguous, under-specified, or needs a decision not already recorded
-(issue body / CLAUDE.md), do not invent one — return the missing decision
+(issue body / AGENTS.md), do not invent one — return the missing decision
 instead of a plan; the coordinator skips the unit and reports it. This is a
 settled-architecture project.
 
@@ -102,7 +102,7 @@ no-code-before-approval and no-`chatgpt-review` boundaries.
 
 ## 2 — Implement (inner loop)
 
-Write the code **and its tests in the same change** (per `CLAUDE.md`).
+Write the code **and its tests in the same change** (per `AGENTS.md`).
 
 - Keep JWKS/JWT/identity-policy logic in the upstream `go-mcp-oauth-sdk` module, not
   duplicated or forked into `cmd/ch-jwt-verify/`; sidecar-specific wiring (config,

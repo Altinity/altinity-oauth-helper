@@ -8,7 +8,7 @@ import (
 // cacheMaxEntries bounds in-memory growth. Each entry is ~256 B with typical
 // claims/principal payloads; at 10000 entries the cache footprint is
 // ~2.5 MiB. Preserved from the pre-refactor cmd/ch-jwt-verify cache — see
-// CLAUDE.md's cache-correctness rule and the plan's "Cache mechanics"
+// AGENTS.md's cache-correctness rule and the plan's "Cache mechanics"
 // section.
 const cacheMaxEntries = 10000
 

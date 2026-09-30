@@ -77,7 +77,7 @@
 //     resolved SDK version drifting from auditedSDKVersion) and must never
 //     be silenced by relaxing the gate.
 //
-// See CLAUDE.md and plan-19p5.md §5 for the full security model this
+// See AGENTS.md and plan-19p5.md §5 for the full security model this
 // package enforces, and testdata/redaction-sites.tsv's own header comment
 // for the manifest's column contract.
 package securitytest
@@ -103,7 +103,7 @@ import (
 // every external-pinned manifest row) is exactly the drift sdk_contract_test
 // exists to catch — see plan §5.3 and the high-risk invariant map's "SDK
 // version is audited" row.
-const auditedSDKVersion = "v0.2.1"
+const auditedSDKVersion = "v0.2.2-0.20260930164311-97e130ca08ec"
 
 // sdkModulePath is the module path sdk_contract_test.go and
 // release_gate_test.go look for in build info / go.mod.

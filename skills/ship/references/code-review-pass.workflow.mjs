@@ -149,7 +149,7 @@ if (accepted.length === 0) {
 }
 
 const fix = await agent(
-  `On branch ${runArgs.integrationBranch} in the main working tree (the coordinator has it checked out — verify with \`git branch --show-current\` and stop if it differs), apply these accepted ChatGPT PR-review findings, with tests in the same change (per CLAUDE.md):\n` +
+  `On branch ${runArgs.integrationBranch} in the main working tree (the coordinator has it checked out — verify with \`git branch --show-current\` and stop if it differs), apply these accepted ChatGPT PR-review findings, with tests in the same change (per AGENTS.md):\n` +
   `${JSON.stringify(accepted)}\n` +
   'Follow skills/ship/references/per-issue-cycle.md step 2 and references/repo-footguns.md. Run the FULL local gate from cycle step 2, captured to a file, and loop until green.\n' +
   `Commit locally: message "fix(#${runArgs.issueRef ?? 'ISSUE'}): address review pass ${runArgs.pass} findings" plus the repo footer convention.\n` +

@@ -13,6 +13,13 @@ OAuth helpers for ClickHouse-fronted deployments. Two binaries ship today:
 Both share the same underlying JWT verification and identity-policy logic
 from [`github.com/altinity/go-mcp-oauth-sdk`](https://github.com/altinity/go-mcp-oauth-sdk).
 
+For `username_claim: email`, verified-email and email-domain policy apply to
+the selected authentication email. A namespaced fallback such as
+`https://example.com/email` requires boolean `true` at
+`https://example.com/email_verified` when email verification is enabled;
+unrelated verification flags do not qualify. Multiple usable fallback email
+claims fail closed. See the [identity behavior reference](docs/ch-oauth-ldap-operator-guide.md#3-identity-behavior).
+
 ## Why this exists
 
 Native OAuth / JWT authentication isn't in stock OSS ClickHouse. Today you

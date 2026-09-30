@@ -139,7 +139,7 @@ node scripts/chatgpt-review.mjs plan-author \
 ```
 
 Keep the absolute output path unchanged. On the initial call ChatGPT is instructed to
-browse the issue, repository, `CLAUDE.md`, and relevant `skills/ship` references. To
+browse the issue, repository, `AGENTS.md`, and relevant `skills/ship` references. To
 revise, retain the returned session and call the same command with `--session`; the CLI
 sends a follow-up message in the same conversation pointing ChatGPT back at the plan it
 already wrote, rather than re-uploading it — a revision pass's prompt can already run to

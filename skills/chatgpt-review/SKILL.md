@@ -33,7 +33,7 @@ If a run ends after submission with an incomplete typed status, retry with its r
 
 For `plan-author`, use the canonical issue URL and keep the absolute output path
 unchanged for the entire conversation. The initial call asks ChatGPT to browse the
-issue, repository, `CLAUDE.md`, and ship references. Revisions reuse `--session` and
+issue, repository, `AGENTS.md`, and ship references. Revisions reuse `--session` and
 upload a pass-numbered copy of the current canonical plan. Only a valid
 `PLAN_STATUS: READY` response atomically replaces the output file; `BLOCKED`, malformed,
 empty, or incomplete responses leave it untouched. This command is private and never

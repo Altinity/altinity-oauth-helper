@@ -1169,15 +1169,18 @@ document's plan carries.
 
 **Certification identity**
 
-- **tested_behavior_head:** `fbb83ac21ef4553e429bf8d710e0382f82147db2`
-- **manual_verification_head:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the
+- **tested_behavior_head:** `5f125406ce44ae058424e13f14915677da54cf22`
+- **manual_verification_head:** `5f125406ce44ae058424e13f14915677da54cf22` — the
   commit the Docker/fuzz/wire-capture suites below (Supported ClickHouse
   matrix, HA, Wire-capture verification, Fuzz smoke) were actually executed
-  against, tracing back to the original manual certification at `76e8bcc`.
+  against for issue #67's re-certification (§11.8), tracing back to the
+  original manual certification at `76e8bcc`. The prior four-line manual
+  certification remains recorded at `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
+  in §11.7.
   Kept as its own field, distinct from `tested_behavior_head` above, because
   the two are not always the same commit: `tested_behavior_head` is free to
   advance past `manual_verification_head` for a comment-only or otherwise
-  behavior-preserving certified-surface edit (as it did here — see below),
+  behavior-preserving certified-surface edit (as it did historically — see below),
   without that re-triggering a fresh manual run, but the coordinator
   attestation must keep citing the commit manual verification was actually
   run against, never whichever commit `tested_behavior_head` happens to name
@@ -1198,7 +1201,7 @@ document's plan carries.
   `scripts/build-ch-oauth-ldap-image.sh`,
   `.github/workflows/build-ch-oauth-ldap.yml`, and every Go build
   constraint under `cmd/ch-oauth-ldap` and `internal/ldap/profile`.
-- **Certified-surface digest (SHA-256):** `82d78be760a84047414701d92b0c10660de650795b4ab9554cf216a11f0163da`
+- **Certified-surface digest (SHA-256):** `d134440f9c0c908e09348f01da091f1cbd73cfae2e399036e6a77cb43fa94fda`
   — computed over the same "Certified-surface anti-drift digest" file set
   §11.5 used (`certifiedSurfacePatterns`, unchanged, `third_party/**` kept
   even though the directory is now empty), reproduced 3× identically over
@@ -1209,7 +1212,7 @@ document's plan carries.
   and requires the two hash equal, so the field above and the head above
   it are mechanically bound to each other, not merely both individually
   self-consistent.
-  Both head fields, the digest, and the tracked-file count above were
+  Both head fields, the digest, and the tracked-file count were previously
   advanced together when ClickHouse 26.3 and 26.8 became tracked lines
   (see §11.7). That change edited certified-surface files — `BUILDS`,
   `lib/expectations.sh`, `scenarios/65-ldap-search-limits.sh`,
@@ -1221,11 +1224,12 @@ document's plan carries.
   head and advancing both fields to the commit that actually contains the
   change, so the digest genuinely is the digest at the recorded head. That
   re-run happened — every image in the tables below was re-certified against
-  `manual_verification_head`, not carried forward from the head before it.
+  the then-recorded manual head `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`,
+  not carried forward from the head before it.
 
-  `tested_behavior_head` has since advanced twice past
+  Before issue #67, `tested_behavior_head` advanced twice past
   `manual_verification_head` — each time for a behavior-preserving
-  certified-surface edit — and now names
+  certified-surface edit — and then named
   `fbb83ac21ef4553e429bf8d710e0382f82147db2`. This is the case these
   two fields exist to distinguish: the head advances so the digest is
   genuinely the digest at the recorded head, while the coordinator
@@ -1264,9 +1268,9 @@ document's plan carries.
     `StringFlag`'s `f.Value` is a `string`, so `reflect.TypeOf` is never nil
     and the guarded branch is the one taken before and after.
 
-  The manual matrix was **not** re-run in full for this bump, which is why
-  `manual_verification_head` and the coordinator attestation below still
-  cite the earlier commit. What was re-run against it, and passed: the
+  The manual matrix was **not** re-run in full for this bump, so at that
+  time `manual_verification_head` and the coordinator attestation cited
+  the earlier commit. What was re-run against it, and passed: the
   ClickHouse `25.8` acceptance suite (`run.sh`, scenarios A–I including G',
   with both recorded upstream-bug expectations reproducing unchanged), the
   Docker HA harness on `25.8`, `capture-ldap-wire.sh --mode verify` across
@@ -1274,6 +1278,15 @@ document's plan carries.
   confirmed on every `timeout-abandon` session), and all five fuzz targets
   at `-fuzztime=20s`. `git status --porcelain` showed only `go.mod`/`go.sum`
   after every one of those runs, and `docker ps -a` showed no leftovers.
+
+  Issue #67 subsequently changed the shared email identity policy and
+  advanced both head fields and the digest to `5f125406ce44ae058424e13f14915677da54cf22`.
+  This was a behavior change, so all four ClickHouse acceptance runs, all
+  four HA runs, four-line wire verification, and all five fuzz targets were
+  re-run to completion against that production source. The tracked-file
+  count remains 109; the new LDAP regression is a test file and is excluded
+  by the unchanged certified-surface hashing rule. See §11.8 for the new
+  security regression and verification record.
 
 **Supported ClickHouse matrix** (`integration/clickhouse/run-all-builds.sh`, expectations table unedited)
 
@@ -1317,7 +1330,8 @@ persistent same-socket session probe — no new probe created)
   (`24.8`, `25.8`); every committed session compared byte-for-byte equal
   against the untagged production build; zero fixture drift; no new request
   shape observed. The verify run at this head covered all four tracked
-  lines and passed on every one — see §11.7 for the `26.3`/`26.8` half.
+  lines and passed on every one — see §11.8 for the current four-line run
+  and §11.7 for the original tracked-line expansion.
 - **Search-before-Abandon:** confirmed for both tracked lines' recorded
   timeout-abandon session (`wirecapture: diagnostic — Search precedes
   Abandon as expected`).
@@ -1394,22 +1408,25 @@ revert must restore the command adapter pair, the legacy `internal/ldap`
 package, the module requirements, and the vendored forks coherently, never
 partially.
 
-**Coordinator attestation:** Boris Tyshkevich (`@BorisTyshkevich`) certifies
+**Coordinator attestation:** Codex, running the unattended implementation
+requested by Boris Tyshkevich (`@BorisTyshkevich`), records
 that every Docker/fuzz/wire-capture command and script named in this section
 (Supported ClickHouse matrix, HA, Wire-capture verification, Fuzz smoke) was
-run to completion against `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c`
-(`manual_verification_head` above — **not** `tested_behavior_head`, which
-has since advanced to `fbb83ac21ef4553e429bf8d710e0382f82147db2` for the two
-behavior-preserving certified-surface edits described above; manual
-verification remains at the earlier commit and this attestation
-deliberately cites that one), that `git status
---porcelain` was unchanged by verification, and that `docker ps -a` showed
-no suite leftovers after verification.
+run to completion against `5f125406ce44ae058424e13f14915677da54cf22`
+(`manual_verification_head` above). The scripts did not modify committed
+source or wire fixtures; `git status --porcelain` showed only the separate
+review follow-ups in a test and operator prose, outside the certified
+production surface. `docker ps -a` showed no suite leftovers after
+verification. This is an automated execution record, not a claim that
+Boris personally ran these checks. The earlier manual certification at
+`e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` remains historical evidence in §11.7.
 
 The two tables immediately above remain this section's own Phase 4
-cutover record and name the two lines tracked at that time. The 26.3 and
-26.8 lines, and the four-image re-certification performed at this head,
-are recorded separately in §11.7.
+cutover record and name the two lines tracked at that time. The original
+26.3/26.8 expansion and four-image certification at
+`e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` are recorded separately in §11.7;
+issue #67's fresh four-image results at
+`5f125406ce44ae058424e13f14915677da54cf22` are recorded in §11.8.
 
 <!-- phase4-release-gate-evidence:end -->
 
@@ -1427,14 +1444,16 @@ Docker-and-fuzz evidence no test can produce.
 **Certification identity**
 
 - **Tested at:** `e3304522586d6c17cf3ae6cd0c4e32a526a8f34c` — the commit
-  §11.6 records as `manual_verification_head`. §11.6's
-  `tested_behavior_head` has since advanced to
+  §11.6 previously recorded as `manual_verification_head`. Its
+  `tested_behavior_head` subsequently advanced to
   `fbb83ac21ef4553e429bf8d710e0382f82147db2`, through the behavior-preserving
   provenance correction recorded as finding 3 below and then the
   behavior-preserving Dependabot module bump §11.6 describes; the manual
   suites in this section were run against the earlier commit and were not
   re-run in full for either edit — see §11.6 for exactly what was re-run
   after each.
+  Issue #67 later re-ran the full manual suites and advanced §11.6's
+  current fields to `5f125406ce44ae058424e13f14915677da54cf22` (§11.8).
 - **Composition:** unchanged. Ordinary, untagged production
   (`cmd/ch-oauth-ldap` → `internal/ldap/profile`); no build tag, no
   selector, no second backend. Adding tracked lines changes what the suite
@@ -1584,3 +1603,46 @@ more misleading artifact.
    was recorded and logged but never asserted against telemetry, which is
    exactly how two committed records contradicted each other unnoticed. No
    behavior changed.
+
+### 11.8 Issue #67: selected-email verification
+
+The shared identity pipeline now resolves the authentication email and its
+verification evidence together through the SDK's `ResolveEmailIdentity`.
+Namespaced fallbacks require boolean `true` from the matching namespace;
+top-level or unrelated flags cannot verify that email. Multiple usable
+fallback emails fail closed. Existing SDK JWT validation and the original
+claims used by the role pipeline remain unchanged.
+
+**Production source verified:** `5f125406ce44ae058424e13f14915677da54cf22`.
+The SDK pin is `v0.2.2-0.20260930164311-97e130ca08ec`, reachable from the
+merged SDK `main`; there is no module replacement or production workspace.
+The four external-pinned redaction sinks were re-audited: their source is
+unchanged from v0.2.1, and the added resolver returns only fixed sentinels.
+
+| ClickHouse line | Acceptance A–I/G' | HA | Wire verification |
+| --- | --- | --- | --- |
+| `24.8.11.51285.altinitystable` | `PASS` | `PASS` | `PASS` |
+| `25.8.28.10001.altinitystable` | `PASS` | `PASS` | `PASS` |
+| `26.3.16.10001.altinitystable` | `PASS` | `PASS` | `PASS` |
+| `26.8.1.2041` | `PASS` | `PASS` | `PASS` |
+
+These results were produced by `run-all-builds.sh`, `run-ha.sh` with each
+tracked image, and `capture-ldap-wire.sh --mode verify`. All five profile
+fuzz targets passed separate 20-second runs with two workers. No committed
+wire fixture was regenerated or promoted, and no fixture drift was found.
+The unchanged certified-surface algorithm reproduced
+`d134440f9c0c908e09348f01da091f1cbd73cfae2e399036e6a77cb43fa94fda`
+three times over 109 tracked files.
+
+The new signed-RS256/JWKS real-TCP LDAP regression was also run on the
+pre-fix identity implementation with its four original rejection cases: all incorrectly
+returned Bind success (`0`) rather than invalid credentials (`49`). On
+the fixed implementation they reject, correctly paired verification
+allows Bind and role Search, and a rejected rebind removes prior Search
+access. The LDAP regression exercises repeated-Bind cache outcomes; its
+fifth rejection case, ambiguous fallbacks, was added during review and run
+on the fixed implementation. Unit and HTTP tests additionally cover domain
+policy, ambiguity, disabled verification, unchanged claims, and the generic
+HTTP failure response. Review follow-ups strengthen whole-claims
+immutability checks and document the intentional upgrade behavior; they
+do not change the certified production bytes.
