@@ -49,7 +49,7 @@ type verifyResponse struct {
 // The SDK's ValidateStrictJWT and internal/identity/internal/verification
 // return distinct, specific typed errors internally — precisely so callers
 // wanting errors.Is/As (like the verification cache, which must preserve
-// error identity across cache hits — see CLAUDE.md's cache-correctness
+// error identity across cache hits — see AGENTS.md's cache-correctness
 // rule) can still do so. This sidecar is the trust boundary where that
 // distinction must stop: operators get the real reason from the structured
 // debug log line the handler emits alongside this response (see Handler),
@@ -143,7 +143,7 @@ func (v *Verifier) Handler() http.Handler {
 
 		resp := &verifyResponse{
 			Settings: settingsFromScopes(result.Claims.Scopes, v.cfg.SettingsFromScope),
-			Email:    result.Claims.Email,
+			Email:    result.Principal.Email,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		// verifyResponse is two map[string]string + string fields — Encode

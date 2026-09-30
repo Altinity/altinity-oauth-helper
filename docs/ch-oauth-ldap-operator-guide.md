@@ -182,6 +182,17 @@ identity:
   config validation at startup. `lowercase_equal` trims outer whitespace and
   compares case-insensitively; `exact` requires a byte-for-byte match between
   the Bind DN's requested username and the resolved claim value.
+- **Email verification follows the selected email.** With `username_claim:
+  email`, a nonblank top-level `email` takes precedence. Otherwise exactly
+  one nonblank string claim ending in `/email` is required. With
+  `require_email_verified: true`, that fallback requires a boolean `true`
+  at the same namespace's `/email_verified` key; a top-level or another
+  namespace's flag cannot verify it. Missing, false, or malformed evidence
+  fails authentication, and multiple fallback emails are rejected even
+  when their values match. Email-domain policy checks the selected email
+  too. Disabling verification does not disable domain checks or permit
+  ambiguous fallback emails. `sub` and explicitly named custom username
+  claims retain their existing policy semantics.
 - **Denied-user normalization is independent of `username_match`.**
   `denied_usernames` is always compared using trimmed, case-insensitive
   matching, regardless of the configured match mode — so `Default`, `
@@ -492,7 +503,7 @@ pipeline, listener, lifecycle), both tracked ClickHouse images, HA (§8.1
 above), the committed wire-fixture corpus (verify-only), and all five native
 fuzz targets. It carries its own real-TCP black-box tests, native fuzzing,
 real-TCP replay of every committed wire fixture, and
-dependency/architecture/redaction contracts; see `CLAUDE.md`'s
+dependency/architecture/redaction contracts; see `AGENTS.md`'s
 `internal/ldap/profile/` repo-map row and
 [`docs/clickhouse-ldap-wire-profile.md`](clickhouse-ldap-wire-profile.md) §11
 for the complete engineering-evidence writeup (§11.5 records that Phase 3

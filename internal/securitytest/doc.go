@@ -103,7 +103,7 @@ import (
 // every external-pinned manifest row) is exactly the drift sdk_contract_test
 // exists to catch — see plan §5.3 and the high-risk invariant map's "SDK
 // version is audited" row.
-const auditedSDKVersion = "v0.2.1"
+const auditedSDKVersion = "v0.2.2-0.20260930164311-97e130ca08ec"
 
 // sdkModulePath is the module path sdk_contract_test.go and
 // release_gate_test.go look for in build info / go.mod.

@@ -143,6 +143,158 @@ func TestBindEnforcesEmailVerifiedPolicy(t *testing.T) {
 	require.ErrorIs(t, err, oauth.ErrEmailNotVerified)
 }
 
+func TestBindNamespacedEmailUsesPairedVerification(t *testing.T) {
+	t.Parallel()
+	const emailClaim = "https://idp.example.com/email"
+	const verifiedClaim = "https://idp.example.com/email_verified"
+	cases := []struct {
+		name    string
+		claims  *oauth.Claims
+		wantErr error
+	}{
+		{
+			name: "verified namespaced email",
+			claims: &oauth.Claims{Extra: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: true,
+			}},
+		},
+		{
+			name: "false namespaced verification",
+			claims: &oauth.Claims{Extra: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: false,
+			}},
+			wantErr: oauth.ErrEmailNotVerified,
+		},
+		{
+			name: "missing namespaced verification",
+			claims: &oauth.Claims{Extra: map[string]interface{}{
+				emailClaim: "alice@example.com",
+			}},
+			wantErr: oauth.ErrEmailNotVerified,
+		},
+		{
+			name: "top-level verification cannot verify namespaced email",
+			claims: &oauth.Claims{EmailVerified: true, Extra: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: false,
+			}},
+			wantErr: oauth.ErrEmailNotVerified,
+		},
+		{
+			name: "non-boolean namespaced verification",
+			claims: &oauth.Claims{Extra: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: "true",
+			}},
+			wantErr: oauth.ErrEmailNotVerified,
+		},
+		{
+			name: "ambiguous namespaced emails",
+			claims: &oauth.Claims{Extra: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: true,
+				"https://other.example.com/email":          "alice@example.com",
+				"https://other.example.com/email_verified": true,
+			}},
+			wantErr: oauth.ErrEmailClaimAmbiguous,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, err := NewPolicy(Config{
+				UsernameClaim: "email",
+				ClaimPolicy:   oauth.IdentityPolicy{RequireEmailVerified: true},
+			})
+			require.NoError(t, err)
+			principal, err := p.Bind("alice@example.com", tc.claims)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, "alice@example.com", principal.Email)
+			}
+			require.Empty(t, tc.claims.Email, "binding must leave raw claims unchanged")
+		})
+	}
+}
+
+func TestBindTopLevelEmailKeepsVerificationPrecedence(t *testing.T) {
+	t.Parallel()
+	p, err := NewPolicy(Config{
+		UsernameClaim: "email",
+		ClaimPolicy:   oauth.IdentityPolicy{RequireEmailVerified: true},
+	})
+	require.NoError(t, err)
+	claims := &oauth.Claims{Email: "alice@example.com", EmailVerified: false, Extra: map[string]interface{}{
+		"https://idp.example.com/email":          "alice@example.com",
+		"https://idp.example.com/email_verified": true,
+	}}
+	_, err = p.Bind("alice@example.com", claims)
+	require.ErrorIs(t, err, oauth.ErrEmailNotVerified)
+}
+
+func TestBindNamespacedEmailUsesResolvedDomain(t *testing.T) {
+	t.Parallel()
+	p, err := NewPolicy(Config{
+		UsernameClaim: "email",
+		ClaimPolicy: oauth.IdentityPolicy{
+			RequireEmailVerified: true,
+			AllowedEmailDomains:  []string{"altinity.com"},
+		},
+	})
+	require.NoError(t, err)
+	claims := &oauth.Claims{Extra: map[string]interface{}{
+		"https://idp.example.com/email":          "alice@altinity.com",
+		"https://idp.example.com/email_verified": true,
+	}}
+	principal, err := p.Bind("alice@altinity.com", claims)
+	require.NoError(t, err)
+	require.Equal(t, "alice@altinity.com", principal.Email)
+
+	claims.Extra["https://idp.example.com/email"] = "alice@example.com"
+	_, err = p.Bind("alice@example.com", claims)
+	require.ErrorIs(t, err, oauth.ErrUnauthorizedDomain)
+}
+
+func TestBindNamespacedEmailWithoutVerificationRequirement(t *testing.T) {
+	t.Parallel()
+	p, err := NewPolicy(Config{UsernameClaim: "email"})
+	require.NoError(t, err)
+	claims := &oauth.Claims{Extra: map[string]interface{}{
+		"https://idp.example.com/email": "alice@example.com",
+	}}
+	principal, err := p.Bind("alice@example.com", claims)
+	require.NoError(t, err)
+	require.Equal(t, "alice@example.com", principal.Email)
+}
+
+func TestBindSubAndCustomClaimsKeepRawEmailPolicy(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		usernameClaim string
+		username      string
+	}{
+		{"sub", "sub", "u-1"},
+		{"custom", "clickhouse_user", "ch-tenant-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, err := NewPolicy(Config{
+				UsernameClaim: tc.usernameClaim,
+				ClaimPolicy:   oauth.IdentityPolicy{RequireEmailVerified: true},
+			})
+			require.NoError(t, err)
+			claims := &oauth.Claims{Subject: "u-1", Extra: map[string]interface{}{
+				"clickhouse_user":                        "ch-tenant-a",
+				"https://idp.example.com/email":          "alice@example.com",
+				"https://idp.example.com/email_verified": false,
+			}}
+			principal, err := p.Bind(tc.username, claims)
+			require.NoError(t, err)
+			require.Empty(t, principal.Email)
+		})
+	}
+}
+
 func TestBindEnforcesAllowedEmailDomains(t *testing.T) {
 	t.Parallel()
 	p, err := NewPolicy(Config{

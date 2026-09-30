@@ -456,6 +456,71 @@ func TestVerifierRejectsUnverifiedEmail(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rr.Code)
 }
 
+func TestVerifierNamespacedEmailVerification(t *testing.T) {
+	t.Parallel()
+	p := newTestIdP(t)
+	v := newTestVerifier(t, baseConfig(p))
+	const emailClaim = "https://idp.example.com/email"
+	const verifiedClaim = "https://idp.example.com/email_verified"
+	for _, tc := range []struct {
+		name   string
+		claims map[string]interface{}
+		wantOK bool
+	}{
+		{
+			name: "verified namespaced email",
+			claims: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: true,
+			},
+			wantOK: true,
+		},
+		{
+			name: "unverified namespaced email",
+			claims: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: false,
+			},
+		},
+		{
+			name: "missing verification evidence",
+			claims: map[string]interface{}{
+				emailClaim: "alice@example.com",
+			},
+		},
+		{
+			name: "top-level true does not verify namespaced email",
+			claims: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: false,
+				"email_verified": true,
+			},
+		},
+		{
+			name: "ambiguous namespaced emails",
+			claims: map[string]interface{}{
+				emailClaim: "alice@example.com", verifiedClaim: true,
+				"https://other.example.com/email":          "alice@example.com",
+				"https://other.example.com/email_verified": true,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tok := p.mintJWT(t, tc.claims)
+			req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+			req.Header.Set("Authorization", basicHeader("alice@example.com", tok))
+			rr := httptest.NewRecorder()
+			v.Handler().ServeHTTP(rr, req)
+			if !tc.wantOK {
+				require.Equal(t, http.StatusForbidden, rr.Code)
+				require.Equal(t, errAuthenticationFailed.Error()+"\n", rr.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var response verifyResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+			require.Equal(t, "alice@example.com", response.Email)
+		})
+	}
+}
+
 func TestVerifierEnforcesAllowedEmailDomains(t *testing.T) {
 	t.Parallel()
 	p := newTestIdP(t)

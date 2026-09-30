@@ -165,30 +165,31 @@ func normalizeUsername(u string) string {
 
 // resolveClaim resolves the configured username claim from already
 // cryptographically-validated claims.
-func (p *Policy) resolveClaim(claims *oauth.Claims) (string, error) {
+func (p *Policy) resolveClaim(claims *oauth.Claims) (string, oauth.EmailIdentity, error) {
 	switch p.usernameClaim {
 	case "email":
-		if e := strings.TrimSpace(claims.Email); e != "" {
-			return e, nil
+		email, err := oauth.ResolveEmailIdentity(claims)
+		if errors.Is(err, oauth.ErrEmailClaimMissing) {
+			return "", oauth.EmailIdentity{}, fmt.Errorf("%w: claim %q", ErrClaimMissing, "email")
 		}
-		if e := oauth.EmailFromNamespacedExtra(claims.Extra); e != "" {
-			return e, nil
+		if err != nil {
+			return "", oauth.EmailIdentity{}, err
 		}
-		return "", fmt.Errorf("%w: claim %q", ErrClaimMissing, "email")
+		return email.Email, email, nil
 	case "sub":
 		if s := strings.TrimSpace(claims.Subject); s != "" {
-			return s, nil
+			return s, oauth.EmailIdentity{}, nil
 		}
-		return "", fmt.Errorf("%w: claim %q", ErrClaimMissing, "sub")
+		return "", oauth.EmailIdentity{}, fmt.Errorf("%w: claim %q", ErrClaimMissing, "sub")
 	default:
 		if raw, ok := claims.Extra[p.usernameClaim]; ok {
 			if s, ok := raw.(string); ok {
 				if trimmed := strings.TrimSpace(s); trimmed != "" {
-					return trimmed, nil
+					return trimmed, oauth.EmailIdentity{}, nil
 				}
 			}
 		}
-		return "", fmt.Errorf("%w: claim %q", ErrClaimMissing, p.usernameClaim)
+		return "", oauth.EmailIdentity{}, fmt.Errorf("%w: claim %q", ErrClaimMissing, p.usernameClaim)
 	}
 }
 
@@ -211,7 +212,7 @@ func (p *Policy) Bind(requestedUsername string, claims *oauth.Claims) (Principal
 		return Principal{}, fmt.Errorf("%w: claims are nil", ErrClaimMissing)
 	}
 
-	resolved, err := p.resolveClaim(claims)
+	resolved, email, err := p.resolveClaim(claims)
 	if err != nil {
 		return Principal{}, err
 	}
@@ -220,7 +221,17 @@ func (p *Policy) Bind(requestedUsername string, claims *oauth.Claims) (Principal
 		return Principal{}, fmt.Errorf("%w: requested user %q does not match %s claim", ErrUsernameMismatch, RedactUsername(requestedUsername), p.usernameClaim)
 	}
 
-	if err := oauth.ValidateIdentityClaims(claims, p.claimPolicy); err != nil {
+	// For email binding, evaluate the generic policy against the same email
+	// and verification evidence that supplied the username. Keep the original
+	// claims intact for callers and preserve the existing sub/custom behavior.
+	policyClaims := claims
+	if p.usernameClaim == "email" {
+		projected := *claims
+		projected.Email = email.Email
+		projected.EmailVerified = email.EmailVerified
+		policyClaims = &projected
+	}
+	if err := oauth.ValidateIdentityClaims(policyClaims, p.claimPolicy); err != nil {
 		return Principal{}, err
 	}
 
@@ -232,6 +243,6 @@ func (p *Policy) Bind(requestedUsername string, claims *oauth.Claims) (Principal
 		Username: requestedUsername,
 		Issuer:   claims.Issuer,
 		Subject:  claims.Subject,
-		Email:    claims.Email,
+		Email:    policyClaims.Email,
 	}, nil
 }
