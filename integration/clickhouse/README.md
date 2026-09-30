@@ -43,7 +43,7 @@ pipeline, listener, lifecycle) that a pure `go test ./internal/ldap/profile`
 run cannot provide, on top of — not instead of — the profile package's own
 real-TCP black-box tests and its replay of every committed session under
 `internal/ldap/testdata/clickhouse-wire/**` (`internal/ldap/profile/replay_test.go`;
-see `CLAUDE.md`'s `internal/ldap/profile/` repo-map row and
+see `AGENTS.md`'s `internal/ldap/profile/` repo-map row and
 `docs/clickhouse-ldap-wire-profile.md` §11). Keep running the Docker gates
 here as before for any change to `cmd/ch-oauth-ldap`, `internal/ldap/profile`,
 or ClickHouse-facing config; a change confined to `internal/ldap/profile/**`

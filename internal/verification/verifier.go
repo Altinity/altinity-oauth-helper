@@ -206,7 +206,7 @@ func (v *Verifier) cachePositive(key string, result *Result) {
 // cacheKey hashes requestedUsername + NUL + token so a cached outcome can
 // never be replayed under a different requested username than the one it
 // was verified against — see internal/verification's package doc and
-// CLAUDE.md's cache-key-correctness rule. The full SHA-256 hex digest (not a
+// AGENTS.md's cache-key-correctness rule. The full SHA-256 hex digest (not a
 // prefix) is used as the key; the token itself is never used as, or embedded
 // in, the key material returned to any caller.
 func cacheKey(requestedUsername, token string) string {

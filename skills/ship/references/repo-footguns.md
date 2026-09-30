@@ -21,7 +21,7 @@ repo; when one bites anyway, update this file in the same change.
   below lists the exact five commands, so passing the local gate is necessary
   but not sufficient. There is no coverage floor enforced anywhere; write tests
   for new behavior on your own judgment, especially cache-key/identity-policy
-  edge cases (security-relevant surface — see `CLAUDE.md`).
+  edge cases (security-relevant surface — see `AGENTS.md`).
 - `cmd/ch-jwt-verify/verify_test.go` spins up its own in-process test IdP
   (`newTestIdP`, RSA-signed JWTs over an `httptest` JWKS server) rather than sharing a
   fixture with anything else — it's a self-contained unit test file, not a client of

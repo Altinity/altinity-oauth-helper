@@ -19,7 +19,7 @@
 #                     proving the check inspects expressions inside `run:`
 #                     comments);
 #   * §52  helm package + archive-content proof (test.sh/ci/ excluded);
-#   * §53  documentation checks across both READMEs, CLAUDE.md, and the
+#   * §53  documentation checks across both READMEs, AGENTS.md, and the
 #          (skip-if-absent, per amendment A6) repo-footguns.md;
 #   * §54  the standard Go gate (build/vet/test) plus cross-compilation;
 #   * §55  the OLD helm/ch-jwt-verify chart's lint/template smoke, proving
@@ -266,7 +266,7 @@ run_docs_checks() {
     local before=$GATE_FAILURES
     local chart_readme="$CHART_DIR/README.md"
     local root_readme="$REPO_ROOT/README.md"
-    local claude_md="$REPO_ROOT/CLAUDE.md"
+    local claude_md="$REPO_ROOT/AGENTS.md"
     local footguns="$REPO_ROOT/skills/ship/references/repo-footguns.md"
     local s
 
@@ -331,7 +331,7 @@ run_docs_checks() {
     assert_not_match "$chart_readme" 'the same tag always refers to the same manifest' F
     assert_not_match "$root_readme" 'the same tag always refers to the same manifest' F
 
-    note "docs: CLAUDE.md mentions of chart/image/gate/workflow"
+    note "docs: AGENTS.md mentions of chart/image/gate/workflow"
     assert_match "$claude_md" 'helm/ch-oauth-ldap/' F
     assert_match "$claude_md" 'Dockerfile.ch-oauth-ldap' F
     assert_match "$claude_md" 'build-ch-oauth-ldap.yml' F
@@ -416,7 +416,7 @@ run_old_chart_smoke
 # This gate's real invariant is narrower than "no Go changes": a
 # ch-oauth-ldap change must never touch the ch-jwt-verify SIDECAR surface,
 # since that sidecar is the only cryptographic gate on its auth path (see
-# CLAUDE.md's "Sidecar trust model is load-bearing"). It previously also
+# AGENTS.md's "Sidecar trust model is load-bearing"). It previously also
 # listed cmd/, internal/, third_party/, integration/, and .gitignore, which
 # was correct only for the phase-4 PR that introduced this gate (a chart-only
 # change with literally no Go diff) -- as a standing repository gate that set

@@ -7,7 +7,7 @@ description: Ship altinity-oauth-helper roadmap issues or phases end-to-end, aut
 
 Use only in the `altinity-oauth-helper` repository. Otherwise stop and say so.
 
-Follow `CLAUDE.md` (hard rules 1–5 and Working discipline) throughout.
+Follow `AGENTS.md` (hard rules 1–5 and Working discipline) throughout.
 
 You are the **coordinator**. You do not implement units yourself. You plan waves, spawn
 workers and reviewers, verify their output with your own commands, run every ChatGPT
@@ -453,7 +453,7 @@ The coding-agent prompt must contain, explicitly:
   branch, rerun the full local gate in that tree.
 - **Internal review budget** — the risk-based budget of cycle step 3: no reviewer for
   low-risk units; one targeted read-only reviewer (`model: "sonnet"`, boundary stated)
-  for medium/high, prompted with the unit's contract + CLAUDE.md's conventions. Real
+  for medium/high, prompted with the unit's contract + AGENTS.md's conventions. Real
   findings → back to the worker (`SendMessage`, branch checked out first) or a bounded
   fix agent; re-verify. Do not add generic per-unit review passes on top.
 - **High-risk pre-PR pass, in place of the old whole-run review.** With one unit per PR

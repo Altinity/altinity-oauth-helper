@@ -276,7 +276,7 @@ FALLBACK_NETWORKS_CREATED=0
 
 # bring_up_fixture_fallback re-creates the exact same four services on a
 # single pre-approved network (whatever $DOCKER_NETWORK already is on this
-# host — see CLAUDE.md's "Docker" section — default iso-altinity), then
+# host — see AGENTS.md's "Docker" section — default iso-altinity), then
 # reshapes that into the REAL auth-net/cluster-net topology with `docker
 # network connect`/`disconnect`, which this sandbox's Docker network
 # isolator allows even though it rejects creating/attaching a brand-new

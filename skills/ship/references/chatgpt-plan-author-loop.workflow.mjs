@@ -78,7 +78,7 @@ for (let pass = 1; pass <= 5; pass++) {
   }
 
   const review = await agent(
-    `Review the complete plan at ${runArgs.planFile} for ${label} against the ACTUAL repository, ${runArgs.contextFile}, CLAUDE.md, and skills/ship/references/per-issue-cycle.md step 1. Read-only. Return APPROVED only when the standalone plan fully satisfies the delivery contract and repository architecture. Return BLOCKED only for a concrete missing product or architecture decision that cannot be resolved from recorded sources. Otherwise return REVISE with every substantive, actionable finding. Cite plan sections and repo file:line evidence. ${READ_ONLY}`,
+    `Review the complete plan at ${runArgs.planFile} for ${label} against the ACTUAL repository, ${runArgs.contextFile}, AGENTS.md, and skills/ship/references/per-issue-cycle.md step 1. Read-only. Return APPROVED only when the standalone plan fully satisfies the delivery contract and repository architecture. Return BLOCKED only for a concrete missing product or architecture decision that cannot be resolved from recorded sources. Otherwise return REVISE with every substantive, actionable finding. Cite plan sections and repo file:line evidence. ${READ_ONLY}`,
     { label: `Fable review ${pass}`, phase: 'Review', schema: REVIEW_SCHEMA, model: 'fable', effort: 'high' },
   )
   if (!review) return { status: 'error', reason: 'Fable review agent died', pass, session, conversationUrl }
