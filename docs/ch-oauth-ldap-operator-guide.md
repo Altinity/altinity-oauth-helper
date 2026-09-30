@@ -193,6 +193,12 @@ identity:
   too. Disabling verification does not disable domain checks or permit
   ambiguous fallback emails. `sub` and explicitly named custom username
   claims retain their existing policy semantics.
+  When upgrading, IdP deployments using the fallback must emit the matching
+  namespaced verification claim; a top-level `email_verified: true` alone
+  no longer permits those identities. Multiple usable fallback emails also
+  stop authenticating. The sidecar's JSON `email` now reports the selected,
+  trimmed authentication email in email mode, including a namespaced fallback;
+  `sub` and explicit custom-claim modes retain the raw top-level email.
 - **Denied-user normalization is independent of `username_match`.**
   `denied_usernames` is always compared using trimmed, case-insensitive
   matching, regardless of the configured match mode — so `Default`, `

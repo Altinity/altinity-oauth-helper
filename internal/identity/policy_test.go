@@ -204,6 +204,11 @@ func TestBindNamespacedEmailUsesPairedVerification(t *testing.T) {
 				ClaimPolicy:   oauth.IdentityPolicy{RequireEmailVerified: true},
 			})
 			require.NoError(t, err)
+			before := *tc.claims
+			before.Extra = make(map[string]interface{}, len(tc.claims.Extra))
+			for key, value := range tc.claims.Extra {
+				before.Extra[key] = value
+			}
 			principal, err := p.Bind("alice@example.com", tc.claims)
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
@@ -211,9 +216,30 @@ func TestBindNamespacedEmailUsesPairedVerification(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, "alice@example.com", principal.Email)
 			}
-			require.Empty(t, tc.claims.Email, "binding must leave raw claims unchanged")
+			require.Equal(t, before, *tc.claims, "binding must leave all raw claims unchanged")
 		})
 	}
+}
+
+func TestBindDisablingVerificationKeepsDomainAndAmbiguityChecks(t *testing.T) {
+	t.Parallel()
+	p, err := NewPolicy(Config{
+		UsernameClaim: "email",
+		ClaimPolicy: oauth.IdentityPolicy{
+			RequireEmailVerified: false,
+			AllowedEmailDomains:  []string{"example.com"},
+		},
+	})
+	require.NoError(t, err)
+	_, err = p.Bind("alice@other.com", &oauth.Claims{Extra: map[string]interface{}{
+		"https://idp.example.com/email": "alice@other.com",
+	}})
+	require.ErrorIs(t, err, oauth.ErrUnauthorizedDomain)
+	_, err = p.Bind("alice@example.com", &oauth.Claims{Extra: map[string]interface{}{
+		"https://idp.example.com/email":   "alice@example.com",
+		"https://other.example.com/email": "alice@example.com",
+	}})
+	require.ErrorIs(t, err, oauth.ErrEmailClaimAmbiguous)
 }
 
 func TestBindTopLevelEmailKeepsVerificationPrecedence(t *testing.T) {

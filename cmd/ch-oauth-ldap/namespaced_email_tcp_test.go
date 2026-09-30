@@ -104,6 +104,10 @@ func TestLDAPNamespacedEmailRequiresSameNamespaceVerification(t *testing.T) {
 		{name: "same-namespace false despite top-level true", extra: map[string]any{
 			namespace + "email_verified": false, "email_verified": true,
 		}},
+		{name: "ambiguous namespaced emails", extra: map[string]any{
+			namespace + "email_verified":      true,
+			"https://other.example.com/email": email, "https://other.example.com/email_verified": true,
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := dialIssue67LDAP(t, listener.Addr().String())
