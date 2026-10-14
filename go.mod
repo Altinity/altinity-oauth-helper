@@ -7,7 +7,7 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.12.1
 	github.com/urfave/cli/v3 v3.13.0
-	golang.org/x/crypto v0.57.0
+	golang.org/x/crypto v0.58.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -23,5 +23,5 @@ require (
 	github.com/altinity/go-mcp-oauth-sdk v0.2.2-0.20260930164311-97e130ca08ec
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )
